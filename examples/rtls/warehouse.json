@@ -1,0 +1,40 @@
+{
+  "format": "sense_sim_layout",
+  "version": 3,
+  "objects": [
+    { "name": "cabinet_1", "asset": "D:/simready-assets/cabinet_drum_flammable_a02/simready_usd/sm_cabinet_drum_flammable_a02_01.usd", "translation": [6.0, 0.0, 2.5], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
+    { "name": "cabinet_2", "asset": "D:/simready-assets/cabinet_drum_flammable_a02/simready_usd/sm_cabinet_drum_flammable_a02_01.usd", "translation": [6.0, 0.0, 4.2], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
+    { "name": "cabinet_3", "asset": "D:/simready-assets/cabinet_drum_flammable_a02/simready_usd/sm_cabinet_drum_flammable_a02_01.usd", "translation": [6.0, 0.0, 5.9], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
+    { "name": "cabinet_4", "asset": "D:/simready-assets/cabinet_drum_flammable_a02/simready_usd/sm_cabinet_drum_flammable_a02_01.usd", "translation": [6.0, 0.0, 7.6], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
+    { "name": "cart_1", "asset": "D:/simready-assets/cart_mobile_a01/simready_usd/sm_cart_mobile_a01_01.usd", "translation": [2.0, 0.0, 8.3], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] }
+  ],
+  "rtls": {
+    "devices": [
+      { "id": "A1", "kind": "uwb_anchor", "profile": "uwb-anchor", "translation": [0.3, 2.6, 0.3] },
+      { "id": "A2", "kind": "uwb_anchor", "profile": "uwb-anchor", "translation": [11.7, 2.6, 0.3] },
+      { "id": "A3", "kind": "uwb_anchor", "profile": "uwb-anchor", "translation": [11.7, 2.6, 9.7] },
+      { "id": "A4", "kind": "uwb_anchor", "profile": "uwb-anchor", "translation": [0.3, 2.6, 9.7] },
+      { "id": "A5", "kind": "uwb_anchor", "profile": "uwb-anchor", "translation": [6.0, 2.8, 0.3] },
+      { "id": "A6", "kind": "uwb_anchor", "profile": "uwb-anchor", "translation": [6.0, 2.8, 9.7] },
+      { "id": "T1", "kind": "uwb_tag", "profile": "uwb-tag", "translation": [2.0, 1.2, 1.0],
+        "motion": { "type": "path", "points": [[2.0, 1.2, 1.0], [10.0, 1.2, 1.0], [10.0, 1.2, 9.0], [2.0, 1.2, 9.0]], "speed": 1.5, "ping_pong": false } },
+      { "id": "T2", "kind": "uwb_tag", "profile": "uwb-tag-tdoa", "translation": [9.0, 1.2, 5.0],
+        "motion": { "type": "wander", "center": [9.0, 1.2, 5.0], "radius": 2.5, "speed": 1.0 } },
+      { "id": "B1", "kind": "ble_node", "profile": "ble-beacon", "translation": [0.5, 2.4, 0.5] },
+      { "id": "B2", "kind": "ble_node", "profile": "ble-beacon", "translation": [5.0, 2.4, 0.5] },
+      { "id": "B3", "kind": "ble_node", "profile": "ble-beacon", "translation": [5.0, 2.4, 9.5] },
+      { "id": "B4", "kind": "ble_node", "profile": "ble-beacon", "translation": [0.5, 2.4, 9.5] },
+      { "id": "BT1", "kind": "ble_tag", "profile": "ble-tag", "translation": [2.5, 1.0, 5.0],
+        "motion": { "type": "wander", "center": [2.5, 1.0, 5.0], "radius": 2.0, "speed": 0.8 } },
+      { "id": "R1", "kind": "rfid_reader", "profile": "rfid-portal", "translation": [2.0, 1.5, 5.8], "rotation": [0.0, 1.0, 0.0, 0.0] },
+      { "id": "E1", "kind": "rfid_tag", "profile": "rfid-tag", "address": "3034257BF7194E4000001A85",
+        "translation": [2.0, 0.9, 8.3], "motion": { "type": "follow", "object": "cart_1", "offset": [0.0, 0.9, 0.0] } },
+      { "id": "E2", "kind": "rfid_tag", "profile": "rfid-tag", "translation": [2.3, 1.0, 7.2] },
+      { "id": "E3", "kind": "rfid_tag", "profile": "rfid-tag", "translation": [10.0, 1.0, 1.0] }
+    ],
+    "zones": [
+      { "name": "Dock", "min": [0.0, 0.0, 7.0], "max": [4.0, 2.5, 10.0], "capacity": 3 },
+      { "name": "Hazmat", "min": [5.0, 0.0, 1.5], "max": [7.0, 2.5, 8.5], "restricted": true }
+    ]
+  }
+}

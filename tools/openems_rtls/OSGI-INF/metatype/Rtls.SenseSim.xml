@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metatype:MetaData xmlns:metatype="http://www.osgi.org/xmlns/metatype/v1.4.0">
+  <OCD id="com.nextwaves.sensesim.rtls.Config" name="RTLS Sense Sim" description="Live UWB/BLE/RFID metrics written by the Sense Sim simulator (Nextwaves).">
+    <AD id="id" name="Component-ID" description="Unique ID of this Component" type="String" default="rtls0"/>
+    <AD id="alias" name="Alias" description="Human-readable name" type="String" default=""/>
+    <AD id="enabled" name="Is enabled?" description="Is this Component enabled?" type="Boolean" default="true"/>
+  </OCD>
+  <Designate factoryPid="Rtls.SenseSim">
+    <Object ocdref="com.nextwaves.sensesim.rtls.Config"/>
+  </Designate>
+</metatype:MetaData>

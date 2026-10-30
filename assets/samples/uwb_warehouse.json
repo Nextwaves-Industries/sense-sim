@@ -1,0 +1,3913 @@
+{
+    "format":  "sense_sim_layout",
+    "objects":  [
+                    {
+                        "asset":  "crate_plywood_b01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "crate_plywood_b01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            24.799999237060547,
+                                            0.0,
+                                            19.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "crate_plywood_b01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "crate_plywood_b01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            25.899999618530273,
+                                            0.0,
+                                            19.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "crate_plywood_b01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "crate_plywood_b01_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            24.799999237060547,
+                                            0.0,
+                                            20.700000762939453
+                                        ]
+                    },
+                    {
+                        "asset":  "chair_office_amf_black_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "chair_office_amf_black_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            30.0,
+                                            0.0,
+                                            24.5
+                                        ]
+                    },
+                    {
+                        "asset":  "chair_office_amf_black_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "chair_office_amf_black_a01_2",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            32.0,
+                                            0.0,
+                                            24.5
+                                        ]
+                    },
+                    {
+                        "asset":  "chair_office_amf_black_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "chair_office_amf_black_a01_3",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.0,
+                                            0.0,
+                                            24.5
+                                        ]
+                    },
+                    {
+                        "asset":  "fireExtinguisher_stand_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "fireExtinguisher_stand_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            18.200000762939453,
+                                            0.0,
+                                            19.0
+                                        ]
+                    },
+                    {
+                        "asset":  "fireExtinguisher_stand_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "fireExtinguisher_stand_a01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            0.4000000059604645,
+                                            0.0,
+                                            12.5
+                                        ]
+                    },
+                    {
+                        "asset":  "drum_steel_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "drum_steel_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.0,
+                                            0.0,
+                                            19.399999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "drum_steel_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "drum_steel_a01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.0,
+                                            0.0,
+                                            20.149999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "drum_steel_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "drum_steel_a01_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.75,
+                                            0.0,
+                                            19.399999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "drum_steel_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "drum_steel_a01_4",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.75,
+                                            0.0,
+                                            20.149999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "drum_steel_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "drum_steel_a01_5",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            35.5,
+                                            0.0,
+                                            19.399999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "drum_steel_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "drum_steel_a01_6",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            35.5,
+                                            0.0,
+                                            20.149999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.75,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_2",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.25,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            8.75,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_4",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.25,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_5",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            13.75,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_6",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            16.25,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_7",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            23.75,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_8",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            26.25,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_9",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.75,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_10",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.25,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_11",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            33.75,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_12",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            36.25,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_13",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.75,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_14",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.25,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_15",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            8.75,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_16",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.25,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_17",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            13.75,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_18",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            16.25,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_19",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            23.75,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_20",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            26.25,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_21",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.75,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_22",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.25,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_23",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            33.75,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a05_24",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            36.25,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_1",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.75,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.75,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_3",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.25,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_4",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.25,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_5",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            8.75,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_6",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            8.75,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_7",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.25,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_8",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.25,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_9",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            13.75,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_10",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            13.75,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_11",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            16.25,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_12",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            16.25,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_13",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            23.75,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_14",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            23.75,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_15",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            26.25,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_16",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            26.25,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_17",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.75,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_18",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.75,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_19",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.25,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_20",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.25,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_21",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            33.75,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_22",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            33.75,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_23",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            36.25,
+                                            0.0,
+                                            14.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_bulk_storage_a03",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_bulk_storage_a03_24",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            36.25,
+                                            0.0,
+                                            16.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.0,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.199999809265137,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            9.399999618530273,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_4",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            12.600000381469727,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_5",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            4.599999904632568,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_6",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            7.800000190734863,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_7",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.0,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a05",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a05_8",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            14.199999809265137,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_1",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.75,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.25,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_3",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            8.75,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_4",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.25,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_5",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            13.75,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_6",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            16.25,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_7",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            23.75,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_8",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            26.25,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_9",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.75,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_10",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.25,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_11",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            33.75,
+                                            0.0,
+                                            2.8399999141693115
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_12",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            36.25,
+                                            0.0,
+                                            4.159999847412109
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_13",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.75,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_14",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.25,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_15",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            8.75,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_16",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.25,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_17",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            13.75,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_18",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            16.25,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_19",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            23.75,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_20",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            26.25,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_21",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.75,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_22",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.25,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_23",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            33.75,
+                                            0.0,
+                                            10.15999984741211
+                                        ]
+                    },
+                    {
+                        "asset":  "rack_composition_a04",
+                        "joints":  [
+
+                                   ],
+                        "name":  "rack_composition_a04_24",
+                        "rotation":  [
+                                         0.0,
+                                         1.0,
+                                         0.0,
+                                         -4.3711388286737929E-08
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            36.25,
+                                            0.0,
+                                            8.84000015258789
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            4.599999904632568,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            7.800000190734863,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            11.0,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_4",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            14.199999809265137,
+                                            0.0,
+                                            20.5
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_5",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            3.0,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_6",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            6.199999809265137,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_7",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            9.399999618530273,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "pallet_assembly_a06",
+                        "joints":  [
+
+                                   ],
+                        "name":  "pallet_assembly_a06_8",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            12.600000381469727,
+                                            0.0,
+                                            22.299999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "barrier_gate_safetyDock_a02",
+                        "joints":  [
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "barrier_gate_safetyDock_a02_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            24.0,
+                                            0.0,
+                                            27.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "barrier_gate_safetyDock_a02",
+                        "joints":  [
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "barrier_gate_safetyDock_a02_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            29.0,
+                                            0.0,
+                                            27.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "barrier_gate_safetyDock_a02",
+                        "joints":  [
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "barrier_gate_safetyDock_a02_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.0,
+                                            0.0,
+                                            27.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "cart_mobile_a01",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "cart_mobile_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            8.0,
+                                            0.0,
+                                            6.5
+                                        ]
+                    },
+                    {
+                        "asset":  "cart_mobile_a01",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "cart_mobile_a01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.0,
+                                            0.0,
+                                            12.5
+                                        ]
+                    },
+                    {
+                        "asset":  "cabinet_drum_flammable_a02",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "cabinet_drum_flammable_a02_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            38.900001525878906,
+                                            0.0,
+                                            19.399999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "cabinet_drum_flammable_a02",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "cabinet_drum_flammable_a02_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            38.900001525878906,
+                                            0.0,
+                                            20.399999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "box_cardboard_large_a02",
+                        "joints":  [
+
+                                   ],
+                        "name":  "box_cardboard_large_a02_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            28.0,
+                                            0.0,
+                                            19.799999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "box_cardboard_large_a02",
+                        "joints":  [
+
+                                   ],
+                        "name":  "box_cardboard_large_a02_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            29.100000381469727,
+                                            0.0,
+                                            19.799999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "box_cardboard_large_a02",
+                        "joints":  [
+
+                                   ],
+                        "name":  "box_cardboard_large_a02_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            30.200000762939453,
+                                            0.0,
+                                            19.799999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "box_cardboard_large_a02",
+                        "joints":  [
+
+                                   ],
+                        "name":  "box_cardboard_large_a02_4",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.299999237060547,
+                                            0.0,
+                                            19.799999237060547
+                                        ]
+                    },
+                    {
+                        "asset":  "desk_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "desk_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.7071068286895752,
+                                         0.0,
+                                         0.7071068286895752
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            30.0,
+                                            0.0,
+                                            23.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "computer_monitor_office_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "computer_monitor_office_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            30.0,
+                                            1.0,
+                                            23.5
+                                        ]
+                    },
+                    {
+                        "asset":  "desk_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "desk_a01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.7071068286895752,
+                                         0.0,
+                                         0.7071068286895752
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            32.0,
+                                            0.0,
+                                            23.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "computer_monitor_office_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "computer_monitor_office_a01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            32.0,
+                                            1.0,
+                                            23.5
+                                        ]
+                    },
+                    {
+                        "asset":  "desk_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "desk_a01_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.7071068286895752,
+                                         0.0,
+                                         0.7071068286895752
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.0,
+                                            0.0,
+                                            23.600000381469727
+                                        ]
+                    },
+                    {
+                        "asset":  "computer_monitor_office_a01",
+                        "joints":  [
+
+                                   ],
+                        "name":  "computer_monitor_office_a01_3",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            34.0,
+                                            1.0,
+                                            23.5
+                                        ]
+                    },
+                    {
+                        "asset":  "cart_mobile_b01",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "cart_mobile_b01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            12.0,
+                                            0.0,
+                                            25.0
+                                        ]
+                    },
+                    {
+                        "asset":  "cart_mobile_b01",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "cart_mobile_b01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.7071068286895752,
+                                         0.0,
+                                         0.7071068286895752
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            31.0,
+                                            0.0,
+                                            17.399999618530273
+                                        ]
+                    },
+                    {
+                        "asset":  "construction_firstAidPoint_trolley_a01",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "construction_firstAidPoint_trolley_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.7071068286895752,
+                                         0.0,
+                                         0.7071068286895752
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            0.5,
+                                            0.0,
+                                            19.0
+                                        ]
+                    },
+                    {
+                        "asset":  "equipment_robot_trolley_a01",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "equipment_robot_trolley_a01_1",
+                        "rotation":  [
+                                         0.0,
+                                         0.0,
+                                         0.0,
+                                         1.0
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            20.0,
+                                            0.0,
+                                            24.0
+                                        ]
+                    },
+                    {
+                        "asset":  "equipment_robot_trolley_a01",
+                        "joints":  [
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0,
+                                       0.0
+                                   ],
+                        "name":  "equipment_robot_trolley_a01_2",
+                        "rotation":  [
+                                         0.0,
+                                         0.7071068286895752,
+                                         0.0,
+                                         0.7071068286895752
+                                     ],
+                        "scale":  [
+                                      1.0,
+                                      1.0,
+                                      1.0
+                                  ],
+                        "translation":  [
+                                            26.0,
+                                            0.0,
+                                            6.5
+                                        ]
+                    }
+                ],
+    "rtls":  {
+                 "devices":  [
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A1",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071067690849304,
+                                                      0.0,
+                                                      -0.7071067690849304
+                                                  ],
+                                     "translation":  [
+                                                         0.04999963939189911,
+                                                         2.5999999046325684,
+                                                         26.533336639404297
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A2",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071067690849304,
+                                                      0.7071067690849304,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         38.900001525878906,
+                                                         1.7709999084472656,
+                                                         20.399999618530273
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A3",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071067690849304,
+                                                      0.0,
+                                                      -0.7071067690849304
+                                                  ],
+                                     "translation":  [
+                                                         0.04999963939189911,
+                                                         2.5999999046325684,
+                                                         10.866666793823242
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A4",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071067690849304,
+                                                      0.7071067690849304,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         23.75,
+                                                         3.8488759994506836,
+                                                         10.15999984741211
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A5",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      1.0,
+                                                      0.0,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         16.25,
+                                                         2.5999999046325684,
+                                                         4.894424915313721
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A6",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071067690849304,
+                                                      0.0,
+                                                      -0.7071067690849304
+                                                  ],
+                                     "translation":  [
+                                                         0.04999963939189911,
+                                                         2.5999999046325684,
+                                                         7.733332633972168
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A7",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.0,
+                                                      0.0,
+                                                      1.0
+                                                  ],
+                                     "translation":  [
+                                                         28.75,
+                                                         2.5999999046325684,
+                                                         8.117241859436035
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A8",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      1.0,
+                                                      0.0,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         33.75,
+                                                         2.5999999046325684,
+                                                         4.882758140563965
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A9",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071067690849304,
+                                                      0.0,
+                                                      -0.7071067690849304
+                                                  ],
+                                     "translation":  [
+                                                         4.25,
+                                                         2.5999999046325684,
+                                                         28.299999237060547
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A10",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      1.0,
+                                                      0.0,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         38.46154022216797,
+                                                         2.5999999046325684,
+                                                         0.049999624490737915
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A11",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      1.0,
+                                                      0.0,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         20.0,
+                                                         2.5999999046325684,
+                                                         0.049999624490737915
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A12",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      1.0,
+                                                      0.0,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         7.692307472229004,
+                                                         2.5999999046325684,
+                                                         0.049999624490737915
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "A13",
+                                     "kind":  "uwb_anchor",
+                                     "motion":  {
+                                                    "type":  "static"
+                                                },
+                                     "profile":  "uwb-anchor",
+                                     "rotation":  [
+                                                      0.0,
+                                                      1.0,
+                                                      0.0,
+                                                      0.0
+                                                  ],
+                                     "translation":  [
+                                                         36.25,
+                                                         2.5999999046325684,
+                                                         10.882758140563965
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T1",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "object":  "cart_mobile_a01_1",
+                                                    "offset":  [
+                                                                   0.0,
+                                                                   0.7430548667907715,
+                                                                   0.0
+                                                               ],
+                                                    "type":  "follow"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.0,
+                                                      0.0,
+                                                      1.0
+                                                  ],
+                                     "translation":  [
+                                                         8.0,
+                                                         0.7430548667907715,
+                                                         6.5
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T2",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "object":  "cart_mobile_a01_2",
+                                                    "offset":  [
+                                                                   0.0,
+                                                                   0.7430548667907715,
+                                                                   0.0
+                                                               ],
+                                                    "type":  "follow"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.0,
+                                                      0.0,
+                                                      1.0
+                                                  ],
+                                     "translation":  [
+                                                         28.0,
+                                                         0.7430548667907715,
+                                                         12.5
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T3",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "object":  "cart_mobile_b01_1",
+                                                    "offset":  [
+                                                                   0.0,
+                                                                   0.9376010298728943,
+                                                                   0.0
+                                                               ],
+                                                    "type":  "follow"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.0,
+                                                      0.0,
+                                                      1.0
+                                                  ],
+                                     "translation":  [
+                                                         12.0,
+                                                         0.9376010298728943,
+                                                         25.0
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T4",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "object":  "cart_mobile_b01_2",
+                                                    "offset":  [
+                                                                   0.0,
+                                                                   0.9376010298728943,
+                                                                   0.0
+                                                               ],
+                                                    "type":  "follow"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071068286895752,
+                                                      0.0,
+                                                      0.7071068286895752
+                                                  ],
+                                     "translation":  [
+                                                         31.0,
+                                                         0.9376011490821838,
+                                                         17.399999618530273
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T5",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "object":  "construction_firstAidPoint_trolley_a01_1",
+                                                    "offset":  [
+                                                                   0.0,
+                                                                   1.8424456119537354,
+                                                                   0.0
+                                                               ],
+                                                    "type":  "follow"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071068286895752,
+                                                      0.0,
+                                                      0.7071068286895752
+                                                  ],
+                                     "translation":  [
+                                                         0.5,
+                                                         1.8424458503723145,
+                                                         19.0
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T6",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "object":  "equipment_robot_trolley_a01_1",
+                                                    "offset":  [
+                                                                   0.0,
+                                                                   0.34049513936042786,
+                                                                   0.0
+                                                               ],
+                                                    "type":  "follow"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.0,
+                                                      0.0,
+                                                      1.0
+                                                  ],
+                                     "translation":  [
+                                                         20.0,
+                                                         0.34049513936042786,
+                                                         24.0
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T7",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "object":  "equipment_robot_trolley_a01_2",
+                                                    "offset":  [
+                                                                   0.0,
+                                                                   0.34049490094184875,
+                                                                   0.0
+                                                               ],
+                                                    "type":  "follow"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.7071068286895752,
+                                                      0.0,
+                                                      0.7071068286895752
+                                                  ],
+                                     "translation":  [
+                                                         26.0,
+                                                         0.34049496054649353,
+                                                         6.5
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T8",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "ping_pong":  false,
+                                                    "points":  [
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       0.75
+                                                                   ],
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       17.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       18.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       24.75
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       25.25
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       26.25
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       20.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       19.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       12.25
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       11.75
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       1.75
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       1.25
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       0.75
+                                                                   ]
+                                                               ],
+                                                    "speed":  1.2999999523162842,
+                                                    "type":  "path"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.8361495733261108,
+                                                      0.0,
+                                                      -0.5485016107559204
+                                                  ],
+                                     "translation":  [
+                                                         36.52320861816406,
+                                                         1.2000000476837158,
+                                                         16.283082962036133
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T9",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "ping_pong":  false,
+                                                    "points":  [
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       0.75
+                                                                   ],
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       17.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       18.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       24.75
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       25.25
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       26.25
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       20.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       19.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       12.25
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       11.75
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       1.75
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       1.25
+                                                                   ],
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       0.75
+                                                                   ]
+                                                               ],
+                                                    "speed":  1.5,
+                                                    "type":  "path"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.6537901163101196,
+                                                      0.0,
+                                                      0.7566758990287781
+                                                  ],
+                                     "translation":  [
+                                                         19.571144104003906,
+                                                         1.2000000476837158,
+                                                         23.510488510131836
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T10",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "ping_pong":  false,
+                                                    "points":  [
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       26.75
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       20.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       19.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       12.25
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       11.75
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       1.75
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       1.25
+                                                                   ],
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       17.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       18.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       24.75
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       25.25
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       26.25
+                                                                   ],
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       26.75
+                                                                   ]
+                                                               ],
+                                                    "speed":  1.6999999284744263,
+                                                    "type":  "path"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.0,
+                                                      0.0,
+                                                      1.0
+                                                  ],
+                                     "translation":  [
+                                                         1.25,
+                                                         1.2000000476837158,
+                                                         8.842071533203125
+                                                     ]
+                                 },
+                                 {
+                                     "address":  "",
+                                     "auto":  true,
+                                     "enabled":  true,
+                                     "id":  "T11",
+                                     "kind":  "uwb_tag",
+                                     "motion":  {
+                                                    "ping_pong":  false,
+                                                    "points":  [
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       26.75
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       20.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       19.75
+                                                                   ],
+                                                                   [
+                                                                       1.75,
+                                                                       1.2000000476837158,
+                                                                       12.25
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       11.75
+                                                                   ],
+                                                                   [
+                                                                       1.25,
+                                                                       1.2000000476837158,
+                                                                       1.75
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       1.25
+                                                                   ],
+                                                                   [
+                                                                       38.75,
+                                                                       1.2000000476837158,
+                                                                       17.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       18.25
+                                                                   ],
+                                                                   [
+                                                                       37.75,
+                                                                       1.2000000476837158,
+                                                                       24.75
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       25.25
+                                                                   ],
+                                                                   [
+                                                                       38.25,
+                                                                       1.2000000476837158,
+                                                                       26.25
+                                                                   ],
+                                                                   [
+                                                                       0.75,
+                                                                       1.2000000476837158,
+                                                                       26.75
+                                                                   ]
+                                                               ],
+                                                    "speed":  1.899999976158142,
+                                                    "type":  "path"
+                                                },
+                                     "profile":  "uwb-tag",
+                                     "rotation":  [
+                                                      0.0,
+                                                      0.8330836892127991,
+                                                      0.0,
+                                                      -0.5531468987464905
+                                                  ],
+                                     "translation":  [
+                                                         29.01784896850586,
+                                                         1.2000000476837158,
+                                                         13.152253150939941
+                                                     ]
+                                 }
+                             ],
+                 "zones":  [
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               37.97724914550781,
+                                               4.028876304626465,
+                                               11.314425468444824
+                                           ],
+                                   "min":  [
+                                               22.02275276184082,
+                                               0.0,
+                                               1.6855745315551758
+                                           ],
+                                   "name":  "Area 1",
+                                   "restricted":  false
+                               },
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               37.97724914550781,
+                                               2.731109142303467,
+                                               18.394052505493164
+                                           ],
+                                   "min":  [
+                                               22.02275276184082,
+                                               0.0,
+                                               13.727017402648926
+                                           ],
+                                   "name":  "Area 2",
+                                   "restricted":  false
+                               },
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               17.97724723815918,
+                                               4.028876304626465,
+                                               11.314425468444824
+                                           ],
+                                   "min":  [
+                                               2.022752523422241,
+                                               0.0,
+                                               7.685574531555176
+                                           ],
+                                   "name":  "Area 3",
+                                   "restricted":  false
+                               },
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               17.97724723815918,
+                                               4.028876304626465,
+                                               5.314424991607666
+                                           ],
+                                   "min":  [
+                                               2.022752523422241,
+                                               0.0,
+                                               1.6855745315551758
+                                           ],
+                                   "name":  "Area 4",
+                                   "restricted":  false
+                               },
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               17.97724723815918,
+                                               2.731109142303467,
+                                               17.272981643676758
+                                           ],
+                                   "min":  [
+                                               2.022752523422241,
+                                               0.0,
+                                               13.727017402648926
+                                           ],
+                                   "name":  "Area 5",
+                                   "restricted":  false
+                               },
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               15.29214859008789,
+                                               2.5,
+                                               23.26418113708496
+                                           ],
+                                   "min":  [
+                                               1.907850742340088,
+                                               0.0,
+                                               19.535818099975586
+                                           ],
+                                   "name":  "Area 6",
+                                   "restricted":  false
+                               },
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               35.4010009765625,
+                                               2.5,
+                                               25.286142349243164
+                                           ],
+                                   "min":  [
+                                               28.599000930786133,
+                                               0.0,
+                                               22.69900131225586
+                                           ],
+                                   "name":  "Area 7",
+                                   "restricted":  false
+                               },
+                               {
+                                   "auto":  true,
+                                   "capacity":  0,
+                                   "max":  [
+                                               32.30175018310547,
+                                               2.5,
+                                               20.90111541748047
+                                           ],
+                                   "min":  [
+                                               26.998249053955078,
+                                               0.0,
+                                               18.698883056640625
+                                           ],
+                                   "name":  "Area 8",
+                                   "restricted":  false
+                               }
+                           ]
+             },
+    "version":  3
+}

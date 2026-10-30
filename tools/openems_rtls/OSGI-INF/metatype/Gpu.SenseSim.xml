@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metatype:MetaData xmlns:metatype="http://www.osgi.org/xmlns/metatype/v1.4.0">
+  <OCD id="com.nextwaves.sensesim.gpu.Config" name="GPU Sense Sim" description="Graphics card power and telemetry of the PC running Sense Sim (Nextwaves), as a consumption meter.">
+    <AD id="id" name="Component-ID" description="Unique ID of this Component" type="String" default="gpu0"/>
+    <AD id="alias" name="Alias" description="Human-readable name" type="String" default=""/>
+    <AD id="enabled" name="Is enabled?" description="Is this Component enabled?" type="Boolean" default="true"/>
+  </OCD>
+  <Designate factoryPid="Gpu.SenseSim">
+    <Object ocdref="com.nextwaves.sensesim.gpu.Config"/>
+  </Designate>
+</metatype:MetaData>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Sense Sim: flat spatial frames on a violet desktop-app tile. -->
+  <rect x="2" y="2" width="252" height="252" rx="56" fill="#7152E8"/>
+  <g transform="translate(-32 -32) scale(1.25)" fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M148 100 V82 Q148 68 134 68 H82 Q68 68 68 82 V134 Q68 148 82 148 H100"/>
+    <path d="M108 156 V174 Q108 188 122 188 H174 Q188 188 188 174 V122 Q188 108 174 108 H156"/>
+    <path d="M108 132 V122 Q108 108 122 108 H132 Q148 108 148 124 V134 Q148 148 134 148 H124 Q108 148 108 132 Z"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scr:component xmlns:scr="http://www.osgi.org/xmlns/scr/v1.4.0" name="Rtls.SenseSim" configuration-policy="require" immediate="true" activate="activate" deactivate="deactivate">
+  <implementation class="com.nextwaves.sensesim.rtls.RtlsSenseSimImpl"/>
+  <property name="event.topics" type="String">io/openems/edge/cycle/BEFORE_CONTROLLERS</property>
+  <service>
+    <provide interface="io.openems.edge.common.component.OpenemsComponent"/>
+    <provide interface="org.osgi.service.event.EventHandler"/>
+  </service>
+</scr:component>

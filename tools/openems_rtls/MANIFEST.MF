@@ -1,0 +1,15 @@
+Manifest-Version: 1.0
+Bundle-ManifestVersion: 2
+Bundle-SymbolicName: com.nextwaves.sensesim.rtls
+Bundle-Name: Sense Sim RTLS and GPU for OpenEMS
+Bundle-Vendor: Nextwaves
+Bundle-Version: 1.4.0
+Import-Package: io.openems.common.channel,io.openems.common.exceptions,
+ io.openems.common.function,io.openems.common.types,io.openems.edge.common
+ .channel,io.openems.edge.common.channel.internal,io.openems.edge.common.c
+ hannel.value,io.openems.edge.common.component,io.openems.edge.meter.api,o
+ rg.osgi.service.component,org.osgi.service.event
+Service-Component: OSGI-INF/rtls.xml,OSGI-INF/gpu.xml
+Require-Capability: osgi.extender;filter:="(&(osgi.extender=osgi.component
+ )(version>=1.4.0)(!(version>=2.0.0)))",osgi.ee;filter:="(&(osgi.ee=JavaSE
+ )(version=21))"

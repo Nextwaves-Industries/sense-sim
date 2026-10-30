@@ -1,0 +1,19 @@
+# Build output
+/target
+
+# Installers (built by installer/SenseSim.iss; publish as release assets)
+/dist
+
+# Scratch output: logs, generated images, reports
+/output
+*.log
+
+# Debug dumps
+/devs.json
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

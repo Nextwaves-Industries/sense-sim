@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 256" width="760" height="256">
+  <image href="logo.svg" x="0" y="0" width="256" height="256"/>
+  <text x="290" y="150" font-family="Segoe UI" font-weight="700" font-size="104" fill="#e8edf4">Sense</text>
+  <text x="590" y="150" font-family="Segoe UI" font-weight="300" font-size="104" fill="#A997F5">Sim</text>
+  <text x="294" y="200" font-family="Segoe UI" font-size="27" fill="#8a97a8" letter-spacing="3">SIMREADY ASSET STUDIO</text>
+</svg>
+
