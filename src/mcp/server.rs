@@ -61,10 +61,17 @@ fn origin_allowed(origin: &str) -> bool {
 }
 
 /// Twin tools expose real factory data, so they stay out of reach of MCP clients, including
-/// the listing. `tools/call` runs any name it's given, which makes the check here the
-/// boundary: this is the only caller that marks a tool call as coming from MCP.
-fn mcp_may_call(tool: &str) -> bool {
-    !tool.starts_with("twin_")
+/// the listing. So do tools that aim the app at outside systems: this port has no login, so
+/// any local process could otherwise point the plant outputs (webhook, Modbus, UDP, OpenEMS
+/// writes) wherever it likes. `tools/call` runs any name it's given, which makes the check
+/// here the boundary: this is the only caller that marks a tool call as coming from MCP.
+pub(crate) fn mcp_may_list(tool: &str) -> bool {
+    !tool.starts_with("twin_") && !matches!(tool, "rtls_configure_outputs")
+}
+
+/// As [`mcp_may_list`], for one call: `rtls_openems` may report status but not start a server.
+fn mcp_may_call(tool: &str, args: &Value) -> bool {
+    mcp_may_list(tool) && !(tool == "rtls_openems" && args["action"] == "start")
 }
 
 fn handle(mut req: tiny_http::Request, tx: &Sender<ToolJob>) {
@@ -134,17 +141,17 @@ fn dispatch(m: &Value, tx: &Sender<ToolJob>, session: &mut Option<String>) -> Op
         "tools/list" => {
             let list: Vec<Value> = tools::tool_defs(true)
                 .into_iter()
-                .filter(|t| mcp_may_call(&t.name))
+                .filter(|t| mcp_may_list(&t.name))
                 .map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": t.schema }))
                 .collect();
             ok(id, json!({ "tools": list }))
         }
         "tools/call" => {
             let name = m["params"]["name"].as_str().unwrap_or("");
-            if !mcp_may_call(name) {
+            let args = m["params"].get("arguments").cloned().unwrap_or(json!({}));
+            if !mcp_may_call(name, &args) {
                 return Some(ok(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't available over MCP") }], "isError": true })));
             }
-            let args = m["params"].get("arguments").cloned().unwrap_or(json!({}));
             let out = tools::call(tx, name, args, true, None);
             ok(id, json!({ "content": out.content.iter().map(content_json).collect::<Vec<_>>(), "isError": out.is_error }))
         }
@@ -195,8 +202,17 @@ mod tests {
 
     #[test]
     fn twin_tools_are_off_limits_and_others_are_not() {
-        assert!(!mcp_may_call("twin_summary"));
-        assert!(mcp_may_call("place_objects"));
+        assert!(!mcp_may_call("twin_summary", &json!({})));
+        assert!(mcp_may_call("place_objects", &json!({})));
+    }
+
+    #[test]
+    fn outside_systems_cant_be_aimed_at_over_mcp() {
+        assert!(!mcp_may_list("rtls_configure_outputs"));
+        assert!(!mcp_may_call("rtls_configure_outputs", &json!({ "webhook": "http://x" })));
+        assert!(!mcp_may_call("rtls_openems", &json!({ "action": "start" })));
+        assert!(mcp_may_call("rtls_openems", &json!({ "action": "status" })));
+        assert!(mcp_may_list("rtls_openems"), "status stays readable");
     }
 
     /// Sends one raw HTTP request to a real server and returns (status, body).

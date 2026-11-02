@@ -99,6 +99,8 @@ pub struct Agent {
     pub plan: Vec<(String, String)>,
     cancel: Arc<AtomicBool>,
     events: Option<Receiver<Event>>,
+    /// New chat was pressed during a run: what that run still reports belongs to the old chat.
+    discard_run: bool,
 }
 
 impl Agent {
@@ -126,6 +128,7 @@ impl Agent {
             plan: Vec::new(),
             cancel: Arc::default(),
             events: None,
+            discard_run: false,
         }
     }
 
@@ -211,8 +214,8 @@ impl Agent {
         if text.is_empty() && attachments.is_empty() {
             return;
         }
-        let provider = match llm::make_provider(self.config.provider(), &self.config.effort) {
-            Ok(p) => p,
+        let provider: Arc<dyn llm::Provider> = match llm::make_provider(self.config.provider(), &self.config.effort) {
+            Ok(p) => Arc::from(p),
             Err(e) => {
                 self.transcript.push(ChatItem::Error(format!("{e:#}")));
                 self.attachments = attachments;
@@ -220,6 +223,10 @@ impl Agent {
             }
         };
         self.input.clear();
+        // A finished checklist has done its job; one with open steps may still be wanted.
+        if self.plan.iter().all(|(_, status)| !matches!(status.as_str(), "pending" | "in_progress")) {
+            self.plan.clear();
+        }
         let mut content = Vec::new();
         for id in &attachments {
             if let Some((data, mime)) = images::get(id) {
@@ -236,7 +243,8 @@ impl Agent {
             self.transcript.push(ChatItem::Info(format!("Knowledge attached: {}", c.headings.join("; "))));
         }
 
-        let mut history = self.history.clone();
+        let before = self.history.clone();
+        let mut history = before.clone();
         history.push(Message::user(content));
         let mut tool_defs = tools::tool_defs(false);
         tool_defs.extend(self.mcp.tool_defs());
@@ -245,7 +253,15 @@ impl Agent {
         self.cancel = Arc::default();
         self.running = true;
         let (tx, mcp, cancel, steps) = (bridge.tx.clone(), self.mcp.clone(), self.cancel.clone(), self.config.max_steps);
-        std::thread::spawn(move || worker(provider, steps, history, tool_defs, tx, mcp, ev_tx, cancel));
+        std::thread::spawn(move || {
+            let done = ev_tx.clone();
+            let run = std::panic::AssertUnwindSafe(move || worker(provider, steps, history, tool_defs, tx, mcp, ev_tx, cancel));
+            // Without this the panel would say "Working" for ever, with Send disabled.
+            if let Err(panic) = std::panic::catch_unwind(run) {
+                let why = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_else(|| "no message".into());
+                let _ = done.send(Event::Finished { history: before, error: Some(format!("The assistant stopped on an internal error, and this turn's work isn't in its memory: {why}")) });
+            }
+        });
     }
 
     pub fn stop(&mut self) {
@@ -260,15 +276,37 @@ impl Agent {
 
     pub fn new_chat(&mut self) {
         self.stop();
+        // The run ends on its own shortly; its history must not come back into this chat.
+        self.discard_run = self.running;
         self.history.clear();
         self.transcript.clear();
         self.questions.clear();
+        self.plan.clear();
+    }
+}
+
+/// A model call that Stop can interrupt. The request can't be cancelled, so it finishes on its
+/// own thread and its reply is dropped. `None` means the user stopped.
+fn complete_cancellable(provider: &Arc<dyn llm::Provider>, system: &'static str, history: &[Message], tools: &[llm::ToolDef], cancel: &AtomicBool) -> anyhow::Result<Option<Message>> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let (p, h, t) = (provider.clone(), history.to_vec(), tools.to_vec());
+    std::thread::spawn(move || {
+        let _ = tx.send(p.complete(system, &h, &t));
+    });
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(reply) => return reply.map(Some),
+            // Its thread panicked: the one place a parse bug would otherwise end the whole run.
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => anyhow::bail!("the model call ended without a reply"),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) if cancel.load(Ordering::Relaxed) => return Ok(None),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn worker(
-    provider: Box<dyn llm::Provider>,
+    provider: Arc<dyn llm::Provider>,
     max_steps: usize,
     mut history: Vec<Message>,
     mut tool_defs: Vec<llm::ToolDef>,
@@ -301,8 +339,12 @@ fn worker(
             error = Some(format!("stopped after {max_steps} steps (raise max_steps in agent.json)"));
             break;
         }
-        let msg = match provider.complete(prompt::SYSTEM, &history, &tool_defs) {
-            Ok(m) => m,
+        let msg = match complete_cancellable(&provider, prompt::SYSTEM, &history, &tool_defs, &cancel) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                error = Some("stopped".to_string());
+                break;
+            }
             Err(e) => {
                 error = Some(format!("{e:#}"));
                 break;
@@ -727,6 +769,15 @@ fn pump_events(mut agent: ResMut<Agent>) {
     agent.poll_background();
     let Some(rx) = agent.events.clone() else { return };
     for e in rx.try_iter() {
+        // New chat was pressed: only the end of that run matters, so Send works again.
+        if agent.discard_run {
+            if matches!(e, Event::Finished { .. }) {
+                agent.discard_run = false;
+                agent.running = false;
+                agent.events = None;
+            }
+            continue;
+        }
         match e {
             Event::Assistant(t) => agent.transcript.push(ChatItem::Assistant(t)),
             Event::ToolStart { name, input } => {
@@ -943,5 +994,87 @@ mod rtls_check_by_tech {
         let run = json!({ "cep95_m": 3.7, "by_tech": { "uwb": { "cep95_m": 0.48 } } });
         c.observe("rtls_run", &json!({}), &run.to_string());
         assert!(c.unmet.as_deref().unwrap().contains("UWB CEP95 48 cm"));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::*;
+
+    struct Slow;
+    impl llm::Provider for Slow {
+        fn complete(&self, _: &str, _: &[Message], _: &[llm::ToolDef]) -> anyhow::Result<Message> {
+            std::thread::sleep(Duration::from_secs(30));
+            anyhow::bail!("should have been abandoned")
+        }
+    }
+
+    struct Panics;
+    impl llm::Provider for Panics {
+        fn complete(&self, _: &str, _: &[Message], _: &[llm::ToolDef]) -> anyhow::Result<Message> {
+            panic!("a parse bug");
+        }
+    }
+
+    #[test]
+    fn stop_interrupts_a_model_call_that_is_still_waiting() {
+        let provider: Arc<dyn llm::Provider> = Arc::new(Slow);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stopper = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            stopper.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        assert!(complete_cancellable(&provider, "s", &[], &[], &cancel).unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_panic_in_a_model_call_is_an_error_not_a_hang() {
+        let provider: Arc<dyn llm::Provider> = Arc::new(Panics);
+        let e = complete_cancellable(&provider, "s", &[], &[], &AtomicBool::new(false)).unwrap_err().to_string();
+        assert!(e.contains("without a reply"), "{e}");
+    }
+
+    #[test]
+    fn new_chat_during_a_run_doesnt_get_the_old_history_back() {
+        let mut agent = Agent::new(AgentConfig::default());
+        let (tx, rx) = unbounded();
+        agent.events = Some(rx);
+        agent.running = true;
+        agent.plan = vec![("step".into(), "in_progress".into())];
+        agent.new_chat();
+        assert!(agent.plan.is_empty());
+
+        tx.send(Event::Assistant("from the old chat".into())).unwrap();
+        tx.send(Event::Finished { history: vec![Message::user(vec![Block::Text("old".into())])], error: Some("stopped".into()) }).unwrap();
+        let mut world = World::new();
+        world.insert_resource(agent);
+        world.run_system_once(pump_events).unwrap();
+
+        let agent = world.resource::<Agent>();
+        assert!(agent.history.is_empty(), "the old run's history came back");
+        assert!(agent.transcript.is_empty(), "the old run wrote into the new chat");
+        assert!(!agent.running, "Send has to work again");
+        assert!(!agent.discard_run);
+    }
+
+    #[test]
+    fn a_normal_finish_keeps_its_history() {
+        let mut agent = Agent::new(AgentConfig::default());
+        let (tx, rx) = unbounded();
+        agent.events = Some(rx);
+        agent.running = true;
+        tx.send(Event::Finished { history: vec![Message::user(vec![Block::Text("kept".into())])], error: None }).unwrap();
+        let mut world = World::new();
+        world.insert_resource(agent);
+        world.run_system_once(pump_events).unwrap();
+        assert_eq!(world.resource::<Agent>().history.len(), 1);
     }
 }

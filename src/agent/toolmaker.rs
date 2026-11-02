@@ -305,6 +305,12 @@ fn sample(p: &Value) -> Value {
     }
 }
 
+/// Tools a macro may never run. MCP clients can define and call macros, and a step isn't marked
+/// as coming from them, so without this a macro would reach what the MCP server refuses.
+fn barred_from_macros(tool: &str, input: &Value) -> bool {
+    tool.starts_with("twin_") || tool == "rtls_configure_outputs" || (tool == "rtls_openems" && input["action"] == "start")
+}
+
 /// Validates and saves a tool. Returns its callable name.
 pub fn define(input: &Value, known_tools: &[ToolDef]) -> Result<String> {
     let name = super::assetgen::slug(input["name"].as_str().unwrap_or_default());
@@ -325,7 +331,10 @@ pub fn define(input: &Value, known_tools: &[ToolDef]) -> Result<String> {
         if !known_tools.iter().any(|d| d.name == tool) {
             bail!("step {n}: unknown tool '{tool}'");
         }
-        expand_root(&st["input"], &vars).map_err(|e| anyhow!("step {n}: {e}"))?;
+        let call = expand_root(&st["input"], &vars).map_err(|e| anyhow!("step {n}: {e}"))?;
+        if barred_from_macros(tool, &call) {
+            bail!("step {n}: a made tool can't call {tool} this way; call it directly");
+        }
     }
     let spec = json!({ "name": name, "description": input["description"], "parameters": params, "steps": steps });
     std::fs::create_dir_all(dir())?;
@@ -361,6 +370,11 @@ pub fn run(name: &str, input: &Value, tx: Sender<ToolJob>) -> ToolOutput {
             Ok(c) => c,
             Err(e) => return ToolOutput::err(format!("{name}: step {n} ({tool}): {e:#}")),
         };
+        // Saved files can be older than this rule, or written by hand. An action can also
+        // come from a parameter, so this looks at the expanded call.
+        if barred_from_macros(tool, &call) {
+            return ToolOutput::err(format!("{name}: step {n}: a made tool can't call {tool}"));
+        }
         let out = tools::call(&tx, tool, call, false, None);
         content.push(Block::Text(format!("step {n} ({tool}):")));
         let failed = out.is_error;
@@ -379,6 +393,23 @@ mod tests {
 
     fn vars(v: Value) -> Vars {
         v.as_object().unwrap().iter().map(|(k, x)| (k.clone(), x.clone())).collect()
+    }
+
+    #[test]
+    fn macros_cant_reach_what_the_mcp_server_refuses() {
+        let known: Vec<ToolDef> = ["rtls_configure_outputs", "rtls_openems"].iter().map(|n| ToolDef { name: (*n).into(), description: String::new(), schema: json!({}) }).collect();
+        for step in [json!({ "tool": "rtls_configure_outputs", "input": { "webhook": "http://x" } }), json!({ "tool": "rtls_openems", "input": { "action": "start" } })] {
+            let spec = json!({ "name": "aim_outputs", "description": "d", "steps": [step] });
+            let e = define(&spec, &known).unwrap_err().to_string();
+            assert!(e.contains("can't call"), "{e}");
+        }
+        assert!(!dir().join("aim_outputs.json").exists(), "a refused tool isn't saved");
+        // The action can arrive as a parameter, so it's judged after expansion.
+        let call = expand_root(&json!({ "action": "${a}" }), &vars(json!({ "a": "start" }))).unwrap();
+        assert!(barred_from_macros("rtls_openems", &call));
+        assert!(!barred_from_macros("rtls_openems", &json!({ "action": "status" })));
+        assert!(barred_from_macros("twin_summary", &json!({})));
+        assert!(!barred_from_macros("place_objects", &json!({})));
     }
 
     #[test]

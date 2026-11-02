@@ -1430,6 +1430,9 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             return None;
         }
         "site_import_bim" => return import_bim(world, i, reply),
+        // Before the outcome recipes, which claim the rest of the `design_` prefix.
+        #[cfg(feature = "design")]
+        other if crate::sim::tools::is_tool(other) => crate::sim::tools::start(world, other, i),
         other if crate::outcomes::tools::is_tool(other) => match crate::outcomes::tools::start(world, other, i) {
             Some(out) => out,
             None => ToolOutput::err(format!("unknown tool '{other}'")),
@@ -1448,8 +1451,6 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             None => ToolOutput::err(format!("unknown tool '{other}'")),
         },
         other if super::knowledge::is_tool(other) => super::knowledge::run(other, i),
-        #[cfg(feature = "design")]
-        other if other.starts_with("design_") || other.starts_with("sim_") => crate::sim::tools::start(world, other, i),
         other => ToolOutput::err(format!("unknown tool '{other}'")),
     };
     Some(out)
@@ -2029,5 +2030,43 @@ mod lock_tests {
         let of = |n: &str| v["objects"].as_array().unwrap().iter().find(|o| o["name"] == n).unwrap()["locked"].clone();
         assert_eq!(of("kept"), json!(true));
         assert_eq!(of("free"), Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    /// Runs the real dispatch on an empty world. A handler that wants a missing resource panics,
+    /// which still proves the call reached it; only a fall through every arm says "unknown tool".
+    fn reaches_a_handler(name: &str) -> bool {
+        let mut world = World::new();
+        let (tx, _rx) = unbounded();
+        let job = ToolJob { name: name.into(), input: json!({}), reply: tx, from_mcp: false };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(&mut world, job))) {
+            Ok(Some(out)) => !(out.is_error && out.summary().starts_with("unknown tool")),
+            Ok(None) | Err(_) => true,
+        }
+    }
+
+    #[test]
+    fn every_listed_tool_reaches_a_handler() {
+        assert!(!reaches_a_handler("no_such_tool"), "the check must be able to fail");
+        let lost: Vec<String> = tool_defs(true).into_iter().map(|d| d.name).filter(|n| !reaches_a_handler(n)).collect();
+        assert!(lost.is_empty(), "listed but unreachable: {lost:?}");
+    }
+
+    /// All six failed from the assistant: the outcome recipes claimed the `design_` prefix first.
+    #[cfg(feature = "design")]
+    #[test]
+    fn cad_tools_arent_taken_for_outcome_recipes() {
+        for name in ["design_commands", "design_run", "design_bodies", "design_faces", "design_show", "design_send_to_scene"] {
+            assert!(crate::sim::tools::is_tool(name), "{name}");
+            assert!(tool_defs(false).iter().any(|d| d.name == name), "{name} is still offered");
+            assert!(reaches_a_handler(name), "{name}");
+        }
+        for name in ["design_job", "design_shelf", "design_tag", "site_trace"] {
+            assert!(!crate::sim::tools::is_tool(name), "{name}");
+        }
     }
 }

@@ -654,7 +654,7 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
                 }
             });
         });
-        theme::setting_row(ui, "Max steps", "Tool calls per request before it stops", |ui| {
+        theme::setting_row(ui, "Max steps", "Model calls per request before it stops", |ui| {
             changed |= ui.add(egui::DragValue::new(&mut cfg.max_steps).range(5..=300)).lost_focus();
         });
     }

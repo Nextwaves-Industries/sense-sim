@@ -339,8 +339,10 @@ mod tests {
         let url = crate::mcp::server::start(18765, tx).unwrap();
         let cfg = McpServerCfg { url, enabled: true, ..Default::default() };
         let server = connect("self", &cfg).unwrap();
-        assert_eq!(server.tools.len(), crate::agent::tools::tool_defs(true).len());
+        let offered = crate::agent::tools::tool_defs(true).iter().filter(|d| crate::mcp::server::mcp_may_list(&d.name)).count();
+        assert_eq!(server.tools.len(), offered);
         assert!(server.tools.iter().any(|t| t.0 == "self__place_objects" && t.1 == "place_objects"));
+        assert!(!server.tools.iter().any(|t| t.1 == "rtls_configure_outputs"), "aiming plant outputs stays out of the listing");
         let r = server.transport.request("ping", json!({}), Duration::from_secs(5)).unwrap();
         assert!(r.is_object());
         assert!(server.transport.request("nope", json!({}), Duration::from_secs(5)).is_err());

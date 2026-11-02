@@ -308,6 +308,12 @@ fn probe(set: &ResultSet, step: usize, field: &str, p: [f64; 3]) -> Result<Value
     Ok(json!({ "field": f.name, "unit": f.unit, "components": f.components, "values": f.at(i), "how": "nearest node: the point is outside the volume", "node_m": n, "distance_m": distance }))
 }
 
+/// Whether a tool is handled here. The `design_` prefix is shared with the outcome recipes,
+/// so these are named rather than matched by prefix.
+pub fn is_tool(name: &str) -> bool {
+    name.starts_with("sim_") || matches!(name, "design_commands" | "design_run" | "design_bodies" | "design_faces" | "design_show" | "design_send_to_scene")
+}
+
 /// Runs a `design_*` or `sim_*` tool on the world.
 pub fn start(world: &mut World, name: &str, i: &Value) -> ToolOutput {
     match run(world, name, i) {

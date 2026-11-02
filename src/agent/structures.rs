@@ -868,7 +868,7 @@ mod tests {
         let post = placed(Kind::Column, Vec3::new(5.0, 1.0, 0.0), Vec3::new(0.1, 1.0, 0.1), 0.0);
         let kerb = placed(Kind::Wall, Vec3::new(0.0, 0.1, 5.0), Vec3::new(3.0, 0.1, 0.1), 0.0);
         let m = mounts_for(&[partition, post, kerb], Vec3::new(0.0, 0.0, 3.0), &MountOpts::default());
-        let (walls, columns): (Vec<_>, Vec<_>) = m.iter().partition(|p| p.kind == MountKind::Wall);
+        let (walls, columns): (Vec<&MountPoint>, Vec<&MountPoint>) = m.iter().partition(|p| p.kind == MountKind::Wall);
         assert!(!walls.is_empty() && !columns.is_empty());
         assert!(walls.iter().all(|p| (p.pos.y - 1.2).abs() < 1e-5 && p.pos.z.abs() < 1.0), "on the partition, none on the kerb: {walls:?}");
         assert!(columns.iter().all(|p| (p.pos.y - 1.7).abs() < 1e-5), "{columns:?}");
