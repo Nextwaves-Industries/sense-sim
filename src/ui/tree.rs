@@ -207,12 +207,7 @@ fn page_rows(ui: &mut egui::Ui, w: f32, bench: Workbench, slot: &mut LeftPanelSl
 fn factory_rows(ui: &mut egui::Ui, w: f32, slot: &mut LeftPanelSlot) {
     use crate::twin::{LinkStatus, TwinPage};
     let twin = &slot.twin;
-    let health = match (twin.total, twin.down, twin.suspect) {
-        (0, ..) => Dot::Optional,
-        (_, 1.., _) => Dot::Todo,
-        (_, _, 1..) => Dot::Busy,
-        _ => Dot::Done,
-    };
+    let health = twin.health();
     let link = match twin.status {
         LinkStatus::Connected => Dot::Done,
         LinkStatus::Demo | LinkStatus::Starting => Dot::Busy,
