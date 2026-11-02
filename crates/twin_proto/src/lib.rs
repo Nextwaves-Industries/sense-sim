@@ -4,4 +4,10 @@
 //! `twin_control_proto`, which the viewer and the collector must never depend on;
 //! `tests/control_boundary.rs` enforces that.
 
+pub mod demo;
+pub mod inventory;
+pub mod model;
+#[cfg(windows)]
+pub mod read_client;
 pub mod text;
+pub mod wire;
