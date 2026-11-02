@@ -1,5 +1,5 @@
-//! AI scene assistant: a chat panel driving an LLM (Anthropic, OpenAI,
-//! OpenRouter or a local OpenAI-compatible server) that builds layouts from
+//! AI scene assistant: a chat panel driving an LLM (Anthropic, OpenAI, Meta Muse,
+//! Gemini, Grok, DeepSeek, OpenRouter or a local OpenAI-compatible server) that builds layouts from
 //! instructions or reference photos using the tools in [`tools`]. The same
 //! tools are served over MCP, and external MCP servers can add more.
 

@@ -130,8 +130,12 @@ the photo (IoU). When the assistant tries to finish, the harness runs it and sen
 assistant back to fix what it finds (up to 4 rounds).
 
 **Providers** (Settings → AI assistant; the model list loads from the provider): Anthropic
-(`ANTHROPIC_API_KEY`, default `claude-opus-5-5`), OpenAI (`OPENAI_API_KEY`), OpenRouter
-(`OPENROUTER_API_KEY`), and local Ollama / LM Studio / any OpenAI-compatible server (no key).
+(`ANTHROPIC_API_KEY`, default `claude-opus-5-5`), OpenAI (`OPENAI_API_KEY`), Meta Muse
+(`MODEL_API_KEY`, default `muse-spark-1.3`), Google Gemini (`GEMINI_API_KEY`), xAI Grok
+(`XAI_API_KEY`), DeepSeek (`DEEPSEEK_API_KEY`), OpenRouter (`OPENROUTER_API_KEY`), and local
+Ollama / LM Studio (no key). **Custom OpenAI-compatible** reaches any other server or vendor,
+with a key if it needs one. Muse's `-contributor` models are cheaper because Meta may train on
+what you send; the settings page warns when one is selected.
 Local models must support tool calling and vision, for example `qwen2.5vl`. **Test connection**
 checks the key and model. Settings are stored in `%APPDATA%/SenseSim/agent.json`; a copy next
 to the exe takes precedence. Transient API errors (429/5xx) are retried with backoff.

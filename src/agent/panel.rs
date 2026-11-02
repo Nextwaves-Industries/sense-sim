@@ -4,7 +4,7 @@
 use bevy_egui::egui::{self, Align, Color32, Layout, Margin, RichText, vec2};
 
 use super::catalog::Catalog;
-use super::config::{AgentConfig, ProviderKind};
+use super::config::{AgentConfig, ProviderKind, may_train_on_input};
 use super::tools::ToolBridge;
 use super::{Agent, ChatItem, images};
 use crate::library::Library;
@@ -613,6 +613,9 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
         theme::setting_row(ui, "Custom model id", "Use any id the provider accepts", |ui| {
             changed |= ui.add(egui::TextEdit::singleline(&mut p.model).hint_text(p.kind.default_model()).desired_width(240.0)).lost_focus();
         });
+        if may_train_on_input(&p.effective_model()) {
+            ui.add(egui::Label::new(RichText::new("Contributor tier: the vendor may train its models on what you send, including photos and scene data.").color(theme::WARNING)).wrap());
+        }
         if refresh {
             agent.refresh_models();
         }
@@ -622,14 +625,16 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
         theme::setting_row(ui, "Endpoint", "Base URL of the API", |ui| {
             changed |= ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(240.0)).lost_focus();
         });
-        if p.kind.needs_key() {
+        // A custom endpoint may be a cloud vendor that isn't listed, so it can take a key too.
+        if p.kind.needs_key() || p.kind == ProviderKind::Custom {
             let from_env = p.key_from_env();
+            let hint = if p.kind.needs_key() { p.kind.env_var() } else { "Only if the server needs one" };
             theme::setting_row(ui, "API key", if from_env { "Read from the environment" } else { "Stored in agent.json" }, |ui| {
                 if from_env {
                     ui.label(RichText::new(p.kind.env_var()).color(theme::SUCCESS));
                 } else {
                     changed |= ui
-                        .add(egui::TextEdit::singleline(&mut p.api_key).password(true).hint_text(p.kind.env_var()).desired_width(240.0))
+                        .add(egui::TextEdit::singleline(&mut p.api_key).password(true).hint_text(hint).desired_width(240.0))
                         .lost_focus();
                 }
             });
@@ -642,7 +647,7 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
     }
     {
         let cfg = &mut agent.config;
-        theme::setting_row(ui, "Effort", "How hard the model thinks (Anthropic)", |ui| {
+        theme::setting_row(ui, "Effort", "How hard the model thinks (Anthropic, Muse)", |ui| {
             egui::ComboBox::from_id_salt("effort").selected_text(cfg.effort.clone()).show_ui(ui, |ui| {
                 for e in ["low", "medium", "high", "xhigh", "max"] {
                     changed |= ui.selectable_value(&mut cfg.effort, e.to_string(), e).changed();

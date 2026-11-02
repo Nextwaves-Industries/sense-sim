@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderKind {
     Anthropic,
     OpenAi,
+    /// Meta's Model API, which serves the Muse models.
+    Meta,
+    Gemini,
+    Xai,
+    DeepSeek,
     OpenRouter,
     Ollama,
     LmStudio,
@@ -18,12 +23,17 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 6] = [Self::Anthropic, Self::OpenAi, Self::OpenRouter, Self::Ollama, Self::LmStudio, Self::Custom];
+    pub const ALL: [ProviderKind; 10] =
+        [Self::Anthropic, Self::OpenAi, Self::Meta, Self::Gemini, Self::Xai, Self::DeepSeek, Self::OpenRouter, Self::Ollama, Self::LmStudio, Self::Custom];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Anthropic => "Anthropic",
             Self::OpenAi => "OpenAI",
+            Self::Meta => "Meta Muse",
+            Self::Gemini => "Google Gemini",
+            Self::Xai => "xAI Grok",
+            Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
             Self::Ollama => "Ollama (local)",
             Self::LmStudio => "LM Studio (local)",
@@ -31,17 +41,24 @@ impl ProviderKind {
         }
     }
 
+    /// Spelled out for every kind, so a new cloud provider can't end up being sent another
+    /// vendor's key by default.
     pub fn env_var(self) -> &'static str {
         match self {
             Self::Anthropic => "ANTHROPIC_API_KEY",
             Self::OpenAi => "OPENAI_API_KEY",
+            Self::Meta => "MODEL_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
+            Self::Xai => "XAI_API_KEY",
+            Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
-            _ => "OPENAI_API_KEY",
+            // Never read: these don't need a key.
+            Self::Ollama | Self::LmStudio | Self::Custom => "OPENAI_API_KEY",
         }
     }
 
     pub fn needs_key(self) -> bool {
-        matches!(self, Self::Anthropic | Self::OpenAi | Self::OpenRouter)
+        !matches!(self, Self::Ollama | Self::LmStudio | Self::Custom)
     }
 
     pub fn default_model(self) -> String {
@@ -52,6 +69,11 @@ impl ProviderKind {
         let (base_url, model) = match self {
             Self::Anthropic => ("https://api.anthropic.com", "claude-opus-5-5"),
             Self::OpenAi => ("https://api.openai.com/v1", "gpt-5"),
+            Self::Meta => ("https://api.meta.ai/v1", "muse-spark-1.3"),
+            Self::Gemini => ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
+            Self::Xai => ("https://api.x.ai/v1", "grok-4.7"),
+            // The Flash model is the one DeepSeek documents as taking images.
+            Self::DeepSeek => ("https://api.deepseek.com", "deepseek-flash"),
             Self::OpenRouter => ("https://openrouter.ai/api/v1", "anthropic/claude-opus-5.5"),
             Self::Ollama => ("http://localhost:11434/v1", "qwen2.5vl:7b"),
             Self::LmStudio => ("http://localhost:1234/v1", "local-model"),
@@ -61,7 +83,12 @@ impl ProviderKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Contributor tiers are sold cheaper because the vendor may train on what they are sent.
+pub fn may_train_on_input(model: &str) -> bool {
+    model.trim().ends_with("-contributor")
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ProviderCfg {
     pub kind: ProviderKind,
     pub base_url: String,
@@ -203,7 +230,16 @@ impl AgentConfig {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
-        std::fs::write(p, serde_json::to_string_pretty(self).unwrap())
+        std::fs::write(p, serde_json::to_string_pretty(&self.for_saving()).unwrap())
+    }
+
+    /// What goes in the file. `load` re-adds any missing provider, so untouched ones stay out:
+    /// a build older than the provider can't read its name, and would start over from defaults
+    /// and lose the saved keys.
+    fn for_saving(&self) -> Self {
+        let mut cfg = self.clone();
+        cfg.providers.retain(|p| p.kind == self.active || *p != p.kind.default_cfg());
+        cfg
     }
 
     pub fn provider(&self) -> &ProviderCfg {
@@ -214,5 +250,57 @@ impl AgentConfig {
         let k = self.active;
         let i = self.providers.iter().position(|p| p.kind == k).unwrap_or(0);
         &mut self.providers[i]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_cloud_provider_is_sent_another_vendors_key() {
+        let cloud: Vec<ProviderKind> = ProviderKind::ALL.into_iter().filter(|k| k.needs_key()).collect();
+        for (i, a) in cloud.iter().enumerate() {
+            for b in &cloud[i + 1..] {
+                assert_ne!(a.env_var(), b.env_var(), "{a:?} and {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn provider_names_in_existing_files_still_read() {
+        use ProviderKind::*;
+        for (name, kind) in [("anthropic", Anthropic), ("openai", OpenAi), ("openrouter", OpenRouter), ("ollama", Ollama), ("lmstudio", LmStudio), ("custom", Custom)] {
+            assert_eq!(serde_json::from_value::<ProviderKind>(serde_json::json!(name)).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn muse_defaults_follow_metas_docs_and_stay_out_of_training() {
+        let c = ProviderKind::Meta.default_cfg();
+        assert_eq!(c.base_url, "https://api.meta.ai/v1");
+        assert_eq!(ProviderKind::Meta.env_var(), "MODEL_API_KEY");
+        assert!(ProviderKind::Meta.needs_key());
+        assert!(!may_train_on_input(&c.model), "{}", c.model);
+        assert!(may_train_on_input(" muse-spark-1.3-contributor "));
+    }
+
+    #[test]
+    fn the_file_holds_the_active_provider_and_what_changed() {
+        let kinds = |cfg: &AgentConfig| cfg.for_saving().providers.iter().map(|p| p.kind).collect::<Vec<_>>();
+        let mut cfg = AgentConfig::default();
+        assert_eq!(kinds(&cfg), [ProviderKind::Anthropic]);
+
+        // A key on a provider that isn't active must survive.
+        cfg.providers.iter_mut().find(|p| p.kind == ProviderKind::OpenAi).unwrap().api_key = "k".into();
+        assert_eq!(kinds(&cfg), [ProviderKind::Anthropic, ProviderKind::OpenAi]);
+
+        cfg.active = ProviderKind::Meta;
+        assert_eq!(kinds(&cfg), [ProviderKind::OpenAi, ProviderKind::Meta]);
+
+        // Saving leaves the settings in use alone.
+        assert_eq!(cfg.providers.len(), ProviderKind::ALL.len());
+        let text = serde_json::to_string(&cfg.for_saving()).unwrap();
+        assert_eq!(serde_json::from_str::<AgentConfig>(&text).unwrap().active, ProviderKind::Meta);
     }
 }
