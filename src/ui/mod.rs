@@ -375,6 +375,7 @@ pub(crate) fn open_at_launch(world: &mut World, path: PathBuf) {
     let mut state = world.resource_mut::<UiState>();
     state.name_scene(crate::tabs::title_of(&path));
     state.layout_path = Some(path.clone());
+    state.frame_on_load();
     world.resource_mut::<crate::undo::UndoStack>().rebase();
     world.resource_mut::<Actions>().0.push(Action::LoadLayout(path));
 }
@@ -941,6 +942,7 @@ mod open_at_launch_tests {
         let state = w.resource::<UiState>();
         assert_eq!(state.layout_path.as_deref(), Some(std::path::Path::new(r"C:\plans\dock.sesim")));
         assert_eq!(state.scene_title(), "dock");
+        assert_eq!(state.frame_after_load, Some(0), "it opens framed, not at the default close-up");
         assert!(matches!(w.resource::<Actions>().0.as_slice(), [Action::LoadLayout(p)] if p.ends_with("dock.sesim")));
     }
 }
