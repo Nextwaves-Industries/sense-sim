@@ -21,6 +21,16 @@ pub struct Requirements {
     pub min_front_to_back_db: Option<f64>,
     /// Largest overall size, metres, in any order.
     pub max_size_m: Option<[f64; 3]>,
+    /// A tag's chip, in series form (R, X) in ohms. It's then judged by power into the chip: S11
+    /// against a real impedance means nothing for a capacitive load.
+    #[serde(default)]
+    pub chip_z: Option<(f64, f64)>,
+    /// The least power transfer into the chip across the band, 0 to 1.
+    #[serde(default)]
+    pub min_power_transfer: Option<f64>,
+    /// The chip's read sensitivity, dBm, and the reader's EIRP, dBm, for a read range figure.
+    #[serde(default)]
+    pub read_range_from: Option<(f64, f64)>,
 }
 
 impl Requirements {
@@ -99,7 +109,16 @@ pub fn assess(r: &SimResult, req: &Requirements, ctx: Context) -> Assessment {
     trust_issues.extend(r.warnings.iter().cloned());
 
     let covered = net.ports() > 0 && net.f.first().is_some_and(|f| *f <= req.f_lo) && net.f.last().is_some_and(|f| *f >= req.f_hi);
-    if covered {
+    if let (true, Some((re, im))) = (covered, req.chip_z) {
+        let chip = crate::C64::new(re, im);
+        let need = req.min_power_transfer.unwrap_or(0.7);
+        let band = net.interpolate(&crate::linspace(req.f_lo, req.f_hi, 21));
+        let worst = band.zin(PORT).iter().map(|z| crate::tag::power_transfer(*z, chip)).fold(1.0, f64::min);
+        check(&mut checks, "power into the chip", worst >= need, format!("worst {worst:.2} across the band"), format!("{need:.2} or more, {} to {}", ghz(req.f_lo), ghz(req.f_hi)));
+        if worst < need {
+            diagnose_chip(net.interpolate(&[fc]).zin(PORT).first().copied(), chip, &mut diagnosis, &mut next);
+        }
+    } else if covered {
         let worst = band_worst(net, PORT, PORT, req.f_lo, req.f_hi).unwrap_or(f64::INFINITY);
         check(&mut checks, "match over the band", worst <= req.s11_db, format!("worst S11 {worst:.1} dB"), format!("{:.1} dB or lower, {} to {}", req.s11_db, ghz(req.f_lo), ghz(req.f_hi)));
         if worst > req.s11_db {
@@ -121,9 +140,19 @@ pub fn assess(r: &SimResult, req: &Requirements, ctx: Context) -> Assessment {
                 notes.push(format!("The far field is at {}, away from the band centre {}.", ghz(f_far), ghz(fc)));
                 next.push(format!("Set far_ghz to {:.4} with antenna_set and run again, so the pattern is judged in band.", fc / 1e9));
             }
+            if let (Some((re, im)), Some((read_dbm, eirp_dbm))) = (req.chip_z, req.read_range_from) {
+                let z = net.interpolate(&[fc]).zin(PORT).first().copied();
+                if let Some(z) = z {
+                    let transfer = crate::tag::power_transfer(z, crate::C64::new(re, im));
+                    let range = crate::tag::read_range_m(fc, eirp_dbm, m.peak_gain_dbi, transfer, read_dbm, 1.0);
+                    notes.push(format!("Forward-link read range about {range:.1} m at {}, in free space and aligned: {eirp_dbm:.1} dBm EIRP, {read_dbm:.1} dBm chip sensitivity, {:.2} dBi gain, {transfer:.2} power transfer. A circular reader costs 3 dB of that, and a real product more.", ghz(fc), m.peak_gain_dbi));
+                }
+            }
+            // Against a chip, realized gain would be charged for a 50 ohm mismatch that isn't there.
+            let achieved = if req.chip_z.is_some() { m.peak_gain_dbi } else { m.peak_realized_dbi };
             if let Some(g) = req.min_gain_dbi {
-                check(&mut checks, "gain", m.peak_realized_dbi >= g, format!("{:.2} dBi realized", m.peak_realized_dbi), format!("{g:.2} dBi or more"));
-                if m.peak_realized_dbi < g {
+                check(&mut checks, "gain", achieved >= g, format!("{achieved:.2} dBi{}", if req.chip_z.is_some() { "" } else { " realized" }), format!("{g:.2} dBi or more"));
+                if achieved < g {
                     let lost = m.peak_directivity_dbi - m.peak_realized_dbi;
                     if lost > 1.0 {
                         diagnosis.push(format!("Directivity is {:.2} dBi, but {lost:.1} dB is lost to mismatch and material loss before it counts as realized gain.", m.peak_directivity_dbi));
@@ -135,8 +164,10 @@ pub fn assess(r: &SimResult, req: &Requirements, ctx: Context) -> Assessment {
                 }
             }
             if let Some(e) = req.min_efficiency {
-                check(&mut checks, "total efficiency", m.total_efficiency >= e, format!("{:.1} %", m.total_efficiency * 100.0), format!("{:.1} % or more", e * 100.0));
-                if m.total_efficiency < e && m.rad_efficiency < e {
+                // Against a chip the mismatch is the power transfer, judged above.
+                let efficiency = if req.chip_z.is_some() { m.rad_efficiency } else { m.total_efficiency };
+                check(&mut checks, "total efficiency", efficiency >= e, format!("{:.1} %", efficiency * 100.0), format!("{:.1} % or more", e * 100.0));
+                if efficiency < e && m.rad_efficiency < e {
                     diagnosis.push(format!("Radiation efficiency alone is {:.1} %, so material loss is the limit, not the match. Consider a lower-loss substrate, a thicker one, or air.", m.rad_efficiency * 100.0));
                 }
             }
@@ -197,6 +228,22 @@ pub fn assess(r: &SimResult, req: &Requirements, ctx: Context) -> Assessment {
         Verdict::MetMeshUnchecked
     };
     Assessment { verdict, checks, trust_issues, notes, diagnosis, next }
+}
+
+/// Why a tag isn't delivering power to its chip, in the order to fix it.
+fn diagnose_chip(z: Option<crate::C64>, chip: crate::C64, diagnosis: &mut Vec<String>, next: &mut Vec<String>) {
+    let Some(z) = z else { return };
+    diagnosis.push(format!("At the band centre the antenna is {:.1} {:+.1}j ohm, and this chip needs {:.1} {:+.1}j ohm.", z.re, z.im, chip.re, -chip.im));
+    let reactance_off = (z.im + chip.im) / chip.im.abs();
+    if reactance_off.abs() > 0.05 {
+        next.push(if reactance_off < 0.0 { "It isn't inductive enough: enlarge the matching element (T-match width a or height b, or the loop), then run again." } else { "It's too inductive: shrink the matching element (T-match width a or height b, or the loop), then run again." }.to_string());
+    } else if z.re < 0.6 * chip.re {
+        next.push("The reactance is right but the resistance is low: bring the radiator closer to its own resonance (length or meanders), and put the reactance back with the matching element.".to_string());
+    } else if z.re > 1.6 * chip.re {
+        next.push("The reactance is right but the resistance is high: move the radiator further from its own resonance, and put the reactance back with the matching element.".to_string());
+    } else {
+        next.push("It's matched at the centre but not across the band. A chip's Q limits this: narrow the band, accept less at its edges, or lower the Q with a wider radiator.".to_string());
+    }
 }
 
 /// Why the band isn't matched, in the order an engineer would look.
@@ -279,7 +326,7 @@ mod tests {
     }
 
     fn req(lo: f64, hi: f64) -> Requirements {
-        Requirements { f_lo: lo, f_hi: hi, s11_db: -10.0, min_gain_dbi: None, min_efficiency: None, max_axial_ratio_db: None, min_front_to_back_db: None, max_size_m: None }
+        Requirements { f_lo: lo, f_hi: hi, s11_db: -10.0, min_gain_dbi: None, min_efficiency: None, max_axial_ratio_db: None, min_front_to_back_db: None, max_size_m: None, chip_z: None, min_power_transfer: None, read_range_from: None }
     }
 
     fn sphere(f: f64, power: f64, accepted: f64) -> FarField {

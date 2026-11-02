@@ -38,7 +38,7 @@ pub fn defs() -> Vec<ToolDef> {
         def("write_file", "Write a text file in your working folder for this chat. Nowhere else: save_layout and export_usda write project files.", json!({ "type": "object", "properties": { "path": { "type": "string", "description": "Relative to your working folder" }, "content": { "type": "string" } }, "required": ["path", "content"] })),
         def(
             "open_file",
-            "Open a file in this app, by its type: a layout opens in a new tab and never replaces the scene; DXF and Gerber go to Antenna Studio as a new antenna; STEP goes to 3D Design; IFC imports the building; an image is attached so you can see it; text, CSV and JSON are read. Anything else: say so, or use open_external.",
+            "Open a file in this app, by its type: a .sesim project or an older layout opens in a new tab and never replaces the scene; DXF and Gerber go to Antenna Studio as a new antenna; STEP goes to 3D Design; IFC imports the building; an image is attached so you can see it; text, CSV and JSON are read. Anything else: say so, or use open_external.",
             json!({ "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }),
         ),
         def(
@@ -162,6 +162,7 @@ fn open_as(path: &str) -> OpenAs {
             let layout = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["format"] == "sense_sim_layout" || v["objects"].is_array());
             if layout { OpenAs::Layout } else { OpenAs::Text }
         }
+        "sesim" => OpenAs::Layout,
         "dxf" | "gbr" | "ger" | "gtl" | "gbl" | "gto" | "gbo" | "gts" | "gbs" | "gko" | "gm1" => OpenAs::Antenna,
         "step" | "stp" => OpenAs::Design,
         "ifc" => OpenAs::Building,
@@ -399,6 +400,7 @@ mod tests {
         std::fs::write(&other, r#"{"a":1}"#).unwrap();
         assert_eq!(open_as(&layout.to_string_lossy()), OpenAs::Layout, "a layout is opened, not read");
         assert_eq!(open_as(&other.to_string_lossy()), OpenAs::Text);
+        assert_eq!(open_as("x.sesim"), OpenAs::Layout, "a project file");
         assert_eq!(open_as("x.DXF"), OpenAs::Antenna, "case doesn't matter");
         assert_eq!(open_as("x.gtl"), OpenAs::Antenna);
         assert_eq!(open_as("x.step"), OpenAs::Design);

@@ -17,6 +17,7 @@ fn def(name: &str, description: &str, schema: Value) -> ToolDef {
 
 pub fn defs() -> Vec<ToolDef> {
     let mut all = vec![
+        def("antenna_references", "Find the reference design for a job: the structure real products use, why, the order to tune it in, target numbers, limits and sources. Start here before choosing a template: a bare dipole or plain patch is the wrong answer for most real jobs. Also lists RFID tag chips with their impedance and sensitivity. Open one with antenna_open_sample, then adapt it.", json!({ "type": "object", "properties": { "job": { "type": "string", "description": "What it's for, in words: 'RFID tag on cartons', 'circular reader panel for the US band'" } } })),
         def("antenna_list_samples", "List the sample antenna projects: real uses like a UHF RFID reader panel, a Wi-Fi PCB antenna or a GPS helix, each in its band and checked against a solver, with what they are for. Ready to open and study, or to start a design from.", json!({ "type": "object", "properties": {} })),
         def("antenna_open_sample", "Open a sample project in Antenna Studio on its results, replacing the current design. Those that are slow to solve come with results stored; the rest solve when opened, so poll antenna_results until the job is idle. id: from antenna_list_samples.", json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] })),
         def("antenna_list_templates", "List the antenna templates of Antenna Studio (dipole, Yagi, helix, patch, horn, Vivaldi, ...), with what they are and which solvers apply.", json!({ "type": "object", "properties": {} })),
@@ -141,6 +142,16 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
     }
     let mut st = world.resource_mut::<Studio>();
     Some(match name {
+        "antenna_references" => {
+            use antenna_core::references;
+            let found: Vec<Value> = references::find(i["job"].as_str().unwrap_or("")).into_iter().map(|r| {
+                let s = antenna_core::samples::by_id(r.sample);
+                json!({ "open_with": r.sample, "job": r.job, "title": s.map(|s| s.title), "band": s.map(|s| s.band_text()), "template": s.map(|s| s.template), "why": r.why, "tune_in_this_order": r.tune, "targets": r.targets, "limits": r.limits, "sources": r.sources })
+            }).collect();
+            let chips: Vec<Value> = antenna_core::tag::CHIPS.iter().map(|c| json!({ "id": c.id, "name": c.name, "impedance_ohm": c.z.map(|(r, x)| format!("{r} {x:+}j")), "read_dbm": c.read_dbm, "write_dbm": c.write_dbm, "source": c.source, "note": c.note })).collect();
+            let others: Vec<Value> = references::other_samples().map(|s| json!({ "open_with": s.id, "title": s.title, "use": s.group.label(), "band": s.band_text(), "about": s.about })).collect();
+            text(json!({ "references": found, "tag_chips": chips, "other_samples": others, "evidence": "Simulated, not measured: metal in free space unless a sample says otherwise" }))
+        }
         "antenna_list_samples" => {
             let list: Vec<Value> = antenna_core::samples::all().iter().map(|s| json!({ "id": s.id, "title": s.title, "use": s.group.label(), "band": s.band_text(), "about": s.about, "template": s.template, "opening": super::ui::samples::opening_words(s) })).collect();
             text(json!({ "samples": list, "evidence": "Simulated, not measured" }))

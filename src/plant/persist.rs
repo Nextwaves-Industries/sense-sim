@@ -61,9 +61,9 @@ pub fn after_actions(
     for path in std::mem::take(&mut hook.save) {
         let extra = plant_json(&links, &plant);
         let res = (|| -> anyhow::Result<()> {
-            let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            let mut v = crate::project_file::read(&path)?;
             v["plant"] = extra;
-            std::fs::write(&path, serde_json::to_string_pretty(&v)?)?;
+            crate::project_file::write(&path, &v)?;
             Ok(())
         })();
         match res {
@@ -100,7 +100,7 @@ pub fn after_actions(
 }
 
 fn read(path: &Path) -> anyhow::Result<(Vec<Link>, HashMap<String, Control>, HashMap<String, f32>)> {
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let v = crate::project_file::read(path)?;
     Ok(parse_plant(&v["plant"]))
 }
 

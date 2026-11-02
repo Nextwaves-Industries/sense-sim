@@ -19,6 +19,7 @@ pub mod photocheck;
 pub mod placer;
 pub mod planning;
 pub mod prompt;
+pub mod python;
 pub mod screen;
 pub mod session;
 pub mod structures;
@@ -402,6 +403,7 @@ impl Agent {
         let mut tool_defs = tools::tool_defs(false);
         tool_defs.extend(self.mcp.tool_defs());
         tool_defs.extend(workspace::defs());
+        tool_defs.push(python::def());
         if self.plan_mode {
             tool_defs.push(planning::def());
         }

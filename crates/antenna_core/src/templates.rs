@@ -1081,6 +1081,154 @@ fn reconfig_pol(c: &Ctx) -> Result<Geometry> {
     Ok(Geometry { solids, ports, ground: true, axis_forward: true, hints: vec![hint([-s, -s, 0.0], [s, s, h], g)], ..Default::default() })
 }
 
+// ---------------------------------------------------------------------------
+// UHF RFID, as the real things are built
+
+fn rfid_tag_params() -> Vec<Param> {
+    let mut v = base("915MHz");
+    v.extend([
+        p("Lx", "0.29*lambda0", "Overall length, tip to tip"),
+        p("w", "lambda0/330", "Trace width"),
+        p("a", "0.04*lambda0", "T-match width: mostly sets the inductance the chip needs"),
+        p("b", "0.012*lambda0", "T-match height, from the dipole to the chip"),
+        p("g", "lambda0/330", "Chip gap"),
+        p("n", "2", "Meander periods on each side, for fitting a short label"),
+        p("Hm", "0.008*lambda0", "Meander height either side of the axis"),
+        p("s", "0.008*lambda0", "Meander step"),
+        p("x0", "0.035*lambda0", "Where the meander starts, from the centre"),
+        p("Z0", "50", "Port impedance. It doesn't matter here: a tag is judged against its chip"),
+    ]);
+    v
+}
+
+/// The two sides of a path of right angles, offset by half a width.
+fn ortho_sides(path: &[[f64; 2]], w: f64) -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+    let dir = |a: [f64; 2], b: [f64; 2]| {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let n = (dx * dx + dy * dy).sqrt().max(1e-15);
+        [dx / n, dy / n]
+    };
+    let h = w / 2.0;
+    let (mut left, mut right) = (Vec::with_capacity(path.len()), Vec::with_capacity(path.len()));
+    for (i, q) in path.iter().enumerate() {
+        let d1 = if i > 0 { dir(path[i - 1], *q) } else { dir(path[0], path[1]) };
+        let d2 = if i + 1 < path.len() { dir(*q, path[i + 1]) } else { d1 };
+        let (n1, n2) = ([-d1[1], d1[0]], [-d2[1], d2[0]]);
+        // Straight on: one normal. Around a right angle: the corner of the two.
+        let off = if d1[0] * d2[0] + d1[1] * d2[1] > 0.5 { [n1[0] * h, n1[1] * h] } else { [(n1[0] + n2[0]) * h, (n1[1] + n2[1]) * h] };
+        left.push([q[0] + off[0], q[1] + off[1]]);
+        right.push([q[0] - off[0], q[1] - off[1]]);
+    }
+    (left, right)
+}
+
+/// A meandered dipole with a T-match, the usual UHF inlay. The chip sits in a gap in the T's bar,
+/// and the T makes the antenna inductive, as a capacitive chip needs (NXP AN1715). One sheet: the
+/// gap keeps its outline a single polygon.
+fn rfid_tag(c: &Ctx) -> Result<Geometry> {
+    let (lx, w, a, b, g, hm, s, x0, z0) = (c.get("Lx")?, c.get("w")?, c.get("a")?, c.get("b")?, c.get("g")?, c.get("Hm")?, c.get("s")?, c.get("x0")?, c.get("Z0")?);
+    let n = c.count("n", 0, 12)?;
+    if !(w > 0.0 && g > 0.0 && g < a - 2.0 * w && b > 2.0 * w) {
+        bail!("The T-match needs room: gap and trace width have to fit inside its width and height.");
+    }
+    if n > 0 && !(x0 > a / 2.0 + w && hm > w && s > 2.0 * w) {
+        bail!("The meander has to start outside the T-match, with its steps wider than two traces.");
+    }
+    let mut arm = vec![[a / 2.0, 0.0]];
+    let mut x = if n > 0 { x0 } else { a / 2.0 };
+    if n > 0 {
+        arm.push([x, 0.0]);
+    }
+    for _ in 0..n {
+        arm.push([x, hm]);
+        x += s;
+        arm.push([x, hm]);
+        arm.push([x, -hm]);
+        x += s;
+        arm.push([x, -hm]);
+        arm.push([x, 0.0]);
+    }
+    if lx / 2.0 <= x + w {
+        bail!("The meanders don't fit in this length: shorten them or lengthen Lx.");
+    }
+    arm.push([lx / 2.0, 0.0]);
+    let (up, down) = ortho_sides(&arm, w);
+    let mirror = |q: &[f64; 2]| [-q[0], q[1]];
+    let h = w / 2.0;
+    let mut pts = vec![[g / 2.0, b + h], [a / 2.0 + h, b + h], [a / 2.0 + h, h]];
+    pts.extend(up.iter().skip(1));
+    pts.extend(down.iter().rev());
+    pts.extend(down.iter().map(mirror));
+    pts.extend(up.iter().skip(1).rev().map(mirror));
+    pts.extend([[-a / 2.0 - h, h], [-a / 2.0 - h, b + h], [-g / 2.0, b + h], [-g / 2.0, b - h], [-a / 2.0 + h, b - h], [-a / 2.0 + h, h], [a / 2.0 - h, h], [a / 2.0 - h, b - h], [g / 2.0, b - h]]);
+    pts.reverse();
+    Ok(Geometry {
+        solids: vec![poly("tag", c.metal, 2, 0.0, pts)],
+        ports: vec![port("chip", [-g / 2.0, b, 0.0], [g / 2.0, b, 0.0], w, z0)],
+        hints: vec![hint([-lx / 2.0, -hm.max(w), 0.0], [lx / 2.0, b.max(hm) + w, 0.0], w * 4.0)],
+        ..Default::default()
+    })
+}
+
+fn rfid_reader_cp_params() -> Vec<Param> {
+    let mut v = base("866.5MHz");
+    v.extend([
+        p("h", "0.04*lambda0", "Air gap above the ground plate"),
+        p("L", "0.44*lambda0", "Patch side"),
+        p("t", "0.075*lambda0", "Size of the two cut corners: what splits the patch into two modes"),
+        p("xf", "0.1*lambda0", "Probe offset from the centre"),
+        p("G", "0.9*lambda0", "Ground plate size"),
+        p("wp", "lambda0/80", "Probe width"),
+        p("Z0", "50", "Port impedance"),
+    ]);
+    v
+}
+
+/// A square air-spaced patch with two opposite corners cut, fed once: the simplest way to a
+/// circular reader panel. Which corners decides the hand.
+fn rfid_reader_cp(c: &Ctx) -> Result<Geometry> {
+    let (h, l, t, xf, gs, wp, z0) = (c.get("h")?, c.get("L")?, c.get("t")?, c.get("xf")?, c.get("G")?, c.get("wp")?, c.get("Z0")?);
+    let s = l / 2.0;
+    if !(t > 0.0 && t < s) {
+        bail!("The cut corners have to be smaller than half the patch.");
+    }
+    let patch = vec![[-s, -s], [s - t, -s], [s, -s + t], [s, s], [-s + t, s], [-s, s - t]];
+    Ok(Geometry {
+        solids: vec![bx("ground", c.metal, [-gs / 2.0, -gs / 2.0, 0.0], [gs / 2.0, gs / 2.0, 0.0]), poly("patch", c.metal, 2, h, patch)],
+        ports: vec![port("probe", [xf, 0.0, 0.0], [xf, 0.0, h], wp, z0)],
+        axis_forward: true,
+        hints: vec![hint([-s, -s, 0.0], [s, s, h], l / 40.0)],
+        ..Default::default()
+    })
+}
+
+fn rfid_reader_dual_params() -> Vec<Param> {
+    let mut v = base("915MHz");
+    v.extend([
+        p("h", "0.05*lambda0", "Air gap above the ground plate"),
+        p("L", "0.43*lambda0", "Patch side"),
+        p("xf", "0.1*lambda0", "Probe offset from the centre, on each axis"),
+        p("G", "0.9*lambda0", "Ground plate size"),
+        p("wp", "lambda0/80", "Probe width"),
+        p("Z0", "50", "Port impedance"),
+    ]);
+    v
+}
+
+/// A square patch fed on two axes, a quarter cycle apart by a hybrid: the circular panel for a
+/// wide band like 902-928 MHz, where one feed and cut corners run out of axial ratio.
+fn rfid_reader_dual(c: &Ctx) -> Result<Geometry> {
+    let (h, l, xf, gs, wp, z0) = (c.get("h")?, c.get("L")?, c.get("xf")?, c.get("G")?, c.get("wp")?, c.get("Z0")?);
+    let s = l / 2.0;
+    Ok(Geometry {
+        solids: vec![bx("ground", c.metal, [-gs / 2.0, -gs / 2.0, 0.0], [gs / 2.0, gs / 2.0, 0.0]), bx("patch", c.metal, [-s, -s, h], [s, s, h])],
+        ports: vec![port("probe x", [xf, 0.0, 0.0], [xf, 0.0, h], wp, z0), port("probe y", [0.0, xf, 0.0], [0.0, xf, h], wp, z0)],
+        axis_forward: true,
+        hints: vec![hint([-s, -s, 0.0], [s, s, h], l / 40.0)],
+        ..Default::default()
+    })
+}
+
 fn custom_params() -> Vec<Param> {
     let mut v = base("2.45GHz");
     v.extend([p("L", "0.47*lambda0", "Example variable"), p("Z0", "50", "Port impedance")]);
@@ -1095,7 +1243,7 @@ const fn tpl(id: &'static str, title: &'static str, category: Category, blurb: &
     Template { id, title, category, blurb, band, substrate, params, build }
 }
 
-static TEMPLATES: [Template; 33] = [
+static TEMPLATES: [Template; 36] = [
     tpl("dipole", "Half-wave dipole", Category::Wire, "The reference antenna: omnidirectional, about 2.15 dBi, 73 Ω.", (0.7, 1.3), "Air", dipole_params, dipole),
     tpl("monopole", "Monopole on ground", Category::Wire, "Quarter-wave over an infinite ground plane: about 5.15 dBi, 36 Ω.", (0.7, 1.3), "Air", monopole_params, monopole),
     tpl("folded_dipole", "Folded dipole", Category::Wire, "A dipole's pattern with four times the impedance, about 300 Ω.", (0.7, 1.3), "Air", folded_params, folded),
@@ -1124,6 +1272,9 @@ static TEMPLATES: [Template; 33] = [
     tpl("mimo_patch", "Two-port patch pair", Category::Printed, "Two patches on one board: study coupling, ECC and diversity.", (0.8, 1.2), "FR-4", mimo_params, mimo),
     tpl("dra", "Dielectric resonator", Category::Aperture, "A ceramic cylinder on a ground plate, probe fed: low loss at high frequency.", (0.75, 1.25), "Ceramic (εr 20)", dra_params, dra),
     tpl("rfid_gate", "RFID security gate", Category::Planar, "A pedestal of five separately fed elements in front of a metal panel: test read rate through the aisle under any phases.", (0.9, 1.1), "Air", gate_params, gate),
+    tpl("rfid_tag", "RFID tag inlay", Category::Planar, "A meandered dipole with a T-match, inductive to suit a chip's capacitive input. Judged by power into the chip, not by S11.", (0.85, 1.15), "Air", rfid_tag_params, rfid_tag),
+    tpl("rfid_reader_cp", "RFID reader panel, cut corners", Category::Planar, "An air-spaced patch with two corners cut and one feed: circular over a narrow band, such as 865-868 MHz.", (0.9, 1.1), "Air", rfid_reader_cp_params, rfid_reader_cp),
+    tpl("rfid_reader_dual", "RFID reader panel, two feeds", Category::Planar, "An air-spaced patch fed on two axes in quadrature: circular over a band as wide as 902-928 MHz.", (0.85, 1.15), "Air", rfid_reader_dual_params, rfid_reader_dual),
     tpl("reconfig_dipole", "Switched-length dipole", Category::Reconfigurable, "Frequency: PIN diodes join sections of a dipole, one band per state.", (0.45, 1.25), "Air", reconfig_dipole_params, reconfig_dipole),
     tpl("reconfig_pifa", "Varactor-tuned PIFA", Category::Reconfigurable, "Frequency: a varactor at the plate's open end tunes it continuously with bias, as on a phone.", (0.5, 1.3), "Air", reconfig_pifa_params, reconfig_pifa),
     tpl("reconfig_parasitic", "Switched-beam parasitic array", Category::Reconfigurable, "Pattern: a monopole ringed by four parasitics. A shorted one reflects, so PIN diodes turn the beam.", (0.85, 1.15), "Air", reconfig_parasitic_params, reconfig_parasitic),

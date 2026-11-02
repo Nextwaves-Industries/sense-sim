@@ -47,6 +47,8 @@ pub enum Origin {
     Mcp,
     /// The harness itself, checking the model's work. It decides these calls, not the model.
     Harness,
+    /// A script, through `sensesim.call`. Runs unattended, on whatever it was told to do.
+    Script,
 }
 
 /// What travels with a call, and with any calls it makes in turn.
@@ -118,7 +120,7 @@ pub fn class_of(name: &str, input: &Value) -> Class {
         | "search_knowledge" | "read_knowledge" | "list_knowledge" | "design_commands" | "design_bodies" | "design_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
         | "sim_results" | "sim_probe" | "plant_list_ports" | "plant_status" | "outcomes_ledger" | "site_material_ranges" | "rtls_list_regions" | "rtls_list_profiles" | "rtls_list_devices" | "rtls_status"
         | "rtls_coverage" | "antenna_assess" | "antenna_calc" | "antenna_sweep_results" | "antenna_converge_results" | "antenna_yield_results" | "antenna_gate_results" | "antenna_list_samples"
-        | "antenna_list_templates" | "antenna_get" | "antenna_results" | "antenna_job_state" | "antenna_wait" | "antenna_reconfig_parts" | "antenna_reconfig_results" | "antenna_reconfig_found"
+        | "antenna_references" | "antenna_list_templates" | "antenna_get" | "antenna_results" | "antenna_job_state" | "antenna_wait" | "antenna_reconfig_parts" | "antenna_reconfig_results" | "antenna_reconfig_found"
         | "antenna_reconfig_tuning" | "antenna_reconfig_spread" => Read,
 
         // Reading an optimizer's progress is a lookup; applying its result changes the design.
@@ -136,7 +138,7 @@ pub fn class_of(name: &str, input: &Value) -> Class {
 
         "set_camera" | "frame_all" | "screenshot" | "compare_to_photo" | "design_show" | "antenna_reconfig_view" => View,
 
-        "write_file" | "open_layout_tab" | "open_in_design" | "download_assets" | "set_photo_layout" | "create_asset" | "define_tool" | "delete_tool" | "save_layout" | "export_usda" | "design_run" | "sim_study_create" | "sim_study_set" | "sim_run" | "sim_cancel"
+        "python_run" | "write_file" | "open_layout_tab" | "open_in_design" | "download_assets" | "set_photo_layout" | "create_asset" | "define_tool" | "delete_tool" | "save_layout" | "export_usda" | "design_run" | "sim_study_create" | "sim_study_set" | "sim_run" | "sim_cancel"
         | "plant_run" | "plant_define_port" | "design_uwb_bias" | "design_shelf" | "design_aoa" | "design_integrate" | "design_tag" | "design_coexist" | "design_field_yield" | "design_tunnel"
         | "design_medical_coexist" | "design_sar" | "site_survey_plan" | "site_trace" | "site_guess_materials" | "site_survey_clear" | "site_survey_practice" | "site_stress" | "site_set_material"
         | "site_conditions" | "site_erces" | "site_compare_tech" | "site_acceptance_plan" | "site_acceptance_preview" | "site_anchor_practice" | "site_battery" | "site_esl" | "site_route_coverage"
@@ -165,6 +167,7 @@ pub fn class_of(name: &str, input: &Value) -> Class {
 
 /// The file a tool would write, if it was given one.
 fn written_path<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
+    // A .json path saves beside itself as .sesim, in the same folder, so the check still holds.
     let key = match name {
         "save_layout" | "export_usda" | "site_survey_practice" | "site_anchor_practice" | "site_acceptance_plan" | "site_acceptance_preview" => "path",
         "site_acceptance_score" => "report_path",
@@ -244,11 +247,17 @@ pub fn decide(name: &str, input: &Value, ctx: &CallCtx, policy: &Policy) -> Verd
     if ctx.origin == Origin::Mcp && agent_only(name) {
         return Verdict::Refuse(format!("{name} is only for the assistant in the app."));
     }
+    if ctx.origin == Origin::Script && (agent_only(name) || matches!(name, "ask_user" | "update_plan" | "define_tool" | "delete_tool")) {
+        return Verdict::Refuse(format!("{name} can't be called from a script."));
+    }
     let mut class = if policy.external { Class::External } else { class_of(name, input) };
 
     // A script's output must never become a measurement, whatever anyone clicks: the person
     // approving can't tell a generated file from a real one.
     if class == Class::Measurement {
+        if ctx.origin == Origin::Script {
+            return Verdict::Refuse(format!("{name} records real measurements, and a script's numbers aren't measurements."));
+        }
         if ctx.log.as_ref().is_some_and(TurnLog::ran_script) {
             return Verdict::Refuse(format!("{name} records real measurements, and a script ran in this turn, so its data can't be told from a real one. Ask the user to run this in a new message, with data from the instrument."));
         }
@@ -297,6 +306,10 @@ pub fn decide(name: &str, input: &Value, ctx: &CallCtx, policy: &Policy) -> Verd
     if ctx.origin == Origin::Mcp {
         return Verdict::Refuse(format!("{name} needs the user's approval, which an MCP client can't ask for. Use the assistant in the app for this."));
     }
+    // A loop in a script would be a wall of cards. Anything needing approval is for the model to ask.
+    if ctx.origin == Origin::Script {
+        return Verdict::Refuse(format!("{name} needs the user's approval, which a script can't ask for. Call it directly instead of from the script."));
+    }
     Verdict::Ask(Approval { text: format!("{text}\n\n{}", details(input)), remember })
 }
 
@@ -327,7 +340,7 @@ mod tests {
     /// A new tool has to be given a class: until then it asks, and this fails to say so.
     #[test]
     fn every_tool_has_a_class() {
-        let all = crate::agent::tools::tool_defs(true).into_iter().chain(crate::agent::workspace::defs());
+        let all = crate::agent::tools::tool_defs(true).into_iter().chain(crate::agent::workspace::defs()).chain([crate::agent::python::def(), crate::agent::planning::def()]);
         let unknown: Vec<String> = all.map(|d| d.name).filter(|n| class_of(n, &json!({})) == Class::Unknown).collect();
         assert!(unknown.is_empty(), "add these to class_of in gate.rs: {unknown:?}");
     }
@@ -487,6 +500,27 @@ mod tests {
         // Approving lifts it at once, for calls already under way.
         flag.store(false, Ordering::Relaxed);
         assert_eq!(decide("place_objects", &json!({}), &ctx, &p), Verdict::Run);
+    }
+
+    /// A script can do what the scene needs, and nothing that takes a person's say-so.
+    #[test]
+    fn scripts_can_edit_but_not_escape() {
+        let o = Origin::Script;
+        for (name, input) in [("get_scene", json!({})), ("update_object", json!({})), ("place_objects", json!({})), ("antenna_calc", json!({})), ("rtls_run", json!({}))] {
+            assert!(runs(&verdict(name, input, o, Mode::Edits)), "{name}");
+        }
+        for name in ["python_run", "delegate", "read_file", "write_file", "open_file", "open_external", "propose_plan", "ask_user", "update_plan", "define_tool", "delete_tool", "rtls_configure_outputs", "outcomes_check", "site_survey_fit", "site_acceptance_score", "something_new"] {
+            assert!(refused(&verdict(name, json!({}), o, Mode::All)), "{name}");
+        }
+        assert!(refused(&verdict("save_layout", json!({ "path": r"C:\x\a.json" }), o, Mode::Edits)), "writing elsewhere");
+        assert!(refused(&verdict("place_objects", json!({}), o, Mode::Ask)), "no wall of cards from a loop");
+        // In plan mode a script can't change anything either.
+        let ctx = CallCtx { origin: o, planning: Some(Arc::new(AtomicBool::new(true))), ..Default::default() };
+        let roots = [workspace_root()];
+        let no = HashSet::new();
+        let p = Policy { mode: Mode::All, approved: &no, roots: &roots, external: false };
+        assert!(refused(&decide("place_objects", &json!({}), &ctx, &p)));
+        assert_eq!(decide("get_scene", &json!({}), &ctx, &p), Verdict::Run);
     }
 
     #[test]

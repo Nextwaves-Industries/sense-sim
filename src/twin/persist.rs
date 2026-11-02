@@ -56,9 +56,9 @@ pub fn after_actions(mut hook: ResMut<LayoutHook>, mut scene: ResMut<TwinScene>,
             continue;
         }
         let saved = (|| -> anyhow::Result<()> {
-            let mut layout: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            let mut layout = crate::project_file::read(&path)?;
             layout["twin"] = to_json(&scene.placed);
-            std::fs::write(&path, serde_json::to_string_pretty(&layout)?)?;
+            crate::project_file::write(&path, &layout)?;
             Ok(())
         })();
         if let Err(e) = saved {
@@ -73,7 +73,7 @@ pub fn after_actions(mut hook: ResMut<LayoutHook>, mut scene: ResMut<TwinScene>,
     }
     for path in loads {
         let loaded = (|| -> anyhow::Result<BTreeMap<DeviceId, Placement>> {
-            let layout: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            let layout = crate::project_file::read(&path)?;
             Ok(from_json(&layout["twin"]))
         })();
         match loaded {

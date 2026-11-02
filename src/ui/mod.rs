@@ -365,8 +365,8 @@ fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 fn pick_layout_save(scene_name: &str) -> Option<PathBuf> {
-    let file = format!("{}.json", crate::samples::slug(scene_name));
-    rfd::FileDialog::new().add_filter("Layout", &["json"]).set_file_name(file).save_file()
+    let file = format!("{}.{}", crate::samples::slug(scene_name), crate::project_file::EXTENSION);
+    rfd::FileDialog::new().add_filter("Sense Sim project", &[crate::project_file::EXTENSION]).set_file_name(file).save_file().map(|p| crate::project_file::save_path(&p))
 }
 
 /// How the app stands, for the assistant, which can't see these panels.
@@ -619,14 +619,15 @@ pub fn ui_system(
         flags.save_as = false;
     }
 
-    if flags.open && let Some(files) = rfd::FileDialog::new().add_filter("Layout", &["json"]).pick_files() {
+    if flags.open && let Some(files) = rfd::FileDialog::new().add_filter("Sense Sim project", &[crate::project_file::EXTENSION]).add_filter("Older layout", &["json"]).pick_files() {
         let new = files.into_iter().map(|p| NewTab { title: crate::tabs::title_of(&p), path: Some(p.clone()), load: Some(p) }).collect();
         tabs.request(Request::Open(new));
         state.start_open = false;
     }
     if flags.save || flags.save_as {
         let name = state.scene_name.clone();
-        let p = if flags.save_as { pick_layout_save(&name) } else { state.layout_path.clone().or_else(|| pick_layout_save(&name)) };
+        // An older `.json` layout saves as a `.sesim` beside it, and stays as it was.
+        let p = if flags.save_as { pick_layout_save(&name) } else { state.layout_path.as_deref().map(crate::project_file::save_path).or_else(|| pick_layout_save(&name)) };
         if let Some(p) = p {
             state.layout_path = Some(p.clone());
             actions.0.push(Action::SaveLayout(p));

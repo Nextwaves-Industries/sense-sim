@@ -202,7 +202,7 @@ pub fn confirm_close(ctx: &egui::Context, tabs: &mut Tabs, state: &mut UiState, 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if theme::primary_button(ui, "Save").clicked() {
-                    let path = state.layout_path.clone().or_else(|| super::pick_layout_save(&state.scene_name));
+                    let path = state.layout_path.as_deref().map(crate::project_file::save_path).or_else(|| super::pick_layout_save(&state.scene_name));
                     if let Some(p) = path {
                         state.layout_path = Some(p.clone());
                         actions.0.push(Action::SaveLayout(p));

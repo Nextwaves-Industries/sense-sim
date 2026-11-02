@@ -28,6 +28,7 @@ mod prototype;
 mod remote;
 mod rtls;
 mod samples;
+mod project_file;
 mod scene;
 #[cfg(feature = "design")]
 mod sim;
@@ -122,6 +123,8 @@ fn main() {
             "--report" => rtls_report = args.next().unwrap_or(rtls_report),
             "--rtls-deploy" => rtls_deploy = true,
             "--sample" => sample = args.next().and_then(|n| n.parse::<usize>().ok()).map(|n| n.saturating_sub(1)),
+            // Double-clicking a project file arrives here.
+            _ if project_file::is_project_path(std::path::Path::new(&a)) => layouts.push(a),
             _ => root = Some(a),
         }
     }

@@ -41,7 +41,7 @@ pub fn defs() -> Vec<ToolDef> {
         def(
             "antenna_spec",
             "Set what the antenna has to do, before designing it. antenna_assess judges every run against this. Band in GHz; worst S11 in dB (default -10); optional gain in dBi (realized), total efficiency 0..1, axial ratio, front to back, and largest size in mm.",
-            json!({ "type": "object", "properties": { "f_lo_ghz": num, "f_hi_ghz": num, "s11_db": num, "min_gain_dbi": num, "min_efficiency": num, "max_axial_ratio_db": num, "min_front_to_back_db": num, "max_size_mm": { "type": "array", "items": num, "minItems": 3, "maxItems": 3 } }, "required": ["f_lo_ghz", "f_hi_ghz"] }),
+            json!({ "type": "object", "properties": { "f_lo_ghz": num, "f_hi_ghz": num, "s11_db": num, "min_gain_dbi": num, "min_efficiency": num, "max_axial_ratio_db": num, "min_front_to_back_db": num, "max_size_mm": { "type": "array", "items": num, "minItems": 3, "maxItems": 3 }, "chip": { "type": "string", "description": "For an RFID tag: a chip id from antenna_references, such as ucode9. It's then judged by power into the chip, not by S11" }, "chip_z": { "type": "array", "items": num, "minItems": 2, "maxItems": 2, "description": "The chip's series impedance [R, X] in ohms, X negative, when it isn't in the table or you have a measured value" }, "min_power_transfer": num, "eirp_dbm": { "type": "number", "description": "The reader's EIRP for the read range figure, 36 by default" } }, "required": ["f_lo_ghz", "f_hi_ghz"] }),
         ),
         def(
             "antenna_assess",
@@ -206,6 +206,22 @@ fn spec_tool(world: &mut World, i: &Value) -> ToolOutput {
         let v: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
         (v.len() == 3).then(|| [v[0] * 1e-3, v[1] * 1e-3, v[2] * 1e-3])
     });
+    // A chip with no published impedance has to stop here: guessing one would quietly tune the
+    // design to the wrong chip.
+    let chip = i["chip"].as_str().filter(|c| !c.is_empty()).map(|id| antenna_core::tag::chip(id).ok_or(id));
+    let chip = match chip {
+        Some(Err(id)) => return ToolOutput::err(format!("No chip '{id}': see antenna_references, or give chip_z.")),
+        Some(Ok(c)) => Some(c),
+        None => None,
+    };
+    let given_z = i["chip_z"].as_array().filter(|a| a.len() == 2).and_then(|a| Some((a[0].as_f64()?, a[1].as_f64()?)));
+    let chip_z = given_z.or_else(|| chip.and_then(|c| c.z));
+    if let (Some(c), None) = (chip, chip_z) {
+        return ToolOutput::err(format!("{} has no published impedance, so a design can't be matched to it yet. {} Ask the user for the vendor's figure or a measurement, then give it as chip_z [R, X]. Don't borrow another chip's value.", c.name, c.note));
+    }
+    if chip_z.is_some_and(|(r, x)| r <= 0.0 || x >= 0.0) {
+        return ToolOutput::err("chip_z is [R, X] in series form: a chip has positive resistance and negative reactance, like [15, -231].");
+    }
     let req = Requirements {
         f_lo: lo * 1e9,
         f_hi: hi * 1e9,
@@ -215,6 +231,9 @@ fn spec_tool(world: &mut World, i: &Value) -> ToolOutput {
         max_axial_ratio_db: i["max_axial_ratio_db"].as_f64(),
         min_front_to_back_db: i["min_front_to_back_db"].as_f64(),
         max_size_m: size,
+        chip_z,
+        min_power_transfer: i["min_power_transfer"].as_f64(),
+        read_range_from: chip.and_then(|c| c.read_dbm).map(|read| (read, i["eirp_dbm"].as_f64().unwrap_or(36.0))),
     };
     let fc = req.center();
     let setup = world.resource::<Studio>().project.setup.clone();

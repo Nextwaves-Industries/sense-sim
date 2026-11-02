@@ -54,7 +54,7 @@ pub fn parse_rtls(v: &Value) -> (Vec<(Device, Transform)>, Vec<Zone>) {
 }
 
 pub fn read_layout_rtls(path: &Path) -> anyhow::Result<(Vec<(Device, Transform)>, Vec<Zone>)> {
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let v = crate::project_file::read(path)?;
     super::radio::load_object_materials(&v["rtls"]["object_materials"]);
     Ok(parse_rtls(&v["rtls"]))
 }
@@ -74,10 +74,10 @@ pub fn after_actions(
         let extra = rtls_json(devices.iter().map(|(_, d, t)| (d.clone(), *t)), zones.iter().map(|(_, z)| z.clone()));
         let n = devices.iter().count();
         let res = (|| -> anyhow::Result<()> {
-            let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            let mut v = crate::project_file::read(&path)?;
             v["rtls"] = extra;
             v["version"] = json!(3);
-            std::fs::write(&path, serde_json::to_string_pretty(&v)?)?;
+            crate::project_file::write(&path, &v)?;
             Ok(())
         })();
         match res {

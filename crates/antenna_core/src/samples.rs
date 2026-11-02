@@ -74,13 +74,20 @@ pub struct Sample {
     pub min_gain_dbi: f64,
     /// Which sense of circular polarisation it's held to.
     pub pol: Option<PolGoal>,
+    /// A tag's chip, from `tag::CHIPS`: it's then judged by power into that chip, not by reflection.
+    pub chip: Option<&'static str>,
+    /// The least power transfer into the chip it's held to across the band, 0 to 1.
+    pub min_transfer: f64,
 }
 
 const fn base(id: &'static str, title: &'static str, group: Group, about: &'static str, template: &'static str, f0: &'static str, band: (f64, f64), sweep: (f64, f64)) -> Sample {
-    Sample { id, title, group, about, template, f0, band, sweep, sets: &[], metal: "PEC", substrate: None, drive: &[], opens: Opens::FarField, limit_db: -10.0, min_gain_dbi: -40.0, pol: None }
+    Sample { id, title, group, about, template, f0, band, sweep, sets: &[], metal: "PEC", substrate: None, drive: &[], opens: Opens::FarField, limit_db: -10.0, min_gain_dbi: -40.0, pol: None, chip: None, min_transfer: 0.0 }
 }
 
-static SAMPLES: [Sample; 28] = [
+static SAMPLES: [Sample; 31] = [
+    Sample { sets: &[("Lx", "95mm"), ("w", "1mm"), ("a", "28mm"), ("b", "2.6mm"), ("g", "1mm"), ("n", "4"), ("Hm", "3.5mm"), ("s", "3.5mm"), ("x0", "16mm")], metal: "Aluminium", limit_db: 1.0, chip: Some("ucode9"), min_transfer: 0.7, ..base("rfid_tag_inlay", "RFID tag inlay, 95 x 8 mm", Group::Rfid, "A meandered dipole with a T-match, inductive to suit a capacitive chip, here UCODE 9. Judged by power reaching the chip, since S11 means nothing for a tag.", "rfid_tag", "915MHz", (0.902, 0.928), (0.82, 1.01)) },
+    Sample { sets: &[("h", "0.025*lambda0"), ("L", "0.46*lambda0"), ("t", "0.075*lambda0"), ("xf", "0.14*lambda0")], metal: "Aluminium", min_gain_dbi: 8.0, pol: Some(PolGoal::Rhcp), limit_db: -9.5, ..base("rfid_reader_cp_eu", "RFID reader panel, circular, EU band", Group::Rfid, "An air-spaced patch with two corners cut and one feed: right-hand circular over 865-868 MHz with no hybrid, the low-cost way to read tags at any rotation.", "rfid_reader_cp", "866.5MHz", (0.865, 0.868), (0.8, 0.94)) },
+    Sample { sets: &[("h", "0.04*lambda0"), ("L", "0.448*lambda0"), ("xf", "0.11*lambda0")], drive: &[(1.0, 0.0), (1.0, -90.0)], metal: "Aluminium", min_gain_dbi: 8.0, pol: Some(PolGoal::Rhcp), ..base("rfid_reader_dual_us", "RFID reader panel, circular, US band", Group::Rfid, "An air-spaced patch fed on two axes in quadrature: right-hand circular across all of 902-928 MHz, where one feed runs out of axial ratio. The shape of a commercial panel.", "rfid_reader_dual", "915MHz", (0.902, 0.928), (0.82, 1.01)) },
     Sample { sets: &[("h", "0.04*lambda0"), ("L", "0.443*lambda0"), ("W", "0.55*lambda0"), ("yf", "0.25*L"), ("wp", "lambda0/40")], metal: "Aluminium", min_gain_dbi: 9.0, ..base("rfid_panel", "RFID reader panel, US band", Group::Rfid, "An air-spaced aluminium patch for a UHF reader across the 902–928 MHz band: the low-loss panel that goes on a dock door or a shelf end.", "patch_air", "915MHz", (0.902, 0.928), (0.82, 1.01)) },
     Sample { sets: &[("n_dir", "6")], metal: "Aluminium", min_gain_dbi: 9.0, ..base("rfid_yagi", "RFID long-range Yagi, EU band", Group::Rfid, "Reflector, driven element and six directors for the 865–868 MHz band, for reading across a yard: more range, in a narrower beam.", "yagi", "866.5MHz", (0.865, 0.868), (0.78, 0.95)) },
     Sample { opens: Opens::Gate, limit_db: 1.0, ..base("rfid_gate_eu", "RFID security gate, EU band", Group::Rfid, "Five separately fed elements on a pedestal, tested for read rate through the aisle: the tags read walking through, and those on display that shouldn't be.", "rfid_gate", "866.5MHz", (0.865, 0.868), (0.865, 0.868)) },
@@ -167,6 +174,8 @@ pub struct Figures {
     pub rhcp: bool,
     /// Where feed 1 matches best.
     pub resonance: Option<f64>,
+    /// The worst power transfer into its chip across the band, for a tag.
+    pub worst_transfer: Option<f64>,
 }
 
 impl Sample {
@@ -198,12 +207,16 @@ impl Sample {
         }
         let m = r.combined(r.far_index(self.centre())?, &weights)?.metrics();
         let resonance = r.network.resonances(0).into_iter().min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0);
-        Some(Figures { worst_db, gain_dbi: m.peak_realized_dbi, axial_ratio_db: m.axial_ratio_db, rhcp: m.rhcp_at_peak, resonance })
+        let worst_transfer = self.chip.and_then(crate::tag::chip).and_then(|c| c.z).map(|(re, im)| band.zin(0).iter().map(|z| crate::tag::power_transfer(*z, C64::new(re, im))).fold(1.0, f64::min));
+        Some(Figures { worst_db, gain_dbi: m.peak_realized_dbi, axial_ratio_db: m.axial_ratio_db, rhcp: m.rhcp_at_peak, resonance, worst_transfer })
     }
 
     /// Where it falls short of what it's held to, in words.
     pub fn shortfalls(&self, f: &Figures) -> Vec<String> {
         let mut out = Vec::new();
+        if self.chip.is_some() && !f.worst_transfer.is_some_and(|t| t >= self.min_transfer) {
+            out.push(format!("power into the chip {:?} against {:.2}", f.worst_transfer, self.min_transfer));
+        }
         if self.limit_db < 0.0 && !(f.worst_db <= self.limit_db) {
             out.push(format!("worst match {:.1} dB against {:.1}", f.worst_db, self.limit_db));
         }
@@ -255,6 +268,8 @@ mod tests {
             assert!(all().iter().any(|s| s.group == g), "{}", g.label());
         }
         assert_eq!(by_id("rfid_panel").unwrap().band_text(), "902–928 MHz");
+        let tag = by_id("rfid_tag_inlay").unwrap();
+        assert!(tag.chip.and_then(crate::tag::chip).is_some_and(|c| c.z.is_some()), "a tag sample needs a chip with a published impedance");
         assert_eq!(by_id("wifi_ifa").unwrap().band_text(), "2.4–2.4835 GHz");
         assert_eq!(by_id("ism433_coil").unwrap().band_text(), "433.05–434.79 MHz");
         assert_eq!(by_id("scanner_discone").unwrap().band_text(), "700 MHz – 2 GHz");
@@ -303,6 +318,30 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 10, "{checked}");
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// A reference design is what a designer starts from, so it's solved here whatever its size:
+    /// the test above skips the large ones.
+    #[test]
+    fn every_reference_design_does_what_it_says() {
+        let mut problems = Vec::new();
+        for r in crate::references::REFERENCES.iter() {
+            let s = by_id(r.sample).unwrap();
+            if s.opens != Opens::FarField {
+                continue;
+            }
+            let p = s.project().unwrap();
+            let g = p.geometry().unwrap();
+            if p.solver_for(&g) == SolverKind::Fdtd {
+                problems.push(format!("{}: needs FDTD, so this test can't hold it to anything", s.id));
+                continue;
+            }
+            let (result, n, secs) = solve(&p, &g);
+            let f = s.figures(&result).unwrap();
+            println!("{:20} {n:5} unk {secs:5.1} s worst {:6.1} dB gain {:5.1} dBi AR {:5.1} {} transfer {:?}", s.id, f.worst_db, f.gain_dbi, f.axial_ratio_db, if f.rhcp { "RHCP" } else { "LHCP" }, f.worst_transfer);
+            problems.extend(s.shortfalls(&f).into_iter().map(|c| format!("{}: {c}", s.id)));
+        }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 

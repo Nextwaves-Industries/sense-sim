@@ -15,7 +15,7 @@ use super::gate::{CallCtx, Origin};
 use super::llm::{Block, Message, Provider, ToolDef};
 use super::session::SessionWriter;
 use super::tools::{self, ToolJob, ToolOutput};
-use super::{Event, Question, images, planning, toolmaker, workspace};
+use super::{Event, Question, images, planning, python, toolmaker, workspace};
 use crate::mcp::client::McpHub;
 
 /// Who made a tool call.
@@ -25,6 +25,8 @@ pub enum Who {
     Model,
     /// A step of a `custom_` macro the model called.
     Macro,
+    /// A script the model ran, through `sensesim.call`.
+    Script,
 }
 
 /// One tool call that actually ran.
@@ -270,6 +272,10 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
                     return planning::ask(input, shared_turn);
                 }
                 let ctx = CallCtx { origin: Origin::Assistant, log: Some(log.clone()), cancel: Some(cancel.clone()), planning: Some(plan_flag.clone()) };
+                if name == python::TOOL {
+                    let allowed = tools::gate_only(tx, name, input.clone(), ctx);
+                    return if allowed.is_error { allowed } else { python::run(input, shared_turn) };
+                }
                 match files.as_deref().filter(|_| workspace::is_tool(name)) {
                     // These run here, not on the app's main thread, once the gate has agreed.
                     Some(files) => {

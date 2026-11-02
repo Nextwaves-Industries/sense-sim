@@ -564,7 +564,7 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ),
         def(
             "save_layout",
-            "Save the scene as a layout JSON file.",
+            "Save the project as a .sesim file: the scene with its devices, plant and studies.",
             json!({ "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }),
         ),
         def(
@@ -1488,6 +1488,8 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
         "save_layout" | "export_usda" => match i["path"].as_str().filter(|s| !s.is_empty()) {
             Some(p) => {
                 let p = PathBuf::from(p);
+                // Whatever name it's given, a project is a project file.
+                let p = if job.name == "save_layout" { crate::project_file::save_path(&p) } else { p };
                 let action = if job.name == "save_layout" { Action::SaveLayout(p.clone()) } else { Action::ExportUsda(p.clone()) };
                 world.resource_mut::<Actions>().0.push(action);
                 ToolOutput::text(format!("writing {}", p.display()))

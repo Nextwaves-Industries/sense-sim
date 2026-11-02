@@ -1475,7 +1475,7 @@ pub fn apply_actions(
                     })
                     .collect();
                 let doc = serde_json::json!({ "format": "sense_sim_layout", "version": 2, "objects": list });
-                status.0 = match std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()) {
+                status.0 = match crate::project_file::write(&path, &doc) {
                     Ok(()) => {
                         undo.mark_saved();
                         format!("Saved {} objects to {}", list.len(), path.display())
@@ -1510,8 +1510,7 @@ pub fn apply_actions(
 /// Objects to spawn, and objects (`"download": folder` instead of `"asset"`)
 /// whose asset still has to be downloaded.
 fn load_layout(path: &Path) -> anyhow::Result<(Vec<PendingSpawn>, Vec<PendingDownload>)> {
-    let txt = std::fs::read_to_string(path)?;
-    let v: serde_json::Value = serde_json::from_str(&txt)?;
+    let v = crate::project_file::read(path)?;
     let arr = |o: &serde_json::Value, k: &str| -> Vec<f32> {
         o[k].as_array().map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect()).unwrap_or_default()
     };
@@ -1971,6 +1970,22 @@ pub(crate) mod lock_tests {
         let locked = |n: &str| spawns.iter().find(|s| s.name.as_deref() == Some(n)).unwrap().locked;
         assert!(locked("kept"));
         assert!(!locked("free"));
+    }
+
+    /// The way the app really saves and opens one, ending in a file that isn't text.
+    #[test]
+    fn a_project_saves_and_opens_as_a_sesim_file() {
+        let mut w = scene();
+        object(&mut w, "Kệ hàng 3", true);
+        let path = std::env::temp_dir().join(format!("sense_sim_project_test_{}.sesim", std::process::id()));
+        act(&mut w, vec![Action::SaveLayout(path.clone())]);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&bytes).is_err(), "it isn't JSON on disk");
+        let (spawns, _) = load_layout(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(spawns[0].name.as_deref(), Some("Kệ hàng 3"));
+        assert!(spawns[0].locked);
     }
 
     #[test]

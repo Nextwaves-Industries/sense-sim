@@ -144,11 +144,15 @@ OpenEMS), or records a real measurement (`outcomes_check`, `site_survey_fit`, `s
 `site_acceptance_score`, drift tools, `design_fit_measured`), asks in every mode. MCP clients can't
 be asked, so those calls are refused for them.
 
+**Project files.** A project saves as one `.sesim` file, a compressed container like a `.docx`, holding the scene, devices, plant, simulation studies and factory view. The installer makes double-clicking one open the app. Layouts saved as `.json` by earlier versions still open, and saving one writes a `.sesim` beside it. A 3D design still sits next to it as a `.sc` file of the same name.
+
 **Files.** Each chat has a working folder under `%LOCALAPPDATA%/SenseSim/agent`. `open_file` opens
 a file by type: a layout in a new tab, DXF or Gerber in Antenna Studio, STEP in 3D Design, IFC as a
 building, an image for the assistant to see. `open_external` shows a document, folder or web page in
 its own app; it can't run programs, and it asks first. Settings shows how much saved chats take up,
 and can clear them.
+
+**Python.** The first time the assistant wants a script, it asks to download Python (about 150 MB, about 400 MB on disk, in %LOCALAPPDATA%/SenseSim/python; your own Python isn't touched). uv and every package are pinned by hash. Scripts run in a Windows AppContainer: no network, including this computer's own ports, and no access to your files or API keys beyond the chat's working folder. A script reaches the app only through `sensesim.call`, with the same approvals as any call, and it can't record measurements. If the sandbox can't start, the script doesn't run.
 
 **Long tasks.** A request stops and asks once it passes its budget (2M charged tokens, 600 model
 calls or 3 hours by default; set in gent.json). The panel shows tokens used, and a cost for models

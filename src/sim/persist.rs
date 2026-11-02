@@ -72,15 +72,15 @@ fn save(path: &Path, state: &SimState, slot: &Slot) -> Result<Option<usize>> {
             body_count = Some(bodies);
         }
     }
-    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let mut v = crate::project_file::read(path)?;
     v["simulation"] = section(&state.studies, design_name.as_deref());
-    std::fs::write(path, serde_json::to_string_pretty(&v)?)?;
+    crate::project_file::write(path, &v)?;
     Ok(body_count)
 }
 
 /// Reads a layout's section. A design with unsaved work open is left alone, and said so.
 fn load(path: &Path, state: &mut SimState, slot: &mut Slot) -> Result<String> {
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let v = crate::project_file::read(path)?;
     let section = &v["simulation"];
     let (studies, skipped) = parse_section(section);
     let count = studies.len();

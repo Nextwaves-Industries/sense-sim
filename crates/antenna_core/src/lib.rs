@@ -24,11 +24,15 @@ pub mod optimize;
 pub mod project;
 pub mod reconfig;
 pub mod recipes;
+pub mod references;
 pub mod report;
 pub mod samples;
 pub mod sketch;
 pub mod sparam;
+pub mod tag;
 pub mod templates;
+#[cfg(test)]
+mod rfid_tuning;
 
 pub use num_complex::Complex64 as C64;
 

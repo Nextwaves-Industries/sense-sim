@@ -39,17 +39,33 @@ impl Cancel {
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
     }
+
+    /// What [`cancel`] should end, for a process started without `Command`.
+    #[cfg(windows)]
+    pub(super) fn set_job(&self, job: job_object::Job) {
+        if let Ok(mut slot) = self.job.lock() {
+            *slot = Some(job);
+        }
+    }
+
+    /// Closing the job ends anything still in it.
+    #[cfg(windows)]
+    pub(super) fn clear_job(&self) {
+        if let Ok(mut slot) = self.job.lock() {
+            *slot = None;
+        }
+    }
 }
 
 /// Windows ends every process of a job when its last handle closes, which happens when this
 /// process dies, so a solver cannot outlive Sense Sim.
 #[cfg(windows)]
-mod job_object {
+pub(super) mod job_object {
     use std::os::windows::io::AsRawHandle;
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
     };
 
     pub struct Job(HANDLE);
@@ -77,6 +93,11 @@ mod job_object {
     }
 
     pub fn attach(child: &std::process::Child) -> Option<Job> {
+        attach_handle(child.as_raw_handle() as HANDLE, None)
+    }
+
+    /// Puts a process in a new job, optionally capping the memory each process in it may commit.
+    pub fn attach_handle(process: HANDLE, memory_bytes: Option<usize>) -> Option<Job> {
         // SAFETY: plain Win32 calls on handles we own; `info` outlives the call.
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
@@ -86,8 +107,12 @@ mod job_object {
             let job = Job(job);
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if let Some(limit) = memory_bytes {
+                info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+                info.ProcessMemoryLimit = limit;
+            }
             let set = SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, &info as *const _ as *const core::ffi::c_void, std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32);
-            (set != 0 && AssignProcessToJobObject(job.0, child.as_raw_handle() as _) != 0).then_some(job)
+            (set != 0 && AssignProcessToJobObject(job.0, process) != 0).then_some(job)
         }
     }
 }
