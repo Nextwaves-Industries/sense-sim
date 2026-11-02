@@ -753,11 +753,7 @@ pub fn ui_system(
 
     // ---------------- Empty scene hint
     let page_needs_scene = !slot.rtls_open || !matches!(rtls.local.page(), crate::rtls::ui::Page::Fdtd | crate::rtls::ui::Page::Outcomes);
-<<<<<<< HEAD
-    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && !slot.results_shown && page_needs_scene {
-=======
-    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && page_needs_scene && slot.bench.current != Workbench::Factory {
->>>>>>> 93773a6 (Factory workbench: device list, events and 3D markers)
+    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && !slot.results_shown && page_needs_scene && slot.bench.current != Workbench::Factory {
         egui::Area::new(egui::Id::new("empty_scene"))
             .order(egui::Order::Background)
             .pivot(Align2::CENTER_CENTER)
