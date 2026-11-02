@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::primitives::Aabb;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -14,6 +15,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use rayon::prelude::*;
 
 use crate::bvh::Bvh;
+use crate::lod::{self, LodLevel, ProtoLod};
 use crate::usd_load::{self, JointKind, MaterialData, TexRef};
 
 /// A loaded asset ready to be instanced any number of times.
@@ -47,6 +49,11 @@ pub struct ProtoPart {
     pub transform: Transform,
     /// Triangles in mesh space, for fast ray casts.
     pub bvh: Arc<Bvh>,
+    /// Bounds of the mesh, shared by all its versions (see `lod`).
+    pub aabb: Aabb,
+    pub triangles: u32,
+    /// Coarser versions of `mesh` for zooming out, finest first.
+    pub lods: Vec<ProtoLod>,
 }
 
 #[derive(Clone, Debug)]
@@ -146,12 +153,18 @@ pub struct PrototypeCache {
     pub max_texture: u32,
     tx: Sender<JobResult>,
     rx: Receiver<JobResult>,
+    /// Waiting for a free loader, the latest last: it is the one being looked at.
+    queue: Vec<PathBuf>,
+    /// Loaders running; a layout can ask for hundreds of assets at once.
+    running: usize,
+    max_running: usize,
 }
 
 impl Default for PrototypeCache {
     fn default() -> Self {
         let (tx, rx) = unbounded();
-        Self { states: HashMap::new(), max_texture: 1024, tx, rx }
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        Self { states: HashMap::new(), max_texture: 1024, tx, rx, queue: Vec::new(), running: 0, max_running: (cores / 3).clamp(2, 6) }
     }
 }
 
@@ -173,15 +186,23 @@ impl PrototypeCache {
             return;
         }
         self.states.insert(path.to_path_buf(), ProtoState::Loading);
-        let tx = self.tx.clone();
-        let path = path.to_path_buf();
-        let max_tex = self.max_texture;
-        std::thread::spawn(move || {
-            let t = std::time::Instant::now();
-            let result = std::panic::catch_unwind(|| prepare(&path, max_tex))
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("loader panicked")));
-            let _ = tx.send(JobResult { path, result, ms: t.elapsed().as_secs_f32() * 1000.0 });
-        });
+        self.queue.push(path.to_path_buf());
+        self.start_loaders();
+    }
+
+    fn start_loaders(&mut self) {
+        while self.running < self.max_running {
+            let Some(path) = self.queue.pop() else { break };
+            self.running += 1;
+            let tx = self.tx.clone();
+            let max_tex = self.max_texture;
+            std::thread::spawn(move || {
+                let t = std::time::Instant::now();
+                let result = std::panic::catch_unwind(|| prepare(&path, max_tex))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("loader panicked")));
+                let _ = tx.send(JobResult { path, result, ms: t.elapsed().as_secs_f32() * 1000.0 });
+            });
+        }
     }
 
     pub fn retry(&mut self, path: &Path) {
@@ -204,7 +225,7 @@ struct JobResult {
 
 /// Everything built off the main thread.
 struct Prepared {
-    meshes: Vec<(String, String, Mesh, Option<usize>, Transform, Option<usize>, Arc<Bvh>)>,
+    meshes: Vec<PreparedPart>,
     links: Vec<ProtoJoint>,
     unit: f32,
     materials: Vec<PreparedMaterial>,
@@ -215,6 +236,19 @@ struct Prepared {
     triangles: usize,
     warnings: Vec<String>,
     detected: crate::plant::ports::Detected,
+}
+
+struct PreparedPart {
+    name: String,
+    prim_path: String,
+    mesh: Mesh,
+    material: Option<usize>,
+    transform: Transform,
+    body: Option<usize>,
+    bvh: Arc<Bvh>,
+    aabb: Aabb,
+    triangles: u32,
+    lods: Vec<LodLevel>,
 }
 
 struct PreparedMaterial {
@@ -335,12 +369,16 @@ fn prepare(path: &Path, max_tex: u32) -> anyhow::Result<Prepared> {
         .map(|part| {
             let tangents = part.material.map(|i| needs_tangents[i]).unwrap_or(false);
             let transform = Transform::from_matrix(Mat4::from_cols_array(&part.world));
-            let mat = part.material;
+            let material = part.material;
             let name = part.name.clone();
-            let prim = part.prim_path.clone();
-            let body = body_of(&prim);
+            let prim_path = part.prim_path.clone();
+            let body = body_of(&prim_path);
             let bvh = Arc::new(Bvh::new(&part.positions, &part.indices));
-            (name, prim, build_mesh(part, tangents), mat, transform, body, bvh)
+            let triangles = (part.indices.len() / 3) as u32;
+            let mesh = build_mesh(part, tangents);
+            let aabb = lod::mesh_bounds(&mesh).unwrap_or_default();
+            let lods = lod::build_levels(&mesh);
+            PreparedPart { name, prim_path, mesh, material, transform, body, bvh, aabb, triangles, lods }
         })
         .collect();
 
@@ -532,20 +570,29 @@ fn build_mesh(part: usd_load::MeshPart, tangents: bool) -> Mesh {
 // ---------------------------------------------------------------------------
 // Main-thread finalization
 
+/// Main-thread time per frame for turning loaded assets into meshes and materials.
+const FINALIZE_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+
 pub fn receive_prototypes(
     mut cache: ResMut<PrototypeCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let results: Vec<JobResult> = cache.rx.try_iter().collect();
-    for job in results {
+    // At least one per frame; the rest wait if a frame has had its share.
+    let started = std::time::Instant::now();
+    while let Ok(job) = cache.rx.try_recv() {
+        cache.running -= 1;
         let state = match job.result {
             Ok(p) => ProtoState::Ready(Arc::new(finalize(p, job.ms, &mut meshes, &mut images, &mut materials))),
             Err(e) => ProtoState::Failed(format!("{e:#}")),
         };
         cache.states.insert(job.path, state);
+        if started.elapsed() > FINALIZE_BUDGET {
+            break;
+        }
     }
+    cache.start_loaders();
 }
 
 fn finalize(
@@ -571,14 +618,17 @@ fn finalize(
     let parts = p
         .meshes
         .into_iter()
-        .map(|(name, prim_path, mesh, mat, transform, body, bvh)| ProtoPart {
-            name,
-            body,
-            prim_path,
-            mesh: meshes.add(mesh),
-            material: mat.map(|i| mat_handles[i].clone()).unwrap_or_else(|| default_mat.clone()),
-            transform,
-            bvh,
+        .map(|part| ProtoPart {
+            name: part.name,
+            body: part.body,
+            prim_path: part.prim_path,
+            mesh: meshes.add(part.mesh),
+            material: part.material.map(|i| mat_handles[i].clone()).unwrap_or_else(|| default_mat.clone()),
+            transform: part.transform,
+            bvh: part.bvh,
+            aabb: part.aabb,
+            triangles: part.triangles,
+            lods: part.lods.into_iter().map(|l| ProtoLod { mesh: meshes.add(l.mesh), error: l.error, triangles: l.triangles }).collect(),
         })
         .collect();
     Prototype {

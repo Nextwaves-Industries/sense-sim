@@ -1,0 +1,544 @@
+999
+Sense Sim sample: a five element RFID gate panel. Drawing x is model y, drawing y is model z, in mm. Import upright, facing x.
+  0
+SECTION
+  2
+HEADER
+  9
+$ACADVER
+  1
+AC1015
+  9
+$INSUNITS
+ 70
+4
+  0
+ENDSEC
+  0
+SECTION
+  2
+TABLES
+  0
+TABLE
+  2
+LAYER
+100
+AcDbSymbolTable
+ 70
+4
+  0
+LAYER
+100
+AcDbSymbolTableRecord
+100
+AcDbLayerTableRecord
+  2
+PANEL
+ 70
+0
+ 62
+8
+  6
+CONTINUOUS
+  0
+LAYER
+100
+AcDbSymbolTableRecord
+100
+AcDbLayerTableRecord
+  2
+ELEMENTS
+ 70
+0
+ 62
+1
+  6
+CONTINUOUS
+  0
+LAYER
+100
+AcDbSymbolTableRecord
+100
+AcDbLayerTableRecord
+  2
+FEED
+ 70
+0
+ 62
+3
+  6
+CONTINUOUS
+  0
+LAYER
+100
+AcDbSymbolTableRecord
+100
+AcDbLayerTableRecord
+  2
+NOTES
+ 70
+0
+ 62
+7
+  6
+CONTINUOUS
+  0
+ENDTAB
+  0
+ENDSEC
+  0
+SECTION
+  2
+ENTITIES
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+PANEL
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+0.000
+ 10
+-229.349
+ 20
+222.635
+ 10
+229.349
+ 20
+222.635
+ 10
+229.349
+ 20
+1677.365
+ 10
+-229.349
+ 20
+1677.365
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-6.553
+ 20
+320.927
+ 10
+6.553
+ 20
+320.927
+ 10
+6.553
+ 20
+388.913
+ 10
+-6.553
+ 20
+388.913
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-6.553
+ 20
+397.104
+ 10
+6.553
+ 20
+397.104
+ 10
+6.553
+ 20
+465.090
+ 10
+-6.553
+ 20
+465.090
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-72.081
+ 20
+664.951
+ 10
+-4.096
+ 20
+664.951
+ 10
+-4.096
+ 20
+678.057
+ 10
+-72.081
+ 20
+678.057
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+4.096
+ 20
+664.951
+ 10
+72.081
+ 20
+664.951
+ 10
+72.081
+ 20
+678.057
+ 10
+4.096
+ 20
+678.057
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-6.553
+ 20
+877.919
+ 10
+6.553
+ 20
+877.919
+ 10
+6.553
+ 20
+945.904
+ 10
+-6.553
+ 20
+945.904
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-6.553
+ 20
+954.096
+ 10
+6.553
+ 20
+954.096
+ 10
+6.553
+ 20
+1022.081
+ 10
+-6.553
+ 20
+1022.081
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-72.081
+ 20
+1221.943
+ 10
+-4.096
+ 20
+1221.943
+ 10
+-4.096
+ 20
+1235.049
+ 10
+-72.081
+ 20
+1235.049
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+4.096
+ 20
+1221.943
+ 10
+72.081
+ 20
+1221.943
+ 10
+72.081
+ 20
+1235.049
+ 10
+4.096
+ 20
+1235.049
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-6.553
+ 20
+1434.910
+ 10
+6.553
+ 20
+1434.910
+ 10
+6.553
+ 20
+1502.896
+ 10
+-6.553
+ 20
+1502.896
+  0
+LWPOLYLINE
+100
+AcDbEntity
+  8
+ELEMENTS
+100
+AcDbPolyline
+ 90
+4
+ 70
+1
+ 38
+81.911
+ 10
+-6.553
+ 20
+1511.087
+ 10
+6.553
+ 20
+1511.087
+ 10
+6.553
+ 20
+1579.073
+ 10
+-6.553
+ 20
+1579.073
+  0
+LINE
+100
+AcDbEntity
+  8
+FEED
+100
+AcDbLine
+ 10
+0.000
+ 20
+388.913
+ 30
+81.911
+ 11
+0.000
+ 21
+397.104
+ 31
+81.911
+  0
+LINE
+100
+AcDbEntity
+  8
+FEED
+100
+AcDbLine
+ 10
+-4.096
+ 20
+671.504
+ 30
+81.911
+ 11
+4.096
+ 21
+671.504
+ 31
+81.911
+  0
+LINE
+100
+AcDbEntity
+  8
+FEED
+100
+AcDbLine
+ 10
+0.000
+ 20
+945.904
+ 30
+81.911
+ 11
+0.000
+ 21
+954.096
+ 31
+81.911
+  0
+LINE
+100
+AcDbEntity
+  8
+FEED
+100
+AcDbLine
+ 10
+-4.096
+ 20
+1228.496
+ 30
+81.911
+ 11
+4.096
+ 21
+1228.496
+ 31
+81.911
+  0
+LINE
+100
+AcDbEntity
+  8
+FEED
+100
+AcDbLine
+ 10
+0.000
+ 20
+1502.896
+ 30
+81.911
+ 11
+0.000
+ 21
+1511.087
+ 31
+81.911
+  0
+MTEXT
+100
+AcDbEntity
+  8
+NOTES
+100
+AcDbMText
+ 10
+300
+ 20
+0
+ 30
+0
+ 40
+20
+  1
+Five element gate, 915 MHz
+  0
+ENDSEC
+  0
+EOF

@@ -13,8 +13,10 @@ pub mod fdtd;
 pub mod io;
 pub mod openems_local;
 pub mod persist;
+pub mod placement;
 pub mod planning;
 pub mod radio;
+pub mod region;
 pub mod rf;
 pub mod rng;
 pub mod sim;
@@ -61,6 +63,8 @@ pub struct RtlsSettings {
     pub show_zones: bool,
     pub show_beams: bool,
     pub show_labels: bool,
+    /// Regulatory region id (`region::Region`); empty = profile values as they are.
+    pub region: String,
 }
 
 impl Default for RtlsSettings {
@@ -83,6 +87,7 @@ impl Default for RtlsSettings {
             show_zones: true,
             show_beams: true,
             show_labels: true,
+            region: String::new(),
         }
     }
 }
@@ -122,6 +127,10 @@ pub enum LinkKind {
     Tdoa,
     Rssi,
     Rfid,
+    /// BLE angle of arrival: the value is the angle off the array's boresight (°).
+    Aoa,
+    WifiRtt,
+    WifiRssi,
 }
 
 /// One radio link of a tag during its last update.
@@ -139,6 +148,8 @@ pub struct Link {
     pub rssi_dbm: f32,
     /// Obstruction in typical walls along the path.
     pub wall_eq: f32,
+    /// The same for the UWB first-path delay (differs once materials are calibrated).
+    pub bias_eq: f32,
     pub true_distance: f32,
     pub used: bool,
 }
@@ -177,6 +188,18 @@ pub struct Track {
     pub attempts: u64,
     pub reads: u64,
     pub best_reader: Option<Entity>,
+    /// The height the engine is configured to solve at: where the tag stood when first seen.
+    /// It doesn't follow the tag, so a tag that climbs or is lifted shows the error.
+    pub plane_y: f32,
+    /// Where it was at its last update, to tell a moving tag from a parked one.
+    pub last_truth: Vec3,
+    /// Updates spent moving and parked.
+    pub moving_epochs: u64,
+    pub parked_epochs: u64,
+    /// RFID: chance one inventory round reads it, over the readers in range and their fades.
+    pub read_chance: f32,
+    /// RFID: when it was first read (s).
+    pub first_read: Option<f64>,
 }
 
 impl Track {
@@ -203,6 +226,12 @@ impl Track {
             attempts: 0,
             reads: 0,
             best_reader: None,
+            plane_y: truth.y,
+            last_truth: truth,
+            moving_epochs: 0,
+            parked_epochs: 0,
+            read_chance: 0.0,
+            first_read: None,
         }
     }
 }
@@ -223,14 +252,143 @@ pub struct SeriesPoint {
     pub reads: f32,
 }
 
+/// Position errors over a set of fixes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ErrorStats {
+    pub rmse: f32,
+    pub cep50: f32,
+    pub cep95: f32,
+    pub max: f32,
+    pub n: u64,
+}
+
+/// How long `RtlsState::errors` looks back (s). What a live view shows; a run's result is
+/// in `RtlsState::run`.
+pub const ERROR_WINDOW_S: f64 = 30.0;
+
+/// Position errors of one technology over a whole run, kept in bins 1 % wide, so an hour of
+/// fixes takes no more room than a minute.
+#[derive(Clone, Debug, Default)]
+pub struct RunStats {
+    /// Updates tried, with or without a fix.
+    pub attempts: u64,
+    pub fixes: u64,
+    /// Solutions thrown out for landing nowhere near the infrastructure.
+    pub rejected: u64,
+    sum_sq: f64,
+    max: f32,
+    bins: BTreeMap<u16, u64>,
+}
+
+impl RunStats {
+    const FIRST_M: f32 = 0.001;
+    const STEP: f32 = 1.01;
+
+    pub fn add(&mut self, e: f32) {
+        self.fixes += 1;
+        self.sum_sq += (e as f64).powi(2);
+        self.max = self.max.max(e);
+        let bin = ((e / Self::FIRST_M).max(1.0).ln() / Self::STEP.ln()) as u16;
+        *self.bins.entry(bin).or_default() += 1;
+    }
+
+    pub fn merge(&mut self, o: &Self) {
+        self.attempts += o.attempts;
+        self.fixes += o.fixes;
+        self.rejected += o.rejected;
+        self.sum_sq += o.sum_sq;
+        self.max = self.max.max(o.max);
+        for (b, n) in &o.bins {
+            *self.bins.entry(*b).or_default() += n;
+        }
+    }
+
+    /// The `rank`th smallest error, counting from 1.
+    fn ranked(&self, rank: u64) -> f32 {
+        let mut seen = 0;
+        for (b, n) in &self.bins {
+            seen += n;
+            if seen >= rank {
+                return (Self::FIRST_M * Self::STEP.powi(*b as i32 + 1)).min(self.max);
+            }
+        }
+        self.max
+    }
+
+    /// `None`: no fixes, so nothing is known.
+    pub fn stats(&self) -> Option<ErrorStats> {
+        (self.fixes > 0).then(|| ErrorStats {
+            rmse: (self.sum_sq / self.fixes as f64).sqrt() as f32,
+            cep50: self.ranked((self.fixes as f64 * 0.5).ceil() as u64),
+            cep95: self.ranked((self.fixes as f64 * 0.95).ceil() as u64),
+            max: self.max,
+            n: self.fixes,
+        })
+    }
+
+    /// Share of the updates that got a fix.
+    pub fn availability(&self) -> Option<f32> {
+        (self.attempts > 0).then(|| self.fixes as f32 / self.attempts as f32)
+    }
+
+    /// How far 95 % of the updates land, one without a fix counting as infinitely far:
+    /// infinite when more than 5 % of them had none, `None` if none were tried.
+    pub fn p95_counting_misses(&self) -> Option<f32> {
+        (self.attempts > 0).then(|| {
+            let rank = (self.attempts as f64 * 0.95).ceil() as u64;
+            if rank > self.fixes { f32::INFINITY } else { self.ranked(rank) }
+        })
+    }
+}
+
+/// One link's own random stream, and what stays with it while nothing moves. A stream per
+/// link means adding a device, or a different device order, changes no other link's draws.
+#[derive(Clone, Debug)]
+pub struct LinkState {
+    pub rng: Rng,
+    pub held: radio::LinkDraw,
+    ends: (Vec3, Vec3),
+    wall_eq: f32,
+}
+
+/// The state of a link (or a tag's own stream, keyed by itself), drawing what it holds again
+/// if an end has moved by `hold_m` or what's in the way has changed.
+pub fn link_state<'a>(links: &'a mut HashMap<(Entity, Entity), LinkState>, seed: u64, key: (Entity, Entity), ids: (&str, &str), ends: (Vec3, Vec3), wall_eq: f32, hold_m: f32) -> &'a mut LinkState {
+    let l = links.entry(key).or_insert_with(|| {
+        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ seed;
+        for b in ids.0.bytes().chain([0]).chain(ids.1.bytes()) {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+        let mut rng = Rng::new(h);
+        let held = radio::LinkDraw::new(&mut rng);
+        LinkState { rng, held, ends, wall_eq }
+    });
+    if l.ends.0.distance(ends.0) > hold_m || l.ends.1.distance(ends.1) > hold_m || l.wall_eq != wall_eq {
+        l.held = radio::LinkDraw::new(&mut l.rng);
+        l.ends = ends;
+        l.wall_eq = wall_eq;
+    }
+    l
+}
+
 #[derive(Resource)]
 pub struct RtlsState {
     pub time: f64,
     pub accum: f64,
     pub rng: Rng,
+    /// What this run was started with.
+    pub seed: u64,
+    pub links: HashMap<(Entity, Entity), LinkState>,
     pub tracks: HashMap<Entity, Track>,
-    /// (time, error m, tech) of recent fixes, for RMSE/CEP.
+    /// (time, error m, tech) of the fixes of the last `ERROR_WINDOW_S`, for live RMSE/CEP.
     pub errors: VecDeque<(f64, f32, &'static str)>,
+    /// The whole run, by technology and by whether the tag was moving.
+    pub run: BTreeMap<(&'static str, bool), RunStats>,
+    /// TDoA anchors without a clock-sync path to the others.
+    pub unsynced_anchors: usize,
+    /// Where those errors happened (true position, error, technology), for
+    /// finding the places a plan works badly.
+    pub error_spots: VecDeque<(Vec3, f32, &'static str)>,
     pub series: VecDeque<SeriesPoint>,
     pub log: VecDeque<(f64, String)>,
     pub alarms: BTreeMap<String, ActiveAlarm>,
@@ -261,8 +419,13 @@ impl RtlsState {
             time: 0.0,
             accum: 0.0,
             rng: Rng::new(seed),
+            seed,
+            links: HashMap::new(),
             tracks: HashMap::new(),
             errors: VecDeque::new(),
+            run: BTreeMap::new(),
+            unsynced_anchors: 0,
+            error_spots: VecDeque::new(),
             series: VecDeque::new(),
             log: VecDeque::new(),
             alarms: BTreeMap::new(),
@@ -289,12 +452,17 @@ impl RtlsState {
     /// Clears statistics (keeps devices and time).
     pub fn reset_metrics(&mut self) {
         self.errors.clear();
+        self.run.clear();
+        self.error_spots.clear();
         self.series.clear();
         self.rfid_reads.clear();
         for t in self.tracks.values_mut() {
             t.fixes = 0;
             t.attempts = 0;
             t.reads = 0;
+            t.moving_epochs = 0;
+            t.parked_epochs = 0;
+            t.first_read = None;
             t.trail.clear();
         }
     }
@@ -310,7 +478,8 @@ impl RtlsState {
         self.rf_coverage = rf_coverage;
     }
 
-    /// (rmse, cep50, cep95, max) over positioning fixes (UWB/BLE).
+    /// (rmse, cep50, cep95, max) over the positioning fixes of the last `ERROR_WINDOW_S`.
+    /// All zero with no fixes: use `error_stats_checked`, or `run_stats` for a whole run.
     pub fn error_stats(&self, tech: Option<&str>) -> (f32, f32, f32, f32) {
         let mut e: Vec<f32> = self.errors.iter().filter(|(_, _, t)| tech.is_none_or(|x| x == *t)).map(|(_, e, _)| *e).collect();
         if e.is_empty() {
@@ -320,6 +489,30 @@ impl RtlsState {
         let rmse = (e.iter().map(|x| x * x).sum::<f32>() / e.len() as f32).sqrt();
         let pct = |p: f32| e[((e.len() - 1) as f32 * p).round() as usize];
         (rmse, pct(0.5), pct(0.95), *e.last().unwrap())
+    }
+
+    /// The fixes of the last `ERROR_WINDOW_S`, `None` when there are none: no data isn't a
+    /// perfect result.
+    pub fn error_stats_checked(&self, tech: Option<&str>) -> Option<ErrorStats> {
+        let mut e: Vec<f32> = self.errors.iter().filter(|(_, _, t)| tech.is_none_or(|x| x == *t)).map(|(_, e, _)| *e).collect();
+        if e.is_empty() {
+            return None;
+        }
+        e.sort_by(f32::total_cmp);
+        let rmse = (e.iter().map(|x| x * x).sum::<f32>() / e.len() as f32).sqrt();
+        let pct = |p: f64| e[(((e.len() as f64) * p).ceil() as usize).clamp(1, e.len()) - 1];
+        Some(ErrorStats { rmse, cep50: pct(0.5), cep95: pct(0.95), max: *e.last().unwrap(), n: e.len() as u64 })
+    }
+
+    /// The whole run so far, for one technology (or all) and motion class (or both).
+    pub fn run_stats(&self, tech: Option<&str>, moving: Option<bool>) -> RunStats {
+        let mut out = RunStats::default();
+        for ((t, m), s) in &self.run {
+            if tech.is_none_or(|x| x == *t) && moving.is_none_or(|x| x == *m) {
+                out.merge(s);
+            }
+        }
+        out
     }
 
     pub fn rfid_rate(&self) -> f32 {
@@ -361,16 +554,21 @@ impl Plugin for RtlsPlugin {
         let cfg = RtlsConfig::load();
         let mut hub = Hub::default();
         hub.apply(&cfg.outputs);
+        let mut profiles = Profiles::load();
+        if let Err(e) = profiles.set_region(&cfg.settings.region) {
+            warn!("RTLS region: {e}");
+        }
         app.insert_resource(RtlsState::new(cfg.settings.seed))
             .insert_resource(cfg)
             .insert_resource(hub)
-            .insert_resource(Profiles::load())
+            .insert_resource(profiles)
             .init_resource::<DevicePlace>()
             .init_resource::<RtlsSelection>()
             .init_resource::<planning::Coverage>()
             .init_resource::<planning::AppliedAntenna>()
             .insert_resource(antenna::AntennaLibrary::load())
             .init_resource::<persist::LayoutHook>()
+            .init_resource::<view::DeviceHandles>()
             .init_resource::<ui::PlanJobs>()
             .init_resource::<ui::DeployState>()
             .init_resource::<ui::RtlsUiState>()

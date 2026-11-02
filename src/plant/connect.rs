@@ -50,7 +50,7 @@ impl PortRef {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Link {
     pub a: PortRef,
     pub b: PortRef,

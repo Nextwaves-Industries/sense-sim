@@ -2,34 +2,32 @@
 
 use bevy_egui::egui::{self, RichText, vec2};
 
-use super::{Filter, LeftTab, UiState};
+use super::{Filter, UiState};
 use crate::library::{DownloadState, Library};
 use crate::theme::{self, ONLINE, icon};
 
 pub fn show(ui: &mut egui::Ui, library: &mut Library, state: &mut UiState) {
     let list = library.downloads();
     let queued = list.iter().filter(|(_, s)| matches!(s, DownloadState::Queued)).count();
-    theme::panel_header(ui, "Downloads", |ui| {
-        if queued > 0 && ui.add(egui::Button::new(theme::label(icon::X, "Cancel queued")).small()).clicked() {
-            library.cancel_queued();
-        }
-    });
+    if queued > 0 && ui.add(egui::Button::new(theme::label(icon::X, "Cancel queued")).small()).clicked() {
+        library.cancel_queued();
+    }
     ui.label(RichText::new("Two downloads run at a time. Assets you clicked are placed when they finish.").small().color(theme::WEAK));
-    ui.add_space(6.0);
+    ui.add_space(2.0);
 
     if list.is_empty() {
-        theme::empty_state(ui, icon::CLOUD_ARROW_DOWN, "No downloads", "Online assets (blue, with a cloud badge) download when you click them in the library.");
+        ui.label(RichText::new("Online assets (blue, with a cloud badge) download when you click them in the library.").small().color(theme::WEAK));
         ui.vertical_centered(|ui| {
             if ui.button(theme::label(icon::GLOBE, "Browse online assets")).clicked() {
                 state.filter = Filter::Online;
-                state.open_tab(LeftTab::Library);
+                state.sections.library = true;
             }
         });
         return;
     }
 
     let mut cancel = None;
-    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("downloads").max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
         for (folder, st) in &list {
             let entry = library.entries.iter().position(|e| &e.folder == folder);
             if let Some(i) = entry {
@@ -46,8 +44,8 @@ pub fn show(ui: &mut egui::Ui, library: &mut Library, state: &mut UiState) {
                         }
                         None => {
                             let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                            ui.painter().rect_filled(r, 6.0, theme::BG);
-                            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon::CUBE, egui::FontId::proportional(18.0), theme::STROKE);
+                            ui.painter().rect_filled(r, 5.0, theme::HOVER);
+                            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon::CUBE, egui::FontId::proportional(18.0), theme::FAINT);
                         }
                     }
                     ui.vertical(|ui| {

@@ -1,6 +1,7 @@
-//! Deterministic placement of an asset from a photo measurement: position,
-//! yaw and (only when clearly needed) scale, computed from the measured
-//! footprint, the asset's real dimensions and the building axis.
+//! Deterministic placement of an asset standing in for a photo object: position,
+//! yaw and (only when clearly needed) scale, from where perspective and the
+//! assistant's estimates put the object, the asset's real dimensions and the
+//! building axis.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -13,6 +14,65 @@ pub struct Fit {
     pub translation: Vec3,
     pub yaw: f32,
     pub scale: f32,
+}
+
+/// Labels of things hung from the roof, however big: a banner can be taller than
+/// a rack, and only a rack is standing on a floor hidden from view.
+pub fn hangs_from_above(label: &str) -> bool {
+    const HANGING: [&str; 8] = ["hanging", "banner", "ceiling", "pendant", "lamp", "light", "duct", "suspended"];
+    let l = label.to_ascii_lowercase();
+    HANGING.iter().any(|h| l.contains(h))
+}
+
+/// A flat piece of the photo, placed so it covers exactly its own part of the
+/// view from the photo camera, at a guessed distance.
+pub struct Backdrop {
+    pub center: Vec3,
+    pub width: f32,
+    pub height: f32,
+    pub yaw: f32,
+}
+
+/// Where the region `b` (normalized x0, y0, x1, y1) of the photo goes at
+/// `distance` meters along the camera's forward axis.
+pub fn backdrop(scene: &PhotoScene, b: [f32; 4], distance: f32) -> Backdrop {
+    let cam = &scene.camera;
+    let (fx, fy) = (cam.fx_norm, cam.fx_norm * cam.aspect);
+    let (uc, vc) = ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5);
+    let f = &cam.frame;
+    // Camera axes in the world, as in floor_point: x right, y down, z forward.
+    let ray = Vec3::new((uc - 0.5) / fx, (vc - 0.5) / fy, 1.0);
+    let world = Vec3::new(ray.dot(f.x), ray.dot(f.y), ray.dot(f.z));
+    let forward = cam.forward();
+    Backdrop {
+        center: cam.eye() + world * distance,
+        width: (b[2] - b[0]) / fx * distance,
+        height: (b[3] - b[1]) / fy * distance,
+        yaw: yaw_facing_camera(Vec2::new(forward.x, forward.z)),
+    }
+}
+
+/// Where a stand-in's photo face goes so that it covers exactly its detection's
+/// box from the photo camera. A size estimate decides how far away that is:
+/// something known to be 2 m tall and this big in the photo is this far off. With
+/// none, where perspective put the object does.
+pub fn standin_spot(scene: &PhotoScene, obj: &PhotoObject, guess_w: Option<f32>, guess_h: Option<f32>) -> Option<Backdrop> {
+    let cam = &scene.camera;
+    let b = obj.bbox;
+    let (bw, bh) = ((b[2] - b[0]).max(1e-3), (b[3] - b[1]).max(1e-3));
+    let along = |c: Vec2| Vec3::new(c.x, 0.0, c.y).dot(cam.forward());
+    let d = match (guess_h, guess_w) {
+        (Some(h), _) => Some(h * cam.fx_norm * cam.aspect / bh),
+        (None, Some(w)) => Some(w * cam.fx_norm / bw),
+        _ => obj.footprint.map(|f| along(f.center)),
+    }?;
+    Some(backdrop(scene, b, d.max(0.3)))
+}
+
+/// Yaw that turns an asset's front (+Z) to the photo camera at the origin.
+pub fn yaw_facing_camera(center: Vec2) -> f32 {
+    let to_camera = -center.normalize_or_zero();
+    to_camera.x.atan2(to_camera.y)
 }
 
 /// Unit vector of local +X after a viewer yaw (rotation about +Y).
@@ -59,6 +119,7 @@ pub fn floor_point(scene: &PhotoScene, u: f32, v: f32) -> Option<Vec2> {
 pub fn fit(scene: &PhotoScene, obj: &PhotoObject, asset_dims: Vec3, yaw_override: Option<f32>) -> Fit {
     let dims = asset_dims.max(Vec3::splat(0.01));
     let fp = obj.footprint;
+    let yaw_override = yaw_override.or(obj.guess.yaw_deg.map(f32::to_radians));
     // Front-biased center of what the camera saw; fall back to where the box
     // bottom meets the floor.
     let seen = fp.map(|f| f.center).or_else(|| floor_point(scene, (obj.bbox[0] + obj.bbox[2]) * 0.5, obj.bbox[3])).unwrap_or(Vec2::new(0.0, -5.0));
@@ -135,7 +196,7 @@ pub fn fit(scene: &PhotoScene, obj: &PhotoObject, asset_dims: Vec3, yaw_override
     };
     // Tall things (columns, racks, machines) stand on the floor even when
     // their bottom is hidden behind something; only small objects sit higher.
-    let base = fp.filter(|f| f.height < 1.5).map(|f| f.base_y).unwrap_or(0.0);
+    let base = fp.filter(|f| f.height < 1.5 || hangs_from_above(&obj.label)).map(|f| f.base_y).unwrap_or(0.0);
     Fit { translation: Vec3::new(c.x, base, c.y), yaw, scale }
 }
 
@@ -153,14 +214,76 @@ mod tests {
             hfov_deg: 65.0,
             hfov_source: "given",
             camera: PhotoCamera::new(Frame::new(&floor), 65.0, 640, 480),
-            scale: 1.0,
+            camera_guess: None,
             objects: vec![],
-            walls: vec![],
-            floor: None,
             ceiling_y: None,
+            room: None,
             dominant_yaw: axis,
             placed: Default::default(),
+            colors: Default::default(),
+            no_ceiling: false,
         }
+    }
+
+    #[test]
+    fn a_backdrop_grows_with_distance_and_keeps_its_place_in_the_view() {
+        let sc = scene(0.0);
+        let near = backdrop(&sc, [0.4, 0.4, 0.6, 0.6], 5.0);
+        let far = backdrop(&sc, [0.4, 0.4, 0.6, 0.6], 10.0);
+        assert!((far.width - near.width * 2.0).abs() < 1e-4);
+        assert!((far.height - near.height * 2.0).abs() < 1e-4);
+        let (eye, a, b) = (sc.camera.eye(), (near.center - sc.camera.eye()).normalize(), (far.center - sc.camera.eye()).normalize());
+        assert!(a.dot(b) > 0.9999, "same ray from {eye}");
+        // Its front turns back to the camera.
+        assert!(axis_z(far.yaw).dot(Vec2::new(0.0, 1.0)) > 0.9);
+    }
+
+    #[test]
+    fn a_stand_in_covers_its_box_from_the_camera() {
+        let sc = scene(0.0);
+        let o = obj(Vec2::new(1.0, -6.0), Vec2::new(1.0, 0.5), 0.0, 1.0, false);
+        let spot = standin_spot(&sc, &o, None, None).unwrap();
+        // Corners of the face, in the face's own plane, project back onto the box.
+        let right = Vec3::new(sc.camera.frame.x.x, sc.camera.frame.y.x, sc.camera.frame.z.x);
+        let down = Vec3::new(sc.camera.frame.x.y, sc.camera.frame.y.y, sc.camera.frame.z.y);
+        let tl = spot.center - right * spot.width * 0.5 - down * spot.height * 0.5;
+        let br = spot.center + right * spot.width * 0.5 + down * spot.height * 0.5;
+        let (a, b) = (sc.camera.project(tl).unwrap(), sc.camera.project(br).unwrap());
+        for (got, want) in [(a.x, o.bbox[0]), (a.y, o.bbox[1]), (b.x, o.bbox[2]), (b.y, o.bbox[3])] {
+            assert!((got - want).abs() < 1e-3, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn a_size_estimate_sets_the_distance() {
+        let sc = scene(0.0);
+        let o = obj(Vec2::new(0.0, -6.0), Vec2::new(1.0, 0.5), 0.0, 1.0, false);
+        let near = standin_spot(&sc, &o, None, Some(1.0)).unwrap();
+        let far = standin_spot(&sc, &o, None, Some(2.0)).unwrap();
+        assert!((far.height - 2.0).abs() < 1e-3 && (near.height - 1.0).abs() < 1e-3);
+        let eye = sc.camera.eye();
+        assert!(((far.center - eye).length() / (near.center - eye).length() - 2.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_yaw_facing_the_camera_points_the_front_at_it() {
+        for c in [Vec2::new(0.0, -5.0), Vec2::new(3.0, -4.0), Vec2::new(-6.0, -1.0)] {
+            let front = axis_z(yaw_facing_camera(c));
+            assert!((front.dot(-c.normalize()) - 1.0).abs() < 1e-5, "{c}: front {front}");
+        }
+    }
+
+    #[test]
+    fn a_big_banner_stays_up_but_a_rack_stands_on_the_floor() {
+        let at = |label: &str| {
+            let mut o = obj(Vec2::new(0.0, -5.0), Vec2::new(4.0, 0.2), 0.0, 4.0, false);
+            o.label = label.into();
+            o.footprint.as_mut().unwrap().base_y = 2.5;
+            o.footprint.as_mut().unwrap().height = 2.0;
+            fit(&scene(0.0), &o, Vec3::new(4.0, 2.0, 0.2), None).translation.y
+        };
+        assert_eq!(at("hanging banner"), 2.5);
+        assert_eq!(at("pallet rack"), 0.0);
     }
 
     fn obj(center: Vec2, size: Vec2, yaw: f32, lateral: f32, radial: bool) -> PhotoObject {
@@ -172,6 +295,10 @@ mod tests {
             footprint: Some(Footprint { center, size, yaw, base_y: 0.0, height: 2.0, points: 500 }),
             lateral_width: lateral,
             radial,
+            color: None,
+            guess: Default::default(),
+            source: "",
+            checks: serde_json::Value::Null,
         }
     }
 

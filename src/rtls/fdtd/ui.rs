@@ -11,7 +11,7 @@ use super::post::{C, Pattern, Sweep};
 use super::{Fdtd, Slice, Status};
 use crate::rtls::planning::{AppliedAntenna, Coverage, FdtdAntenna, MapSource, Tech};
 use crate::rtls::antenna::AntennaLibrary;
-use crate::rtls::radio::{Material, MaterialCal};
+use crate::rtls::radio::{CalBand, CalSource, Material, MaterialCal};
 use crate::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -77,9 +77,9 @@ pub fn track_selection(sel: Res<crate::scene::Selection>, objects: Query<&crate:
     }
 }
 
-const BLUE: Color32 = Color32::from_rgb(94, 172, 255);
-const ORANGE: Color32 = Color32::from_rgb(255, 170, 70);
-const GREEN: Color32 = Color32::from_rgb(120, 210, 120);
+const BLUE: Color32 = Color32::from_rgb(38, 110, 228);
+const ORANGE: Color32 = Color32::from_rgb(226, 118, 22);
+const GREEN: Color32 = Color32::from_rgb(40, 158, 84);
 
 /// Line chart over frequency: series of (GHz, value), optional horizontal
 /// reference line and a shaded x band.
@@ -105,7 +105,7 @@ fn xy_chart(ui: &mut egui::Ui, title: &str, unit: &str, series: &[(&str, Color32
     let to = |x: f64, y: f64| egui::pos2(plot.left() + ((x - x0) / (x1 - x0).max(1e-12)) as f32 * plot.width(), plot.bottom() - ((y - y0) / (y1 - y0)) as f32 * plot.height());
     if let Some((a, b)) = band {
         let r = egui::Rect::from_min_max(to(a.max(x0), y1), to(b.min(x1), y0));
-        p.rect_filled(r, 0.0, Color32::from_white_alpha(14));
+        p.rect_filled(r, 0.0, Color32::from_black_alpha(14));
     }
     if let Some(h) = hline {
         p.line_segment([to(x0, h), to(x1, h)], Stroke::new(1.0, theme::DANGER.gamma_multiply(0.7)));
@@ -134,7 +134,7 @@ fn xy_chart(ui: &mut egui::Ui, title: &str, unit: &str, series: &[(&str, Color32
         && plot.contains(pos)
     {
         let x = x0 + ((pos.x - plot.left()) / plot.width()) as f64 * (x1 - x0);
-        p.line_segment([egui::pos2(pos.x, plot.top()), egui::pos2(pos.x, plot.bottom())], Stroke::new(1.0, Color32::from_white_alpha(60)));
+        p.line_segment([egui::pos2(pos.x, plot.top()), egui::pos2(pos.x, plot.bottom())], Stroke::new(1.0, Color32::from_black_alpha(70)));
         let mut txt = format!("{x:.3} GHz");
         for (name, _, s) in series {
             if let Some(v) = s.iter().min_by(|a, b| (a.0 - x).abs().total_cmp(&(b.0 - x).abs())) {
@@ -156,11 +156,11 @@ fn polar(ui: &mut egui::Ui, title: &str, cut: &[(f64, f64)], max_dbi: f64) {
         let floor = max_dbi - 30.0;
         for k in 0..=3 {
             let rr = r * k as f32 / 3.0;
-            p.circle_stroke(c, rr, Stroke::new(1.0, Color32::from_white_alpha(if k == 3 { 40 } else { 18 })));
+            p.circle_stroke(c, rr, Stroke::new(1.0, Color32::from_black_alpha(if k == 3 { 60 } else { 24 })));
         }
         for a in (0..360).step_by(30) {
             let v = vec2((a as f32).to_radians().sin(), -(a as f32).to_radians().cos());
-            p.line_segment([c, c + v * r], Stroke::new(1.0, Color32::from_white_alpha(14)));
+            p.line_segment([c, c + v * r], Stroke::new(1.0, Color32::from_black_alpha(14)));
         }
         let pts: Vec<egui::Pos2> = cut
             .iter()
@@ -179,7 +179,7 @@ fn polar(ui: &mut egui::Ui, title: &str, cut: &[(f64, f64)], max_dbi: f64) {
 
 /// What "through an object" simulates, drawn: transmitter, the object, receiver,
 /// and the wave losing strength in it. With a result, the wave after the object
-/// is scaled by the measured loss and the numbers are written on it.
+/// is scaled by the simulated loss and the numbers are written on it.
 fn through_diagram(ui: &mut egui::Ui, object: &str, loss_db: Option<f64>, bias_cm: Option<f32>) {
     const RED: Color32 = Color32::from_rgb(232, 86, 86);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), egui::Sense::hover());
@@ -191,7 +191,7 @@ fn through_diagram(ui: &mut egui::Ui, object: &str, loss_db: Option<f64>, bias_c
 
     // The object.
     let wall = egui::Rect::from_min_max(egui::pos2(wall_l, mid - 30.0), egui::pos2(wall_r, mid + 30.0));
-    p.rect_filled(wall, 3.0, Color32::from_rgb(92, 98, 110));
+    p.rect_filled(wall, 3.0, Color32::from_rgb(148, 154, 164));
     p.text(egui::pos2(wall.center().x, wall.bottom() + 3.0), egui::Align2::CENTER_TOP, object, font(11.0), theme::TEXT);
 
     // Antennas: transmitter red, receiver green (as in the field image).
@@ -202,7 +202,7 @@ fn through_diagram(ui: &mut egui::Ui, object: &str, loss_db: Option<f64>, bias_c
     }
 
     // The wave: full strength before the object, weaker inside, and after it
-    // scaled by the measured loss (amplitude ∝ 10^(−dB/20)).
+    // scaled by the simulated loss (amplitude ∝ 10^(−dB/20)).
     let after = loss_db.map_or(0.45, |l| 10f32.powf(-(l as f32) / 20.0).clamp(0.06, 1.0));
     let wave = |x0: f32, x1: f32, amp: f32, col: Color32| {
         let n = ((x1 - x0) / 2.0).max(2.0) as usize;
@@ -222,7 +222,7 @@ fn through_diagram(ui: &mut egui::Ui, object: &str, loss_db: Option<f64>, bias_c
     let top = rect.top() + 2.0;
     match loss_db {
         Some(l) => {
-            let col = if l > 20.0 { theme::DANGER } else if l > 6.0 { theme::ACCENT } else { theme::SUCCESS };
+            let col = if l > 20.0 { theme::DANGER } else if l > 6.0 { theme::WARNING } else { theme::SUCCESS };
             p.text(egui::pos2(wall.center().x, top), egui::Align2::CENTER_TOP, format!("−{l:.1} dB"), font(13.0), col);
             if let Some(b) = bias_cm {
                 p.text(egui::pos2((wall_r + rx) * 0.5, top), egui::Align2::CENTER_TOP, format!("arrives late: {b:+.0} cm"), font(10.5), theme::WEAK);
@@ -300,10 +300,7 @@ fn field_legend(ui: &mut egui::Ui) {
 
 /// Rounded card around a section.
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::new()
-        .fill(theme::RAISED)
-        .corner_radius(8)
-        .inner_margin(10)
+    theme::card_frame()
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
@@ -320,7 +317,7 @@ pub fn tiles(ui: &mut egui::Ui, items: &[(String, &str, Color32)]) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for (v, k, col) in row {
-                egui::Frame::new().fill(theme::BG).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+                egui::Frame::new().fill(theme::RAISED).corner_radius(5).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
                     ui.set_width(w - 16.0);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 1.0;
@@ -335,7 +332,7 @@ pub fn tiles(ui: &mut egui::Ui, items: &[(String, &str, Color32)]) {
 
 /// One-line verdict with a coloured marker.
 fn verdict(ui: &mut egui::Ui, good: bool, text: &str) {
-    let col = if good { theme::SUCCESS } else { theme::ACCENT };
+    let col = if good { theme::SUCCESS } else { theme::WARNING };
     egui::Frame::new().fill(col.gamma_multiply(0.12)).corner_radius(6).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
@@ -352,7 +349,7 @@ fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egu
 
 /// Full-width accent call-to-action.
 fn run_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> bool {
-    let b = egui::Button::new(RichText::new(text).strong().color(Color32::from_rgb(28, 22, 8))).fill(theme::ACCENT).min_size(vec2(ui.available_width(), 32.0));
+    let b = egui::Button::new(RichText::new(text).strong().color(theme::ON_ACCENT)).fill(theme::ACCENT).stroke(egui::Stroke::NONE).min_size(vec2(ui.available_width(), 32.0));
     ui.add_enabled(enabled, b).clicked()
 }
 
@@ -392,16 +389,51 @@ fn infra_word(t: Tech) -> &'static str {
         Tech::Uwb => "anchors",
         Tech::Ble => "beacons",
         Tech::Rfid => "readers",
+        Tech::Wifi => "access points",
     }
 }
 
 /// The technology whose devices use an antenna of this band.
-fn band_tech(b: Band) -> Tech {
+pub(super) fn band_tech(b: Band) -> Tech {
     match b {
         Band::Uwb5 | Band::Uwb9 => Tech::Uwb,
         Band::Ble => Tech::Ble,
         Band::Rfid => Tech::Rfid,
+        Band::Wifi5 => Tech::Wifi,
     }
+}
+
+/// The band's calibrations.
+fn cal_band(b: Band) -> CalBand {
+    CalBand::of_mhz((b.center() / 1e6) as f32)
+}
+
+/// A warning for each line, in the panel's small type.
+fn warning_lines(ui: &mut egui::Ui, lines: &[String]) {
+    for l in lines {
+        ui.label(RichText::new(l).small().color(theme::WARNING));
+    }
+}
+
+/// What a region run's result can't be relied on for, in words.
+fn region_warnings(res: &super::RegionResult) -> Vec<String> {
+    let mut out = Vec::new();
+    if res.truncated {
+        out.push("A run hit its step limit before the field had decayed: the loss and delay below are cut short.".to_string());
+    }
+    if res.layout.shrunk {
+        out.push(format!(
+            "The cell budget cut the region to {:.2} × {:.2} m around the antennas, inside {}. What's cut carries on through the absorbing boundary, so this reads as a slab going on for ever: nothing past the region's edge is seen.",
+            res.layout.region_max.x - res.layout.region_min.x,
+            res.layout.region_max.y - res.layout.region_min.y,
+            res.target
+        ));
+    }
+    if let Some((m, cells)) = res.layout.worst.filter(|w| w.1 < super::scene::MIN_CELLS_PER_LAMBDA) {
+        out.push(format!("{} gets {cells:.1} cells per wavelength inside it, under the {:.0} a field solver wants: waves in it run slow and its loss is less reliable.", m.name(), super::scene::MIN_CELLS_PER_LAMBDA));
+    }
+    out.extend(res.layout.thickness.iter().filter_map(|t| t.problem()));
+    out
 }
 
 /// The "FDTD" page of the Positioning panel. Returns the technology whose
@@ -425,14 +457,14 @@ pub fn tab(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, lib
             });
         });
         ui.label(
-            RichText::new("Full-wave 3D simulation of an antenna, of a signal passing through one object, or of the whole room. Exact but slow, so the live floor map stays ray-traced unless you switch it to a whole-scene run.")
+            RichText::new("Full-wave 3D simulation of an antenna, of a signal passing through one object, or of the whole room. Slow, and only as good as its mesh and materials, so the live floor map stays ray-traced unless you switch it to a whole-scene run.")
                 .small()
                 .color(theme::WEAK),
         );
     });
     status_ui(ui, fdtd);
     ui.add_space(2.0);
-    theme::segmented_fill(ui, &mut fdtd.ui.mode, &[(Mode::Antenna, "Antenna"), (Mode::Region, "Through an object"), (Mode::Scene, "Whole scene")]);
+    theme::segmented_fill(ui, &mut fdtd.ui.mode, &[(Mode::Antenna, "Antenna"), (Mode::Region, "Through object"), (Mode::Scene, "Whole scene")]);
     ui.add_space(2.0);
     let rescan = match fdtd.ui.mode {
         Mode::Antenna => antenna_ui(ui, fdtd, applied, library),
@@ -506,6 +538,9 @@ fn antenna_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, 
                     ui.label("Substrate εr");
                     ui.add(egui::DragValue::new(&mut d.eps_r).speed(0.01).range(1.0..=12.0));
                     ui.end_row();
+                    ui.label("Substrate tan δ");
+                    ui.add(egui::DragValue::new(&mut d.tan_d).speed(0.001).range(0.0..=0.2).max_decimals(4));
+                    ui.end_row();
                     mm(ui, "Feed offset", &mut d.feed);
                 }
             });
@@ -516,7 +551,7 @@ fn antenna_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, 
     });
     let sim = d.sim();
     let design = d.clone();
-    if run_button(ui, "▶  Run antenna simulation", !busy) {
+    if run_button(ui, &theme::label(theme::icon::PLAY, "Run antenna simulation"), !busy) {
         fdtd.run_antenna(design);
     }
     ui.label(RichText::new(format!("{:.2} M cells · about {:.0} s on this PC", sim.cells() as f64 / 1e6, sim.estimate_s().max(5.0))).small().color(theme::WEAK));
@@ -551,15 +586,20 @@ fn antenna_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, 
             })
         })
         .unwrap_or_default();
+    let ohm = res.design.port_ohm();
     let text = if matched {
-        format!("Well matched: S11 {s11_db:.1} dB at the band centre.{hint}")
+        format!("Well matched to {ohm:.0} Ω: S11 {s11_db:.1} dB at the band centre.{hint}")
     } else {
-        format!("Poorly matched: S11 {s11_db:.1} dB at the band centre, power is reflected.{hint}")
+        format!("Poorly matched to {ohm:.0} Ω: S11 {s11_db:.1} dB at the band centre, power is reflected.{hint}")
     };
     verdict(ui, matched, &text);
-    let ok_col = if matched { theme::SUCCESS } else { theme::ACCENT };
+    if res.run.truncated {
+        verdict(ui, false, "The run hit its step limit before the field had decayed, so these numbers are cut short.");
+    }
+    let ok_col = if matched { theme::SUCCESS } else { theme::WARNING };
+    let s11_label = format!("S11 at centre ({ohm:.0} Ω)");
     let mut items = vec![
-        (format!("{s11_db:.1} dB"), "S11 at centre", ok_col),
+        (format!("{s11_db:.1} dB"), s11_label.as_str(), ok_col),
         (format!("{:.2}", Sweep::vswr(s_fc)), "VSWR", ok_col),
         (format!("{:.0}{:+.0}j Ω", z_fc.re, z_fc.im), "Impedance", theme::TEXT),
     ];
@@ -569,10 +609,14 @@ fn antenna_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, 
     }
     match s.bandwidth(-10.0) {
         Some((a, b)) => items.push((format!("{:.0} MHz", (b - a) / 1e6), "−10 dB bandwidth", theme::TEXT)),
-        None => items.push(("–".into(), "−10 dB bandwidth", theme::ACCENT)),
+        None => items.push(("–".into(), "−10 dB bandwidth", theme::WARNING)),
     }
     if let Some(p) = &res.pattern {
         items.push((format!("{:.1} dBi", p.max_dbi), "Directivity", theme::TEXT));
+    }
+    if let Some(e) = res.efficiency {
+        let col = if e > super::MAX_EFFICIENCY { theme::WARNING } else { theme::TEXT };
+        items.push((format!("{:.0} %", e * 100.0), "Radiated / accepted", col));
     }
     tiles(ui, &items);
 
@@ -583,15 +627,19 @@ fn antenna_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, 
         let tech = band_tech(res.design.band);
         let on = applied.0.as_ref().is_some_and(|a| a.source == res.dir);
         let mismatch = 10.0 * (1.0 - (s_fc.re * s_fc.re + s_fc.im * s_fc.im)).max(1e-6).log10();
+        let gain_fix = res.efficiency_db();
+        let usable = gain_fix.is_ok() && !res.run.truncated;
+        let loss_db = gain_fix.clone().unwrap_or(0.0);
         let make = |label: String| FdtdAntenna {
             tech,
             label,
             source: res.dir.clone(),
             theta_step: p.theta.get(1).map_or(5.0, |t| (*t - p.theta[0]) as f32),
             phi_step: p.phi.get(1).map_or(5.0, |f| (*f - p.phi[0]) as f32),
-            d: p.d.iter().map(|r| r.iter().map(|v| *v as f32).collect()).collect(),
+            d: res.planner_gain().unwrap_or_default(),
             mismatch_db: mismatch as f32,
             axis_forward: res.design.kind == Kind::Patch,
+            bias_m: None,
         };
         let default_name = format!("{} · {}", res.design.kind.label(), res.design.band.label());
         card(ui, |ui| {
@@ -599,25 +647,35 @@ fn antenna_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, 
                 ui.label(RichText::new(format!("Use on all {} {}", tech.label(), infra_word(tech))).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut v = on;
-                    if theme::toggle_switch(ui, &mut v).changed() {
-                        applied.0 = v.then(|| make(default_name.clone()));
-                        rescan = Some(tech);
-                    }
+                    ui.add_enabled_ui(usable || on, |ui| {
+                        if theme::toggle_switch(ui, &mut v).changed() {
+                            applied.0 = v.then(|| make(default_name.clone()));
+                            rescan = Some(tech);
+                        }
+                    });
                 });
             });
             let how = if res.design.kind == Kind::Patch { "facing where the device faces" } else { "standing upright" };
             ui.label(
                 RichText::new(format!(
-                    "Every {} {} without its own antenna gets this one ({how}): its radiation pattern and {:.1} dB mismatch loss replace the ideal antenna in the floor map, the anchor optimiser and the live test.",
+                    "Every {} {} without its own antenna gets this one ({how}): its {:.1} dBi peak gain ({:.1} dBi directivity, {:.1} dB lost in the substrate; metal counted as lossless) and {:.1} dB mismatch loss replace the ideal antenna in the floor map, the anchor optimiser and the live test.",
                     tech.label(),
                     infra_word(tech),
+                    p.max_dbi + loss_db,
+                    p.max_dbi,
+                    -loss_db,
                     mismatch
                 ))
                 .small()
                 .color(theme::WEAK),
             );
+            if let Err(why) = &gain_fix {
+                ui.label(RichText::new(format!("Can't be used: {why}.")).small().color(theme::WARNING));
+            } else if res.run.truncated {
+                ui.label(RichText::new("Can't be used: the run hit its step limit before the field had decayed.").small().color(theme::WARNING));
+            }
             if let Some(a) = applied.0.as_ref().filter(|_| !on) {
-                ui.label(RichText::new(format!("Applied now: {} (an earlier run)", a.label)).small().color(theme::ACCENT));
+                ui.label(RichText::new(format!("Applied now: {} (an earlier run)", a.label)).small().color(theme::WARNING));
             }
             // Save it under a name, to pick it for single anchors or tags (Inspector → Antenna).
             ui.separator();
@@ -629,7 +687,7 @@ fn antenna_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, 
                 ui.add(egui::TextEdit::singleline(&mut st.lib_name).desired_width(170.0).hint_text("name"));
                 let name = st.lib_name.trim().to_string();
                 let exists = library.get(&name).is_some();
-                let b = ui.add_enabled(!name.is_empty(), egui::Button::new(if exists { "Update in antenna library" } else { "Save to antenna library" }));
+                let b = ui.add_enabled(usable && !name.is_empty(), egui::Button::new(if exists { "Update in antenna library" } else { "Save to antenna library" }));
                 if b.on_hover_text("Saved for good; pick it per anchor or tag in Inspector → Antenna.").clicked() {
                     st.lib_status = Some(match library.save(make(name.clone())) {
                         Ok(()) => format!("Saved \"{name}\". Pick it in Inspector → Antenna."),
@@ -686,7 +744,7 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
                 "A transmitter goes on one side of the object you pick and a receiver on the other. The radio wave is simulated \
                  passing through it, then again with the object removed. The difference is how much signal the object absorbs \
                  (dB; 3 dB = half the power, 20 dB+ ≈ blocked) and, for UWB, how late the signal arrives through it, which \
-                 makes the measured distance too long (cm).",
+                 makes a measured distance too long (cm).",
             )
             .small()
             .color(theme::WEAK),
@@ -701,7 +759,7 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
             ui.label("Object");
             match &st.selected {
                 Some((_, n)) => ui.label(RichText::new(n).strong()),
-                None => ui.label(RichText::new("click a wall, rack or door in the scene").color(theme::ACCENT)),
+                None => ui.label(RichText::new("click a wall, rack or door in the scene").color(theme::WARNING)),
             };
             ui.end_row();
             ui.label("Band");
@@ -712,21 +770,21 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
             });
             ui.end_row();
             ui.label("Mesh");
-            egui::ComboBox::from_id_salt("fdtd_rq").selected_text(st.region_quality.label()).width(w).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("fdtd_rq").selected_text(region_quality_label(st.region_quality)).width(w).show_ui(ui, |ui| {
                 for q in Quality::ALL {
-                    ui.selectable_value(&mut st.region_quality, q, q.label());
+                    ui.selectable_value(&mut st.region_quality, q, region_quality_label(q));
                 }
             });
             ui.end_row();
         });
         ui.label(
-            RichText::new("Two dipoles go on either side of the object, the objects around are voxelised from their meshes (ITU-R P.2040 materials), and the run is repeated in free space to compare.")
+            RichText::new("Two dipoles go on either side of the object, the objects around are voxelised from their meshes (ITU-R P.2040 for concrete, wood and glass, typical values for the rest), and the run is repeated in free space to compare.")
                 .small()
                 .color(theme::WEAK),
         );
     });
     let can = !busy && st.selected.is_some();
-    if run_button(ui, "▶  Run through the object", can)
+    if run_button(ui, &theme::label(theme::icon::PLAY, "Run through the object"), can)
         && let Some((e, _)) = st.selected.clone()
     {
         fdtd.region_requested = Some((st.region_band, st.region_quality, e));
@@ -763,11 +821,14 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
         format!("{} barely matters: {l:.1} dB lost passing through it.", res.target)
     };
     verdict(ui, l <= 6.0, &text);
+    let warnings = region_warnings(&res);
+    warning_lines(ui, &warnings);
     // FDTD next to what the floor map's ray model assumes (live: follows the calibration).
     let mat = res.layout.target_material;
-    let (k_loss, k_delay) = MaterialCal::scales(mat);
+    let band = cal_band(res.band);
+    let (k_loss, k_delay) = MaterialCal::scales_in(mat, band);
     let bias_m = crate::rtls::device::Profile::default().nlos_bias_m;
-    let ray_loss = 6.0 * res.layout.target_weight * k_loss;
+    let ray_loss = res.layout.wall_db * res.layout.target_weight * k_loss;
     let ray_bias_cm = res.layout.target_weight * k_delay * bias_m * 100.0;
     let fdtd_bias_cm = excess.map(|d| (d * super::csx::C0 * 100.0) as f32);
     card(ui, |ui| through_diagram(ui, &res.target, Some(l), fdtd_bias_cm.filter(|_| band_tech(res.band) == Tech::Uwb)));
@@ -775,7 +836,7 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
     card(ui, |ui| {
         egui::Grid::new("fdtd_vs_ray").num_columns(3).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
             ui.label("");
-            ui.label(RichText::new("FDTD").small().strong()).on_hover_text("Measured by this simulation");
+            ui.label(RichText::new("FDTD").small().strong()).on_hover_text("What this simulation gives: not a measurement");
             ui.label(RichText::new("Floor map assumes").small().color(theme::WEAK))
                 .on_hover_text("The quick ray model the floor map, the anchor optimiser and the live simulation use");
             ui.end_row();
@@ -783,7 +844,7 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
             let col = if l > 20.0 {
                 theme::DANGER
             } else if l > 6.0 {
-                theme::ACCENT
+                theme::WARNING
             } else {
                 theme::SUCCESS
             };
@@ -802,44 +863,44 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
         let words = if diff.abs() < 2.0 {
             format!("The floor map's estimate for {} is about right here.", mat.name())
         } else if diff > 0.0 {
-            format!("The floor map is too optimistic for {}: it assumes {diff:.0} dB less loss than measured, so it shows coverage behind it that isn't there.", mat.name())
+            format!("The floor map is too optimistic for {}: it assumes {diff:.0} dB less loss than this simulation, so it shows coverage behind it that isn't there.", mat.name())
         } else {
-            format!("The floor map is too pessimistic for {}: it assumes {:.0} dB more loss than measured, so it may place more anchors than needed.", mat.name(), -diff)
+            format!("The floor map is too pessimistic for {}: it assumes {:.0} dB more loss than this simulation, so it may place more anchors than needed.", mat.name(), -diff)
         };
         ui.label(RichText::new(words).small());
 
-        // Use the measurement in the floor map, optimiser and simulation.
+        // Use the result in the floor map, optimiser and simulation.
+        let cal = res.layout.calibration(res.band, &res.target, &res.dir, l, fdtd_bias_cm, bias_m).filter(|_| !res.truncated);
         if matches!(mat, Material::Metal) {
             ui.label(RichText::new("Metal blocks UWB in the floor map anyway; nothing to calibrate.").small().color(theme::WEAK));
         } else if res.layout.target_weight > 0.0 {
-            let applied = MaterialCal::applied(mat);
-            let on = applied.as_ref().is_some_and(|a| a.source == res.dir);
+            let applied = MaterialCal::applied_in(mat, band);
+            let on = applied.as_ref().is_some_and(|a| a.source.path == res.dir);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Use for all {} in the floor map", mat.name())).strong());
+                ui.label(RichText::new(format!("Use for all {} at {} in the floor map", mat.name(), band.label())).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut v = on;
-                    if theme::toggle_switch(ui, &mut v).changed() {
-                        MaterialCal::set(
-                            mat,
-                            v.then(|| MaterialCal {
-                                loss_scale: (l as f32 / (6.0 * res.layout.target_weight)).max(0.0),
-                                // Delay only measured with a group delay; keep the built-in one otherwise.
-                                bias_scale: fdtd_bias_cm.map_or(1.0, |b| (b / (res.layout.target_weight * bias_m * 100.0)).max(0.0)),
-                                label: format!("FDTD · {} · {}", res.target, res.band.label()),
-                                source: res.dir.clone(),
-                            }),
-                        );
-                        rescan = Some(band_tech(res.band));
-                    }
+                    ui.add_enabled_ui(on || cal.is_some(), |ui| {
+                        if theme::toggle_switch(ui, &mut v).changed() {
+                            match cal.clone().filter(|_| v) {
+                                Some(c) => MaterialCal::set(mat, Some(c)),
+                                None => MaterialCal::clear_in(mat, band),
+                            }
+                            rescan = Some(band_tech(res.band));
+                        }
+                    });
                 });
             });
             ui.label(
-                RichText::new("Applies to every object of this material, for all technologies, until you restart the app. The floor map, the anchor optimiser and the live simulation all use it.")
+                RichText::new(format!("Applies to every object of this material, at {} only, in this tab, until you restart the app. The floor map, the anchor optimiser and the live simulation all use it. It's a simulation, so numbers using it stay Simulated.", band.label()))
                     .small()
                     .color(theme::WEAK),
             );
+            if cal.is_none() {
+                ui.label(RichText::new("Can't be used: the object isn't in the simulation, or the run was cut short.").small().color(theme::WARNING));
+            }
             if let Some(a) = applied.filter(|_| !on) {
-                ui.label(RichText::new(format!("Applied now: {} (an earlier run)", a.label)).small().color(theme::ACCENT));
+                ui.label(RichText::new(format!("Applied now: {} (an earlier run)", a.label)).small().color(theme::WARNING));
             }
         }
     });
@@ -863,11 +924,20 @@ fn region_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd) -> Option<Tech> {
         xy_chart(ui, "Loss through the object (dB)", " dB", &[("loss", theme::DANGER, loss)], None, Some((ghz(ca), ghz(cb))), 80.0);
     });
     section(ui, "Materials", false, |ui| {
-        egui::Grid::new("fdtd_objs").striped(true).num_columns(3).show(ui, |ui| {
-            for (name, m, eps, kappa) in &res.layout.objects {
+        egui::Grid::new("fdtd_objs").striped(true).num_columns(4).show(ui, |ui| {
+            for (k, (name, m, eps, kappa)) in res.layout.objects.iter().enumerate() {
                 ui.label(name);
                 ui.label(RichText::new(m.name()).color(theme::WEAK));
                 ui.label(if kappa.is_infinite() { "metal (PEC)".to_string() } else { format!("εr {eps:.2} · σ {kappa:.3} S/m") });
+                match res.layout.thickness.get(k).filter(|t| !t.not_measured) {
+                    Some(t) => {
+                        let col = if t.problem().is_some() { theme::WARNING } else { theme::WEAK };
+                        ui.label(RichText::new(format!("{:.0} mm → {:.0} mm", t.true_m * 1e3, t.voxel_m * 1e3)).color(col)).on_hover_text("Thickness of its mesh through its thinnest side, and of its voxels");
+                    }
+                    None => {
+                        ui.label("");
+                    }
+                }
                 ui.end_row();
             }
         });
@@ -909,9 +979,18 @@ fn duration(s: f64) -> String {
 
 fn scene_quality_label(q: Quality) -> &'static str {
     match q {
+        Quality::Fast => "Fast (λ/10 in air)",
+        Quality::Normal => "Normal (λ/12 in air)",
+        Quality::Fine => "Fine (λ/15 in air)",
+    }
+}
+
+/// `region::build` meshes to these, against the top of the pulse in the densest material.
+fn region_quality_label(q: Quality) -> &'static str {
+    match q {
         Quality::Fast => "Fast (λ/10)",
-        Quality::Normal => "Normal (λ/12)",
-        Quality::Fine => "Fine (λ/15)",
+        Quality::Normal => "Normal (λ/15)",
+        Quality::Fine => "Fine (λ/20)",
     }
 }
 
@@ -920,6 +999,7 @@ fn infra_plural(t: Tech) -> &'static str {
         Tech::Uwb => "anchors",
         Tech::Ble => "BLE nodes",
         Tech::Rfid => "readers",
+        Tech::Wifi => "access points",
     }
 }
 
@@ -930,7 +1010,7 @@ fn scene_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, cov: &mut Coverage) -> Option<Te
         ui.label(
             RichText::new(
                 "Each anchor, node or reader is simulated in turn with the whole room around it: walls, racks and goods voxelised \
-                 from their meshes (ITU-R P.2040 materials) on a concrete floor. The result is the received power everywhere, \
+                 from their meshes (ITU-R P.2040 for concrete, wood and glass, typical values for the rest) on a concrete floor. The result is the received power everywhere, \
                  reflections, diffraction and multipath included, which the floor map can use instead of its straight-line ray model, \
                  and which can correct that model's material losses.",
             )
@@ -967,14 +1047,14 @@ fn scene_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, cov: &mut Coverage) -> Option<Te
     if let Some(p) = &preview {
         card(ui, |ui| {
             if p.txs == 0 {
-                ui.label(RichText::new(format!("No {} placed yet: add some on the Positioning page first.", infra_plural(tech))).color(theme::ACCENT));
+                ui.label(RichText::new(format!("No {} placed yet: add some on the Positioning page first.", infra_plural(tech))).color(theme::WARNING));
                 return;
             }
             ui.horizontal(|ui| {
                 theme::caption(ui, "Estimate");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if p.plan.scaled() {
-                        theme::badge(ui, &format!("Scaled ×{:.1}", p.plan.scale), theme::ACCENT);
+                        theme::badge(ui, &format!("Scaled ×{:.1}", p.plan.scale), theme::WARNING);
                     } else {
                         theme::badge(ui, "Real frequency", theme::SUCCESS);
                     }
@@ -995,24 +1075,32 @@ fn scene_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, cov: &mut Coverage) -> Option<Te
             let text = if p.plan.scaled() {
                 format!(
                     "{} at its real {:.2} GHz would need far more cells than the {:.0} M budget for this mesh, so the room is simulated at {:.2} GHz. \
-                     Materials keep their real-band properties and received power uses the real wavelength, so wall losses and the \
-                     average level hold; reflections and diffraction are those of the longer wavelength (smoother shadows).",
+                     Materials keep their real-band properties and received power uses the real wavelength, so loss through a wall roughly holds. \
+                     Diffraction doesn't: a shadow behind an edge can read up to {:.0} dB too strong, per edge.",
                     p.band.label(),
                     p.plan.f_real / 1e9,
                     p.plan.budget / 1e6,
-                    p.plan.f_sim / 1e9
+                    p.plan.f_sim / 1e9,
+                    p.plan.shadow_error_db()
                 )
             } else {
                 format!("{} is simulated at its real frequency.", p.band.label())
             };
             ui.label(RichText::new(text).small().color(theme::WEAK));
+            if let Some(why) = p.plan.scale_block() {
+                ui.label(RichText::new(format!("You can look at this run, but it can't feed the floor map or a calibration: {why}.")).small().color(theme::WARNING));
+            }
+            warning_lines(ui, &p.plan.warnings());
+            if let Some(why) = &p.problem {
+                ui.label(RichText::new(format!("Can't run: {why}.")).small().color(theme::DANGER));
+            }
             if p.reused > 0 {
                 ui.label(RichText::new(format!("{} unchanged since the last run: reused, not simulated again.", p.reused)).small().color(theme::ONLINE));
             }
         });
     }
-    let can = !busy && preview.as_ref().is_some_and(|p| p.txs > 0);
-    if run_button(ui, "▶  Run the whole scene", can) {
+    let can = !busy && preview.as_ref().is_some_and(|p| p.txs > 0 && p.problem.is_none());
+    if run_button(ui, &theme::label(theme::icon::PLAY, "Run the whole scene"), can) {
         fdtd.scene_requested = Some((tech, fdtd.ui.scene_quality, fdtd.ui.scene_height));
     }
 
@@ -1036,18 +1124,27 @@ fn scene_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, cov: &mut Coverage) -> Option<Te
         .color(theme::WEAK),
     );
 
+    warning_lines(ui, &res.warnings());
+    let use_block = res.use_block();
+
     // Floor map source.
     card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Use in the floor map").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let mut on = cov.source == MapSource::Fdtd;
-                if theme::toggle_switch(ui, &mut on).changed() {
-                    cov.source = if on { MapSource::Fdtd } else { MapSource::Ray };
-                    rescan = Some(tech);
-                }
+                // Always possible to turn off, never on when the numbers can't carry it.
+                ui.add_enabled_ui(on || use_block.is_none(), |ui| {
+                    if theme::toggle_switch(ui, &mut on).changed() {
+                        cov.source = if on { MapSource::Fdtd } else { MapSource::Ray };
+                        rescan = Some(tech);
+                    }
+                });
             });
         });
+        if let Some(why) = &use_block {
+            ui.label(RichText::new(format!("Not available: {why}. The floor map stays on the ray model.")).small().color(theme::WARNING));
+        }
         ui.label(
             RichText::new(format!(
                 "The floor map's Quality, Accuracy and Signal views use this run's received power instead of the ray model, for {}. \
@@ -1091,10 +1188,11 @@ fn scene_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, cov: &mut Coverage) -> Option<Te
         );
         let directional = res.per_tx.iter().filter(|t| t.tx.directional).count();
         if directional > 0 {
-            ui.label(RichText::new(format!("{directional} aimed antenna(s) simulated as a dipole with a reflector behind it.")).small().color(theme::WEAK));
+            ui.label(RichText::new(format!("{directional} aimed antenna(s) simulated as a dipole with a reflector behind it. The device's own pattern is applied along the straight line to each point, an estimate where the signal arrives another way. Circular polarisation isn't modelled.")).small().color(theme::WEAK));
         }
     });
 
+    let band = cal_band(res.band);
     section(ui, "Calibrate the ray model", true, |ui| match fdtd.scene_fit(&res.dir) {
         None => {
             ui.label(RichText::new("Comparing with the ray model…").small().color(theme::WEAK));
@@ -1131,8 +1229,8 @@ fn scene_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, cov: &mut Coverage) -> Option<Te
                 for m in &fit.mats {
                     ui.label(m.material.name());
                     ui.label(RichText::new(format!("{}", m.samples)).color(theme::WEAK));
-                    ui.label(RichText::new(format!("×{:.2}", MaterialCal::scales(m.material).0)).color(theme::WEAK));
-                    let col = if (m.fitted - m.current).abs() > 0.25 { theme::ACCENT } else { theme::TEXT };
+                    ui.label(RichText::new(format!("×{:.2}", MaterialCal::scales_in(m.material, band).0)).color(theme::WEAK));
+                    let col = if (m.fitted - m.current).abs() > 0.25 { theme::WARNING } else { theme::TEXT };
                     ui.label(RichText::new(format!("×{:.2}", m.fitted)).strong().color(col));
                     ui.end_row();
                 }
@@ -1148,34 +1246,39 @@ fn scene_ui(ui: &mut egui::Ui, fdtd: &mut Fdtd, cov: &mut Coverage) -> Option<Te
                 ))
                 .small(),
             );
-            let on = fit.mats.iter().all(|m| MaterialCal::applied(m.material).is_some_and(|a| a.source == res.dir));
+            let on = fit.mats.iter().all(|m| MaterialCal::applied_in(m.material, band).is_some_and(|a| a.source.path == res.dir));
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Use these losses in the floor map").strong());
+                ui.label(RichText::new(format!("Use these losses in the floor map at {}", band.label())).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut v = on;
-                    if theme::toggle_switch(ui, &mut v).changed() {
-                        for m in &fit.mats {
-                            let prev = MaterialCal::applied(m.material);
-                            if v {
-                                MaterialCal::set(
-                                    m.material,
-                                    Some(MaterialCal {
-                                        loss_scale: m.fitted.max(0.0),
-                                        bias_scale: prev.map_or(1.0, |p| p.bias_scale),
-                                        label: format!("FDTD scene · {}", res.band.label()),
-                                        source: res.dir.clone(),
-                                    }),
-                                );
-                            } else if prev.is_some_and(|p| p.source == res.dir) {
-                                MaterialCal::set(m.material, None);
+                    ui.add_enabled_ui(on || use_block.is_none(), |ui| {
+                        if theme::toggle_switch(ui, &mut v).changed() {
+                            for m in &fit.mats {
+                                let prev = MaterialCal::applied_in(m.material, band);
+                                if v {
+                                    MaterialCal::set(
+                                        m.material,
+                                        Some(MaterialCal {
+                                            loss_scale: m.fitted.max(0.0),
+                                            bias_scale: prev.map_or(1.0, |p| p.bias_scale),
+                                            label: format!("FDTD scene · {}", res.band.label()),
+                                            source: CalSource { path: res.dir.clone(), band, ..Default::default() },
+                                        }),
+                                    );
+                                } else if prev.is_some_and(|p| p.source.path == res.dir) {
+                                    MaterialCal::clear_in(m.material, band);
+                                }
                             }
+                            rescan = Some(tech);
                         }
-                        rescan = Some(tech);
-                    }
+                    });
                 });
             });
+            if let Some(why) = &use_block {
+                ui.label(RichText::new(format!("Not available: {why}.")).small().color(theme::WARNING));
+            }
             ui.label(
-                RichText::new("Applies to every object of these materials, for all technologies, until you restart the app (as \"Through an object\" does).")
+                RichText::new(format!("Applies to every object of these materials, at {} only, in this tab, until you restart the app (as \"Through an object\" does). It's a simulation, so numbers using it stay Simulated.", band.label()))
                     .small()
                     .color(theme::WEAK),
             );

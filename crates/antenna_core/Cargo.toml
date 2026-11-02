@@ -1,0 +1,15 @@
+[package]
+name = "antenna_core"
+version = "0.1.0"
+edition = "2024"
+description = "Antenna design kernel: parametric geometry, method-of-moments solvers, far-field and network post-processing, array synthesis, matching and optimisation. No UI and no game-engine dependency, so its tests build in seconds."
+
+[dependencies]
+anyhow = "1"
+num-complex = { version = "0.4", features = ["serde"] }
+proof = { path = "../proof" }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+spade = "2"
+

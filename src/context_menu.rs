@@ -9,8 +9,8 @@ use bevy_egui::{EguiContexts, egui};
 
 use crate::library::Library;
 use crate::scene::{
-    Action, Actions, HandleUi, OrbitCamera, PendingSpawn, PendingSpawns, PlaceMode, PlacedObject, Selection, UiBlock,
-    ViewSettings,
+    Action, Actions, HandleUi, OrbitCamera, PendingSpawn, PendingSpawns, PlaceMode, PlacedObject, Selection, Status,
+    UiBlock, ViewSettings,
 };
 use crate::theme::{self, icon};
 use crate::usd_load::JointKind;
@@ -87,12 +87,15 @@ pub fn draw_context_menu(
     mut settings: ResMut<ViewSettings>,
     mut library: ResMut<Library>,
     selection: Res<Selection>,
-    mut objects: Query<(&mut PlacedObject, &mut Transform)>,
+    mut status: ResMut<Status>,
+    mut objects: Query<(&mut PlacedObject, &mut Transform, &mut Visibility)>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     let Some((target, pos)) = &menu.open else { return Ok(()) };
     let pos = *pos;
     let mut close = false;
+    let mut hide: Vec<Entity> = Vec::new();
+    let mut show_hidden = false;
 
     let area = egui::Area::new(egui::Id::new("viewport_context_menu"))
         .order(egui::Order::Foreground)
@@ -105,13 +108,21 @@ pub fn draw_context_menu(
                 match target {
                     Target::Object(e) => {
                         let e = *e;
-                        let Ok((mut obj, mut t)) = objects.get_mut(e) else {
+                        let Ok((mut obj, mut t, _)) = objects.get_mut(e) else {
                             close = true;
                             return;
                         };
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(icon::CUBE).color(theme::ACCENT));
-                            ui.label(egui::RichText::new(obj.name.clone()).strong());
+                        let locked = obj.locked;
+                        theme::menu_section(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(icon::CUBE).color(theme::ACCENT));
+                                ui.label(egui::RichText::new(obj.name.clone()).strong());
+                                if locked {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(egui::RichText::new(icon::LOCK).color(theme::WEAK)).on_hover_text("Locked");
+                                    });
+                                }
+                            });
                         });
                         ui.separator();
                         if theme::menu_item(ui, icon::CROSSHAIR, "Focus").clicked() {
@@ -122,57 +133,70 @@ pub fn draw_context_menu(
                             actions.0.push(Action::Duplicate(e));
                             close = true;
                         }
-                        ui.horizontal(|ui| {
-                            ui.label(theme::label(icon::ARROWS_CLOCKWISE, "Rotate 90°"));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                if theme::icon_button(ui, icon::ARROW_CLOCKWISE, "Right").clicked() {
+                        // These two act on the whole selection when this object is part of it.
+                        let targets = if selection.contains(e) { selection.all() } else { vec![e] };
+                        let count = |verb: &str| if targets.len() > 1 { format!("{verb} {} objects", targets.len()) } else { verb.to_string() };
+                        if theme::menu_item(ui, icon::EYE_SLASH, &count("Hide")).clicked() {
+                            hide = targets.clone();
+                            close = true;
+                        }
+                        let (glyph, verb) = if locked { (icon::LOCK_OPEN, "Unlock") } else { (icon::LOCK, "Lock") };
+                        if theme::menu_item(ui, glyph, &count(verb)).clicked() {
+                            actions.0.push(Action::SetLocked(targets.clone(), !locked));
+                            close = true;
+                        }
+                        ui.separator();
+                        theme::menu_enabled(ui, !locked, |ui| {
+                            theme::menu_row(ui, icon::ARROWS_CLOCKWISE, "Rotate 90°", |ui| {
+                                if theme::menu_row_button(ui, icon::ARROW_CLOCKWISE, "Right").clicked() {
                                     t.rotate_y(-std::f32::consts::FRAC_PI_2);
                                 }
-                                if theme::icon_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Left").clicked() {
+                                if theme::menu_row_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Left").clicked() {
                                     t.rotate_y(std::f32::consts::FRAC_PI_2);
                                 }
                             });
+                            if theme::menu_item(ui, icon::ARROW_COUNTER_CLOCKWISE, "Reset rotation").clicked() {
+                                t.rotation = Quat::IDENTITY;
+                                close = true;
+                            }
+                            if theme::menu_item(ui, icon::ARROW_LINE_DOWN, "Drop").clicked() {
+                                actions.0.push(Action::Drop(e));
+                                close = true;
+                            }
                         });
-                        if theme::menu_item(ui, icon::ARROW_COUNTER_CLOCKWISE, "Reset rotation").clicked() {
-                            t.rotation = Quat::IDENTITY;
-                            close = true;
-                        }
-                        if theme::menu_item(ui, icon::ARROW_LINE_DOWN, "Drop").clicked() {
-                            actions.0.push(Action::Drop(e));
-                            close = true;
-                        }
                         let proto = obj.proto.clone();
                         if !proto.joints.is_empty() {
                             ui.separator();
-                            theme::caption(ui, "Moving parts");
-                            ui.horizontal(|ui| {
-                                if ui.small_button(theme::label(icon::DOOR_OPEN, "Open all")).clicked() {
-                                    for (i, j) in proto.joints.iter().enumerate() {
-                                        obj.joints[i] = j.range(proto.unit).1;
+                            theme::menu_section(ui, |ui| {
+                                theme::caption(ui, "Moving parts");
+                                ui.horizontal(|ui| {
+                                    if ui.small_button(theme::label(icon::DOOR_OPEN, "Open all")).clicked() {
+                                        for (i, j) in proto.joints.iter().enumerate() {
+                                            obj.joints[i] = j.range(proto.unit).1;
+                                        }
                                     }
-                                }
-                                if ui.small_button("Close all").clicked() {
-                                    for (i, j) in proto.joints.iter().enumerate() {
-                                        let (lo, hi) = j.range(proto.unit);
-                                        obj.joints[i] = 0.0f32.clamp(lo, hi);
+                                    if ui.small_button("Close all").clicked() {
+                                        for (i, j) in proto.joints.iter().enumerate() {
+                                            let (lo, hi) = j.range(proto.unit);
+                                            obj.joints[i] = 0.0f32.clamp(lo, hi);
+                                        }
+                                    }
+                                });
+                                for (i, j) in proto.joints.iter().enumerate() {
+                                    let (lo, hi) = j.range(proto.unit);
+                                    let mut v = obj.joints[i];
+                                    let unit = proto.unit;
+                                    let slider = egui::Slider::new(&mut v, lo..=hi).text(&j.name);
+                                    let slider = if j.kind == JointKind::Revolute {
+                                        slider.suffix("°").fixed_decimals(0)
+                                    } else {
+                                        slider.custom_formatter(move |x, _| format!("{:.3} m", x as f32 * unit))
+                                    };
+                                    if ui.add(slider).changed() {
+                                        obj.joints[i] = v;
                                     }
                                 }
                             });
-                            for (i, j) in proto.joints.iter().enumerate() {
-                                let (lo, hi) = j.range(proto.unit);
-                                let mut v = obj.joints[i];
-                                let unit = proto.unit;
-                                let slider = egui::Slider::new(&mut v, lo..=hi).text(&j.name);
-                                let slider = if j.kind == JointKind::Revolute {
-                                    slider.suffix("°").fixed_decimals(0)
-                                } else {
-                                    slider.custom_formatter(move |x, _| format!("{:.3} m", x as f32 * unit))
-                                };
-                                if ui.add(slider).changed() {
-                                    obj.joints[i] = v;
-                                }
-                            }
                         }
                         ui.separator();
                         if theme::menu_item(ui, icon::MAGNIFYING_GLASS, "Show in library").clicked() {
@@ -188,14 +212,17 @@ pub fn draw_context_menu(
                             close = true;
                         }
                         ui.separator();
-                        if theme::menu_item_danger(ui, icon::TRASH, "Delete").clicked() {
-                            actions.0.push(Action::Delete(e));
-                            close = true;
-                        }
+                        theme::menu_enabled(ui, !locked, |ui| {
+                            if theme::menu_item_danger(ui, icon::TRASH, "Delete").clicked() {
+                                actions.0.push(Action::Delete(e));
+                                close = true;
+                            }
+                        });
                     }
                     Target::Empty(ground) => {
                         if let (Some(p), Some(sel)) = (ground, selection.selected)
-                            && let Ok((obj, mut t)) = objects.get_mut(sel)
+                            && let Ok((obj, mut t, _)) = objects.get_mut(sel)
+                            && !obj.locked
                             && theme::menu_item(ui, icon::ARROW_LINE_DOWN, &format!("Move {} here", obj.name)).clicked()
                         {
                             t.translation = *p;
@@ -210,12 +237,19 @@ pub fn draw_context_menu(
                                     name: None,
                                     joints: None,
                                     select: true,
+                                    locked: false,
                                 });
                                 close = true;
                             }
                         }
                         if theme::menu_item(ui, icon::FRAME_CORNERS, "Frame all").clicked() {
                             actions.0.push(Action::FrameAll);
+                            close = true;
+                        }
+                        // A hidden object can't be right-clicked to bring it back.
+                        let hidden = objects.iter().filter(|(_, _, v)| **v == Visibility::Hidden).count();
+                        if hidden > 0 && theme::menu_item(ui, icon::EYE, &format!("Show {hidden} hidden")).clicked() {
+                            show_hidden = true;
                             close = true;
                         }
                         ui.separator();
@@ -237,6 +271,26 @@ pub fn draw_context_menu(
             });
         });
 
+    if !hide.is_empty() {
+        for e in &hide {
+            if let Ok((_, _, mut v)) = objects.get_mut(*e) {
+                *v = Visibility::Hidden;
+            }
+        }
+        // Its selection box would be left outlining nothing.
+        if selection.selected.is_some_and(|s| hide.contains(&s)) {
+            actions.0.push(Action::Select(None));
+        }
+        status.0 = format!("Hid {} object{}: right-click empty space or use the Scene list to show again", hide.len(), if hide.len() == 1 { "" } else { "s" });
+    }
+    if show_hidden {
+        for (_, _, mut v) in &mut objects {
+            if *v == Visibility::Hidden {
+                *v = Visibility::Visible;
+            }
+        }
+    }
+
     // Close on Escape or a click outside the menu.
     let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
         && ctx.pointer_interact_pos().is_some_and(|p| !area.response.rect.contains(p))
@@ -249,6 +303,7 @@ pub fn draw_context_menu(
 
 /// Cursor shape and a name label for whatever is under the pointer.
 pub fn hover_feedback(
+    hide_overlays: Res<crate::ui::HideOverlays>,
     mut contexts: EguiContexts,
     selection: Res<Selection>,
     handles: Res<HandleUi>,
@@ -264,8 +319,11 @@ pub fn hover_feedback(
         return Ok(());
     }
     let dragging = mouse.pressed(MouseButton::Left);
+    let hovered_locked = selection.hovered.and_then(|h| objects.get(h).ok()).is_some_and(|o| o.locked);
     let icon = if place.ghost.is_some() {
         egui::CursorIcon::Crosshair
+    } else if handles.active.is_none() && dragging && hovered_locked {
+        egui::CursorIcon::NotAllowed
     } else if handles.active.is_some() || (dragging && selection.hovered.is_some()) {
         egui::CursorIcon::Grabbing
     } else if handles.hovered.is_some() {
@@ -279,6 +337,7 @@ pub fn hover_feedback(
 
     // Name tag next to the pointer for hovered, unselected objects.
     if !dragging
+        && hide_overlays.0 == 0
         && handles.hovered.is_none()
         && let Some(h) = selection.hovered
         && Some(h) != selection.selected
@@ -286,11 +345,12 @@ pub fn hover_feedback(
         && let Some(c) = window.cursor_position()
     {
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("hover_name")));
-        let galley = painter.layout_no_wrap(obj.name.clone(), egui::FontId::proportional(13.0), egui::Color32::WHITE);
+        let tag = if obj.locked { theme::label(theme::icon::LOCK, &obj.name) } else { obj.name.clone() };
+        let galley = painter.layout_no_wrap(tag, egui::FontId::proportional(13.0), theme::TEXT);
         let rect = egui::Rect::from_min_size(egui::pos2(c.x + 16.0, c.y + 14.0), galley.size() + egui::vec2(10.0, 6.0));
-        painter.rect_filled(rect, 5.0, theme::PANEL.gamma_multiply(0.94));
-        painter.rect_stroke(rect, 5.0, egui::Stroke::new(1.0, theme::STROKE), egui::StrokeKind::Inside);
-        painter.galley(rect.min + egui::vec2(5.0, 3.0), galley, egui::Color32::WHITE);
+        painter.rect_filled(rect, 4.0, theme::PANEL);
+        painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme::STROKE_STRONG), egui::StrokeKind::Inside);
+        painter.galley(rect.min + egui::vec2(5.0, 3.0), galley, theme::TEXT);
     }
     Ok(())
 }

@@ -286,6 +286,11 @@ impl Gpu {
         self.shared.link.lock().unwrap().clone()
     }
 
+    /// A scripted run (screenshot or test), not someone at the window.
+    pub fn headless(&self) -> bool {
+        self.headless
+    }
+
     pub fn fps(&self) -> f32 {
         self.shared.fps_x10.load(Ordering::Relaxed) as f32 / 10.0
     }

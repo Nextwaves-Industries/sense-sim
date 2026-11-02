@@ -5,12 +5,14 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bevy::camera::visibility::{NoAutoAabb, VisibilityRange};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::picking::mesh_picking::ray_cast::RayCastBackfaces;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::bvh::Bvh;
+use crate::lod::LodRange;
 use crate::prototype::{ProtoState, Prototype, PrototypeCache};
 use crate::usd_load::JointKind;
 
@@ -24,6 +26,9 @@ pub struct PlacedObject {
     pub proto: Arc<Prototype>,
     /// Current value of each movable joint (degrees or stage units).
     pub joints: Vec<f32>,
+    /// Can't be moved, rotated, scaled, dropped or deleted, by hand or by the
+    /// assistant, until unlocked. Its moving parts still work.
+    pub locked: bool,
 }
 
 impl PlacedObject {
@@ -204,6 +209,7 @@ pub struct PendingSpawn {
     pub name: Option<String>,
     pub joints: Option<Vec<f32>>,
     pub select: bool,
+    pub locked: bool,
 }
 
 /// Set by the UI each frame: whether egui owns the pointer / keyboard.
@@ -225,11 +231,15 @@ pub struct ViewSettings {
     pub no_overlap: bool,
     /// Objects drop onto whatever is under them.
     pub gravity: bool,
+    /// Draw coarser meshes when zoomed out and skip parts too small to see.
+    pub sampling: bool,
+    /// Skip parts hidden behind others (GPU occlusion culling).
+    pub occlusion: bool,
 }
 
 impl Default for ViewSettings {
     fn default() -> Self {
-        Self { grid: true, bounds: true, snap: 0.25, sun_lux: 9000.0, shadows: true, env_intensity: 1500.0, no_overlap: true, gravity: true }
+        Self { grid: true, bounds: true, snap: 0.25, sun_lux: 7000.0, shadows: true, env_intensity: 2800.0, no_overlap: true, gravity: true, sampling: true, occlusion: false }
     }
 }
 
@@ -257,6 +267,8 @@ pub enum Action {
     FrameAll,
     /// Let a lifted object go: it lands on what is under it.
     Drop(Entity),
+    /// Lock or unlock these objects (see `PlacedObject::locked`).
+    SetLocked(Vec<Entity>, bool),
 }
 
 // ---------------------------------------------------------------------------
@@ -286,12 +298,14 @@ pub fn setup_scene(
         Sun,
     ));
     commands.insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.9, 1.0), brightness: 80.0, ..default() });
-    commands.insert_resource(ClearColor(Color::srgb(0.16, 0.17, 0.19)));
+    let [r, g, b] = crate::theme::CANVAS_SRGB;
+    commands.insert_resource(ClearColor(Color::srgb(r, g, b)));
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.32, 0.33, 0.35),
+            base_color: Color::srgb(0.985, 0.99, 0.995),
             perceptual_roughness: 0.95,
+            reflectance: 0.2,
             ..default()
         })),
         Transform::from_xyz(0.0, -0.001, 0.0),
@@ -318,6 +332,8 @@ fn unique_name(counter: &mut NameCounter, asset: &Path) -> String {
 fn spawn_parts(commands: &mut Commands, root: Entity, proto: &Prototype, ghost: bool) {
     let basis = commands.spawn((proto.basis, Visibility::Inherited, ChildOf(root))).id();
     for (i, part) in proto.parts.iter().enumerate() {
+        let diagonal = (part.aabb.half_extents * 2.0).length();
+        let error_of = |level: usize| part.lods.get(level).map(|l| l.error);
         let mut e = commands.spawn((
             Mesh3d(part.mesh.clone()),
             MeshMaterial3d(part.material.clone()),
@@ -326,6 +342,10 @@ fn spawn_parts(commands: &mut Commands, root: Entity, proto: &Prototype, ghost: 
             PartRest(i),
             ChildOf(basis),
             Name::new(part.name.clone()),
+            part.aabb,
+            NoAutoAabb,
+            LodRange { error: 0.0, next_error: error_of(0), diagonal, triangles: part.triangles, object: root },
+            VisibilityRange::abrupt(0.0, f32::MAX),
         ));
         if ghost {
             e.insert(bevy::light::NotShadowCaster);
@@ -333,6 +353,24 @@ fn spawn_parts(commands: &mut Commands, root: Entity, proto: &Prototype, ghost: 
             // USD decks are often single-sided with either winding: hit both sides
             // (Bevy picking); our own casts go through the part's BVH.
             e.insert((RayCastBackfaces, PartBvh(part.bvh.clone())));
+        }
+        let part_entity = e.id();
+        // Coarser versions follow the part (and its joint pose). They are for drawing
+        // only: without `PartOf`, ray casts and scene queries pass them by.
+        for (level, l) in part.lods.iter().enumerate() {
+            let mut version = commands.spawn((
+                Mesh3d(l.mesh.clone()),
+                MeshMaterial3d(part.material.clone()),
+                ChildOf(part_entity),
+                part.aabb,
+                NoAutoAabb,
+                LodRange { error: l.error, next_error: error_of(level + 1), diagonal, triangles: l.triangles, object: root },
+                VisibilityRange::abrupt(f32::MAX, f32::MAX),
+                Pickable::IGNORE,
+            ));
+            if ghost {
+                version.insert(bevy::light::NotShadowCaster);
+            }
         }
     }
 }
@@ -354,12 +392,15 @@ pub fn spawn_object(
             transform,
             Visibility::Visible,
             Name::new(name.clone()),
-            PlacedObject { asset: asset.to_path_buf(), name, proto: proto.clone(), joints },
+            PlacedObject { asset: asset.to_path_buf(), name, proto: proto.clone(), joints, locked: false },
         ))
         .id();
     spawn_parts(commands, root, proto, false);
     root
 }
+
+/// Mesh parts created per frame while a scene loads (at least one whole object).
+const SPAWN_PARTS_PER_FRAME: usize = 1500;
 
 pub fn process_pending(
     mut commands: Commands,
@@ -373,12 +414,19 @@ pub fn process_pending(
         return;
     }
     let mut keep = Vec::new();
+    let mut parts_left = SPAWN_PARTS_PER_FRAME;
     for p in pending.0.drain(..) {
         cache.request(&p.asset);
         match cache.states.get(&p.asset) {
+            // A big scene appears over a few frames rather than freezing one.
+            Some(ProtoState::Ready(_)) if parts_left == 0 => keep.push(p),
             Some(ProtoState::Ready(proto)) => {
                 let proto = proto.clone();
+                parts_left = parts_left.saturating_sub(proto.parts.len());
                 let e = spawn_object(&mut commands, &mut counter, &proto, &p.asset, p.transform, p.name, p.joints);
+                if p.locked {
+                    commands.entity(e).entry::<PlacedObject>().and_modify(|mut o| o.locked = true);
+                }
                 if p.select {
                     selection.selected = Some(e);
                 }
@@ -462,12 +510,19 @@ pub fn orbit_camera(
     block: Res<UiBlock>,
     handles: Res<HandleUi>,
     time: Res<Time>,
+    mut drag_began_on_ui: Local<bool>,
 ) {
     let (ref mut orbit, ref mut transform, ref mut projection) = *cam;
     let d = motion.delta;
     let pointer_ok = !block.pointer;
-    let orbiting = mouse.pressed(MouseButton::Right) && !keys.pressed(KeyCode::ShiftLeft);
-    let panning = mouse.pressed(MouseButton::Middle) || (mouse.pressed(MouseButton::Right) && keys.pressed(KeyCode::ShiftLeft));
+    // Decided on the press: a camera drag may then run across the cards, but one
+    // that starts on a card is not a camera drag.
+    if mouse.just_pressed(MouseButton::Right) || mouse.just_pressed(MouseButton::Middle) {
+        *drag_began_on_ui = !pointer_ok;
+    }
+    let dragging = !*drag_began_on_ui;
+    let orbiting = dragging && mouse.pressed(MouseButton::Right) && !keys.pressed(KeyCode::ShiftLeft);
+    let panning = dragging && (mouse.pressed(MouseButton::Middle) || (mouse.pressed(MouseButton::Right) && keys.pressed(KeyCode::ShiftLeft)));
     if pointer_ok || orbiting || panning {
         if orbiting {
             orbit.yaw -= d.x * 0.006;
@@ -523,7 +578,7 @@ fn focus_on(orbit: &mut OrbitCamera, center: Vec3, size: f32) {
 // ---------------------------------------------------------------------------
 // Geometry helpers (bounding boxes keep interaction cheap on huge meshes)
 
-fn ray_plane(ray: Ray3d, point: Vec3, normal: Vec3) -> Option<Vec3> {
+pub(crate) fn ray_plane(ray: Ray3d, point: Vec3, normal: Vec3) -> Option<Vec3> {
     let denom = ray.direction.dot(normal);
     if denom.abs() < 1e-6 {
         return None;
@@ -727,7 +782,7 @@ fn overlaps(
     })
 }
 
-fn closest_param_on_line(ray: Ray3d, origin: Vec3, dir: Vec3) -> Option<f32> {
+pub(crate) fn closest_param_on_line(ray: Ray3d, origin: Vec3, dir: Vec3) -> Option<f32> {
     let r = *ray.direction;
     let w = origin - ray.origin;
     let b = dir.dot(r);
@@ -787,7 +842,7 @@ fn lift_geometry(obj: &PlacedObject, t: &Transform) -> (Vec3, Vec3) {
     (top + Vec3::Y * gap, top + Vec3::Y * (gap + len))
 }
 
-fn dist_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+pub(crate) fn dist_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     let ab = b - a;
     let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
     p.distance(a + ab * t)
@@ -813,6 +868,7 @@ pub fn interact(
     cache: Res<PrototypeCache>,
     block: Res<UiBlock>,
     settings: Res<ViewSettings>,
+    visibility: Query<&Visibility, With<PlacedObject>>,
 ) {
     let (cam, cam_gt) = *camera;
     let cursor = window.cursor_position();
@@ -833,7 +889,9 @@ pub fn interact(
                 place.yaw += d;
             } else {
                 for sel in selection.all() {
-                    if let Ok((_, _, mut t)) = objects.get_mut(sel) {
+                    if let Ok((_, o, mut t)) = objects.get_mut(sel)
+                        && !o.locked
+                    {
                         t.rotate_y(d);
                     }
                 }
@@ -887,11 +945,12 @@ pub fn interact(
     if let Some(active) = &mut drag.active {
         if !mouse.pressed(MouseButton::Left) {
             // Gravity: a moved object falls onto what's under it; Alt-moved or lifted
-            // objects stay where they were put.
+            // objects stay where they were put. Locked members of the group didn't move.
+            let unlocked = |g: &Entity| objects.get(*g).is_ok_and(|(_, o, _)| !o.locked);
             match drag.active.take() {
                 Some(Drag::Move { entity, moved: true, .. }) if alt => {
                     commands.entity(entity).try_insert(Floating);
-                    for g in selection.all().into_iter().filter(|g| *g != entity) {
+                    for g in selection.all().into_iter().filter(|g| *g != entity).filter(unlocked) {
                         commands.entity(g).try_insert(Floating);
                     }
                 }
@@ -899,7 +958,7 @@ pub fn interact(
                     commands.entity(entity).try_remove::<Floating>();
                     drag.released = Some(entity);
                     // The rest of the group settles onto whatever is under it too.
-                    for g in selection.all().into_iter().filter(|g| *g != entity) {
+                    for g in selection.all().into_iter().filter(|g| *g != entity).filter(unlocked) {
                         commands.entity(g).try_remove::<Floating>().try_insert(Falling(0.0));
                     }
                 }
@@ -954,7 +1013,9 @@ pub fn interact(
                         // The rest of the selection keeps its place relative to this one.
                         if delta != Vec3::ZERO && selection.contains(me) {
                             for g in selection.all().into_iter().filter(|g| *g != me) {
-                                if let Ok((_, _, mut gt)) = objects.get_mut(g) {
+                                if let Ok((_, go, mut gt)) = objects.get_mut(g)
+                                    && !go.locked
+                                {
                                     gt.translation += delta;
                                 }
                             }
@@ -1037,7 +1098,7 @@ pub fn interact(
             .min_by(|a, b| a.0.total_cmp(&b.0));
         if let Some((_, i)) = near {
             handles.hovered = Some(Handle::Joint(i));
-        } else if handles.compact.is_none() {
+        } else if handles.compact.is_none() && !obj.locked {
             let (a, b) = lift_geometry(&obj, &t);
             if let (Some(sa), Some(sb)) = (to_screen(a), to_screen(b))
                 && dist_to_segment(cursor, sa, sb) < 9.0
@@ -1083,6 +1144,9 @@ pub fn interact(
     // ---- Object hover via bounding boxes (cheap)
     let mut hovered: Option<(f32, Entity)> = None;
     for (e, obj, t) in objects.iter() {
+        if visibility.get(e).is_ok_and(|v| *v == Visibility::Hidden) {
+            continue;
+        }
         let (mn, mx) = obj.aabb();
         if let Some(d) = ray_obb(ray, &t, mn, mx)
             && hovered.is_none_or(|(bd, _)| d < bd)
@@ -1164,7 +1228,10 @@ pub fn interact(
             } else {
                 selection.set(Some(e));
             }
-            if let Ok((_, _, t)) = objects.get(e) {
+            // A locked object can be selected but not picked up.
+            if let Ok((_, o, t)) = objects.get(e)
+                && !o.locked
+            {
                 // Measure the grab offset where the cursor meets the object's base, which
                 // is where the surface it rests on is, so it doesn't jump on the first move.
                 let base = ray_plane_y(ray, t.translation.y).unwrap_or(p);
@@ -1239,6 +1306,7 @@ pub fn keyboard_shortcuts(
     selection: Res<Selection>,
     place: Res<PlaceMode>,
     mut actions: ResMut<Actions>,
+    objects: Query<&PlacedObject>,
 ) {
     if block.keyboard || place.ghost.is_some() {
         return;
@@ -1258,6 +1326,10 @@ pub fn keyboard_shortcuts(
             for e in selection.all() {
                 actions.0.push(Action::Duplicate(e));
             }
+        }
+        if ctrl && keys.just_pressed(KeyCode::KeyL) {
+            let lock = !objects.get(sel).is_ok_and(|o| o.locked);
+            actions.0.push(Action::SetLocked(selection.all(), lock));
         }
         if keys.just_pressed(KeyCode::KeyF) {
             actions.0.push(Action::Focus(sel));
@@ -1281,9 +1353,10 @@ pub fn apply_actions(
     mut pending: ResMut<PendingSpawns>,
     mut status: ResMut<Status>,
     mut counter: ResMut<NameCounter>,
-    objects: Query<(Entity, &PlacedObject, &Transform)>,
+    mut objects: Query<(Entity, &mut PlacedObject, &Transform)>,
     mut orbit: Single<&mut OrbitCamera>,
     mut downloads: ResMut<PendingDownloads>,
+    mut undo: ResMut<crate::undo::UndoStack>,
 ) {
     for action in std::mem::take(&mut actions.0) {
         match action {
@@ -1297,6 +1370,12 @@ pub fn apply_actions(
                 status.0 = format!("{} objects selected", selection.all().len());
             }
             Action::Delete(e) => {
+                if let Ok((_, o, _)) = objects.get(e)
+                    && o.locked
+                {
+                    status.0 = format!("{} is locked: unlock it to delete it", o.name);
+                    continue;
+                }
                 if objects.contains(e) {
                     commands.entity(e).despawn();
                 }
@@ -1316,6 +1395,7 @@ pub fn apply_actions(
                         name: None,
                         joints: Some(obj.joints.clone()),
                         select: true,
+                        locked: false,
                     });
                 }
             }
@@ -1326,7 +1406,30 @@ pub fn apply_actions(
                 }
             }
             Action::Drop(e) => {
+                if let Ok((_, o, _)) = objects.get(e)
+                    && o.locked
+                {
+                    status.0 = format!("{} is locked: unlock it to drop it", o.name);
+                    continue;
+                }
                 commands.entity(e).try_remove::<Floating>().try_insert(DropNow);
+            }
+            Action::SetLocked(list, locked) => {
+                let mut names = Vec::new();
+                for e in list {
+                    if let Ok((_, mut o, _)) = objects.get_mut(e)
+                        && o.locked != locked
+                    {
+                        o.locked = locked;
+                        names.push(o.name.clone());
+                    }
+                }
+                let verb = if locked { "Locked" } else { "Unlocked" };
+                match names.as_slice() {
+                    [] => {}
+                    [one] => status.0 = format!("{verb} {one}"),
+                    many => status.0 = format!("{verb} {} objects", many.len()),
+                }
             }
             Action::FrameAll => {
                 let mut lo = Vec3::splat(f32::MAX);
@@ -1357,19 +1460,26 @@ pub fn apply_actions(
                 let list: Vec<serde_json::Value> = objects
                     .iter()
                     .map(|(_, o, t)| {
-                        serde_json::json!({
+                        let mut v = serde_json::json!({
                             "name": o.name,
                             "asset": o.asset.to_string_lossy(),
                             "translation": t.translation.to_array(),
                             "rotation": t.rotation.to_array(),
                             "scale": t.scale.to_array(),
                             "joints": o.joints,
-                        })
+                        });
+                        if o.locked {
+                            v["locked"] = true.into();
+                        }
+                        v
                     })
                     .collect();
                 let doc = serde_json::json!({ "format": "sense_sim_layout", "version": 2, "objects": list });
                 status.0 = match std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()) {
-                    Ok(()) => format!("Saved {} objects to {}", list.len(), path.display()),
+                    Ok(()) => {
+                        undo.mark_saved();
+                        format!("Saved {} objects to {}", list.len(), path.display())
+                    }
                     Err(e) => format!("Save failed: {e}"),
                 };
             }
@@ -1379,7 +1489,9 @@ pub fn apply_actions(
                         commands.entity(e).despawn();
                     }
                     selection.set(None);
-                    status.0 = format!("Loading {} objects from {}", spawns.len() + missing.len(), path.display());
+                    // The bar's spinner says while they load; this stays once they have.
+                    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    status.0 = format!("Opened {name}: {} objects", spawns.len() + missing.len());
                     pending.0.extend(spawns);
                     downloads.0 = missing;
                 }
@@ -1416,7 +1528,7 @@ fn load_layout(path: &Path) -> anyhow::Result<(Vec<PendingSpawn>, Vec<PendingDow
         };
         let name = o["name"].as_str().map(str::to_string);
         match (o["asset"].as_str(), o["download"].as_str()) {
-            (Some(asset), _) => out.push(PendingSpawn { asset: PathBuf::from(asset), transform, name, joints: Some(arr(o, "joints")), select: false }),
+            (Some(asset), _) => out.push(PendingSpawn { asset: PathBuf::from(asset), transform, name, joints: Some(arr(o, "joints")), select: false, locked: o["locked"].as_bool().unwrap_or(false) }),
             (None, Some(folder)) => missing.push(PendingDownload { folder: folder.to_string(), transform, name, requested: false }),
             _ => {}
         }
@@ -1471,8 +1583,8 @@ pub fn draw_gizmos(
 ) {
     if settings.grid {
         let iso = Isometry3d::from_rotation(Quat::from_rotation_x(FRAC_PI_2));
-        gizmos.grid(iso, UVec2::splat(40), Vec2::splat(0.5), Color::srgba(1.0, 1.0, 1.0, 0.07)).outer_edges();
-        gizmos.grid(iso, UVec2::splat(8), Vec2::splat(2.5), Color::srgba(1.0, 1.0, 1.0, 0.12));
+        gizmos.grid(iso, UVec2::splat(40), Vec2::splat(0.5), Color::srgba(0.0, 0.02, 0.06, 0.07)).outer_edges();
+        gizmos.grid(iso, UVec2::splat(8), Vec2::splat(2.5), Color::srgba(0.0, 0.02, 0.06, 0.13));
         gizmos.line(Vec3::ZERO, Vec3::X * 0.5, Color::srgb(0.9, 0.2, 0.2));
         gizmos.line(Vec3::ZERO, Vec3::Z * 0.5, Color::srgb(0.2, 0.4, 0.95));
     }
@@ -1480,19 +1592,21 @@ pub fn draw_gizmos(
         let local = Transform::from_translation((mn + mx) * 0.5).with_scale((mx - mn).max(Vec3::splat(0.01)));
         g.cube(t.mul_transform(local), color);
     };
-    let amber = Color::srgb(1.0, 0.69, 0.13);
-    let hot = Color::srgb(1.0, 0.95, 0.55);
+    let amber = Color::srgb(0.96, 0.52, 0.04);
+    let hot = Color::srgb(0.12, 0.42, 0.94);
+    // A locked object's box is grey: selected, but not there to be moved.
+    let box_color = |obj: &PlacedObject| if obj.locked { Color::srgb(0.42, 0.45, 0.5) } else { amber };
     let active_or_hover = |h: Handle| handles.active == Some(h) || (handles.active.is_none() && handles.hovered == Some(h));
 
     if let Some(sel) = selection.selected
         && let Ok((obj, t)) = objects.get(sel)
     {
         let (mn, mx) = obj.aabb();
-        boxed(&mut hg, mn, mx, t, amber);
+        boxed(&mut hg, mn, mx, t, box_color(obj));
 
         // Rotate ring with a facing tick, and the lift arrow (hidden while the object is
-        // tiny on screen, where they would cover it).
-        if handles.compact.is_none() {
+        // tiny on screen, where they would cover it, and while it is locked).
+        if handles.compact.is_none() && !obj.locked {
             let (c, r) = ring_geometry(obj, t);
             let ring_col = if active_or_hover(Handle::Rotate) { hot } else { amber.with_alpha(0.85) };
             hg.circle(Isometry3d::new(c, Quat::from_rotation_x(FRAC_PI_2)), r, ring_col).resolution(64);
@@ -1500,7 +1614,7 @@ pub fn draw_gizmos(
             hg.arrow(c + fwd * r, c + fwd * (r + ring_tick(obj, t)), ring_col);
 
             let (a, b) = lift_geometry(obj, t);
-            let lift_col = if active_or_hover(Handle::Lift) { hot } else { Color::srgb(0.45, 0.9, 0.45) };
+            let lift_col = if active_or_hover(Handle::Lift) { hot } else { Color::srgb(0.14, 0.66, 0.3) };
             hg.arrow(a, b, lift_col);
         }
 
@@ -1531,7 +1645,7 @@ pub fn draw_gizmos(
     for e in selection.group.iter().filter(|e| Some(**e) != selection.selected) {
         if let Ok((obj, t)) = objects.get(*e) {
             let (mn, mx) = obj.aabb();
-            boxed(&mut hg, mn, mx, t, amber.with_alpha(0.7));
+            boxed(&mut hg, mn, mx, t, box_color(obj).with_alpha(0.7));
         }
     }
     if settings.bounds
@@ -1541,14 +1655,14 @@ pub fn draw_gizmos(
     {
         let (mn, mx) = obj.aabb();
         let local = Transform::from_translation((mn + mx) * 0.5).with_scale((mx - mn).max(Vec3::splat(0.01)));
-        gizmos.cube(t.mul_transform(local), Color::srgba(0.6, 0.85, 1.0, 0.8));
+        gizmos.cube(t.mul_transform(local), Color::srgba(0.16, 0.44, 0.94, 0.85));
     }
     if let Some((g, asset)) = &place.ghost
         && let Ok((gt, vis)) = ghosts.get(*g)
         && *vis != Visibility::Hidden
         && let Some(p) = cache.get(asset)
     {
-        let color = if place.blocked { Color::srgb(1.0, 0.3, 0.3) } else { Color::srgb(0.3, 0.9, 1.0) };
+        let color = if place.blocked { Color::srgb(0.9, 0.2, 0.2) } else { Color::srgb(0.12, 0.5, 0.95) };
         boxed(&mut hg, p.aabb_min, p.aabb_max, &gt.compute_transform(), color);
     }
 }
@@ -1656,6 +1770,7 @@ pub fn gravity(
     mut objects: Query<(Entity, &PlacedObject, &mut Transform, Has<Floating>, Option<&mut Falling>), Without<Ghost>>,
     mut removed: RemovedComponents<PlacedObject>,
     drop_now: Query<(), With<DropNow>>,
+    parked: Query<(), With<crate::tabs::ParkedObject>>,
 ) {
     // Drop requests: fall now (gravity on) or land at once (gravity off).
     let drops: Vec<Entity> = objects.iter().filter(|(e, ..)| drop_now.contains(*e)).map(|(e, ..)| e).collect();
@@ -1675,7 +1790,8 @@ pub fn gravity(
         }
     }
     let released = drag.released.take();
-    let deleted = removed.read().count() > 0;
+    // A tab being parked is not a deletion.
+    let deleted = removed.read().filter(|e| !parked.contains(*e)).count() > 0;
     if !settings.gravity {
         for (e, _, _, _, falling) in &objects {
             if falling.is_some() {
@@ -1696,7 +1812,11 @@ pub fn gravity(
         if t.is_changed() && !t.is_added() {
             moved.push((e, lo, hi));
         }
-        let can_fall = !floating && falling.is_none() && Some(e) != held;
+        // Locked mid-fall: it stays where it is now.
+        if obj.locked && falling.is_some() {
+            commands.entity(e).remove::<Falling>();
+        }
+        let can_fall = !floating && !obj.locked && falling.is_none() && Some(e) != held;
         all.push((e, lo, hi, can_fall));
     }
     for &(e, lo, hi, can_fall) in &all {
@@ -1708,7 +1828,8 @@ pub fn gravity(
             || moved.iter().any(|&(m, mlo, mhi)| {
                 m != e && lo.x < mhi.x && mlo.x < hi.x && lo.z < mhi.z && mlo.z < hi.z && lo.y >= mlo.y - 0.01
             });
-        if wake {
+        // Ceilings, roof beams and mounted fixtures hang: nothing under them holds them up.
+        if wake && !objects.get(e).is_ok_and(|(_, o, ..)| crate::agent::assetgen::hangs(&o.asset)) {
             commands.entity(e).insert(Falling(0.0));
         }
     }
@@ -1719,7 +1840,7 @@ pub fn gravity(
     let dt = time.delta_secs().min(1.0 / 30.0);
     let falling: Vec<(Entity, (Vec3, Vec3), Transform, f32)> = objects
         .iter()
-        .filter(|(e, ..)| Some(*e) != held)
+        .filter(|(e, obj, ..)| Some(*e) != held && !obj.locked)
         .filter_map(|(e, obj, t, _, f)| f.map(|f| (e, obj.aabb(), *t, f.0)))
         .collect();
     for (e, bounds, t, v) in falling {
@@ -1739,5 +1860,145 @@ pub fn gravity(
             tm.translation.y -= step;
             f.0 = v;
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod lock_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    pub(crate) fn object(w: &mut World, name: &str, locked: bool) -> Entity {
+        let proto = Arc::new(Prototype {
+            parts: Vec::new(),
+            joints: Vec::new(),
+            links: Vec::new(),
+            unit: 1.0,
+            basis: Transform::IDENTITY,
+            aabb_min: Vec3::ZERO,
+            aabb_max: Vec3::ONE,
+            triangles: 0,
+            load_ms: 0.0,
+            warnings: Vec::new(),
+            detected: default(),
+        });
+        w.spawn((Transform::from_xyz(0.0, 3.0, 0.0), PlacedObject { asset: "a.usd".into(), name: name.into(), proto, joints: Vec::new(), locked })).id()
+    }
+
+    fn scene() -> World {
+        let mut w = World::new();
+        w.init_resource::<Actions>();
+        w.init_resource::<Selection>();
+        w.init_resource::<PendingSpawns>();
+        w.init_resource::<PendingDownloads>();
+        w.init_resource::<Status>();
+        w.init_resource::<NameCounter>();
+        w.init_resource::<crate::undo::UndoStack>();
+        w.spawn(OrbitCamera { focus: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 1.0 });
+        w
+    }
+
+    fn act(w: &mut World, actions: Vec<Action>) {
+        w.resource_mut::<Actions>().0 = actions;
+        w.run_system_once(apply_actions).unwrap();
+        w.flush();
+    }
+
+    #[test]
+    fn delete_and_drop_leave_a_locked_object_alone() {
+        let mut w = scene();
+        let (locked, free) = (object(&mut w, "kept", true), object(&mut w, "free", false));
+        w.resource_mut::<Selection>().selected = Some(locked);
+        act(&mut w, vec![Action::Delete(locked), Action::Delete(free), Action::Drop(locked)]);
+        assert!(w.get_entity(locked).is_ok(), "a locked object must survive Delete");
+        assert!(w.get_entity(free).is_err(), "an unlocked object is still deleted");
+        assert!(w.get::<DropNow>(locked).is_none(), "a locked object must ignore Drop");
+        assert_eq!(w.resource::<Selection>().selected, Some(locked), "a refused delete keeps the selection");
+        assert!(w.resource::<Status>().0.contains("kept is locked"), "says why: {}", w.resource::<Status>().0);
+    }
+
+    #[test]
+    fn set_locked_covers_the_list_and_can_be_reversed() {
+        let mut w = scene();
+        let (a, b) = (object(&mut w, "a", false), object(&mut w, "b", false));
+        act(&mut w, vec![Action::SetLocked(vec![a, b], true)]);
+        assert!(w.get::<PlacedObject>(a).unwrap().locked && w.get::<PlacedObject>(b).unwrap().locked);
+        assert_eq!(w.resource::<Status>().0, "Locked 2 objects");
+        act(&mut w, vec![Action::SetLocked(vec![a], false)]);
+        assert!(!w.get::<PlacedObject>(a).unwrap().locked && w.get::<PlacedObject>(b).unwrap().locked);
+        assert_eq!(w.resource::<Status>().0, "Unlocked a");
+    }
+
+    #[test]
+    fn ctrl_l_follows_the_primary_object_and_covers_the_selection() {
+        let mut w = scene();
+        let (a, b) = (object(&mut w, "a", false), object(&mut w, "b", true));
+        w.init_resource::<UiBlock>();
+        w.init_resource::<PlaceMode>();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::KeyL);
+        w.insert_resource(keys);
+        {
+            let mut selection = w.resource_mut::<Selection>();
+            selection.selected = Some(a);
+            selection.group = vec![b];
+        }
+        w.run_system_once(keyboard_shortcuts).unwrap();
+        match w.resource::<Actions>().0.as_slice() {
+            [Action::SetLocked(list, true)] => assert_eq!(list, &vec![a, b]),
+            _ => panic!("Ctrl+L should ask to lock the selection"),
+        }
+    }
+
+    #[test]
+    fn a_duplicate_starts_unlocked() {
+        let mut w = scene();
+        let a = object(&mut w, "a", true);
+        act(&mut w, vec![Action::Duplicate(a)]);
+        assert!(!w.resource::<PendingSpawns>().0[0].locked);
+    }
+
+    #[test]
+    fn the_lock_survives_save_and_load() {
+        let mut w = scene();
+        object(&mut w, "kept", true);
+        object(&mut w, "free", false);
+        let path = std::env::temp_dir().join(format!("sense_sim_lock_test_{}.json", std::process::id()));
+        act(&mut w, vec![Action::SaveLayout(path.clone())]);
+        let (spawns, _) = load_layout(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let locked = |n: &str| spawns.iter().find(|s| s.name.as_deref() == Some(n)).unwrap().locked;
+        assert!(locked("kept"));
+        assert!(!locked("free"));
+    }
+
+    #[test]
+    fn a_layout_without_the_field_loads_unlocked() {
+        let path = std::env::temp_dir().join(format!("sense_sim_lock_old_{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"format":"sense_sim_layout","version":2,"objects":[{"name":"old","asset":"a.usd"}]}"#).unwrap();
+        let (spawns, _) = load_layout(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(!spawns[0].locked);
+    }
+
+    #[test]
+    fn gravity_leaves_a_locked_object_in_the_air() {
+        let mut w = scene();
+        w.init_resource::<Time>();
+        w.init_resource::<ViewSettings>();
+        w.init_resource::<DragState>();
+        w.init_resource::<Messages<bevy::ecs::lifecycle::RemovedComponentEntity>>();
+        let locked = object(&mut w, "kept", true);
+        let free = object(&mut w, "free", false);
+        for e in [locked, free] {
+            w.entity_mut(e).insert(Falling(5.0));
+        }
+        w.resource_mut::<Time>().advance_by(std::time::Duration::from_millis(30));
+        w.run_system_once(gravity).unwrap();
+        w.flush();
+        assert_eq!(w.get::<Transform>(locked).unwrap().translation.y, 3.0, "a locked object must not fall");
+        assert!(w.get::<Falling>(locked).is_none(), "and must not stay marked as falling, which holds up undo");
+        assert!(w.get::<Transform>(free).unwrap().translation.y < 3.0, "an unlocked one still falls");
     }
 }

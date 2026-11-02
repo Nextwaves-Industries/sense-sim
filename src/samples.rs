@@ -150,7 +150,7 @@ pub const SAMPLES: [Sample; 9] = [
     },
     Sample {
         title: "Pump station",
-        blurb: "Two tanks, a motor pump and three valves, fully piped: the pump lifts water into tank B, which drains back through a throttled valve.",
+        blurb: "Two tanks, a motor pump and three valves, fully piped: the pump lifts water into tank B through a throttled discharge valve, and B drains back by gravity until the levels settle.",
         icon: icon::DROP,
         hero: "drainage_pumpSystem_a01",
         preview: include_bytes!("../assets/samples/previews/pump_station.png"),
@@ -197,6 +197,31 @@ pub const SAMPLES: [Sample; 9] = [
         plant: Some(conveyor_line),
     },
 ];
+
+/// Small starting scenes the assistant loads with `load_template` and then
+/// adapts, instead of placing everything one call at a time. Not shown on
+/// the start screen.
+pub const TEMPLATES: [(&str, Sample); 1] = [(
+    "rack_warehouse",
+    Sample {
+        title: "Rack warehouse",
+        blurb: "13 × 10 m room, 2 columns: 3 storage racks along the back wall, a workbench, a mobile cart. \
+                UWB: 6 anchors (walls + columns), tag T1 on the cart, tags T2/T3 walking loops, zones Area 1-5 \
+                (one per rack, workbench, cart bay).",
+        icon: icon::BROADCAST,
+        hero: "rack_composition_a04",
+        preview: &[],
+        floor: Vec2::new(13.0, 10.0),
+        center: Vec2::new(6.5, 5.0),
+        wall_height: 4.0,
+        columns: &[(4.0, 4.5), (12.5, 4.5)],
+        walls: &[],
+        items: &[],
+        generate: None,
+        layout: Some(include_str!("../assets/templates/rack_warehouse.json")),
+        plant: None,
+    },
+)];
 
 fn pump_station() -> anyhow::Result<recipes::Assembly> {
     recipes::pump_loop(&mut recipes::Namer::new("", Default::default()), Vec3::ZERO, 0.0, 0.05, 1.0, 1.2, &[])
@@ -272,7 +297,16 @@ fn resolve(library: &Library, folder: &str) -> Option<PathBuf> {
 /// and returns its path plus the folders that are not on disk. Their objects
 /// stay in the layout as `"download": folder`, fetched when it is loaded.
 pub fn write_layout(index: usize, library: &Library) -> anyhow::Result<(PathBuf, Vec<String>)> {
-    let s = &SAMPLES[index];
+    write_scene(&SAMPLES[index], "samples", library)
+}
+
+/// Writes a template for the assistant (`%LOCALAPPDATA%/SenseSim/templates/`).
+pub fn write_template(id: &str, library: &Library) -> anyhow::Result<(PathBuf, Vec<String>)> {
+    let (_, s) = TEMPLATES.iter().find(|(i, _)| *i == id).ok_or_else(|| anyhow::anyhow!("unknown template '{id}'"))?;
+    write_scene(s, "templates", library)
+}
+
+fn write_scene(s: &Sample, dir: &str, library: &Library) -> anyhow::Result<(PathBuf, Vec<String>)> {
     let mut missing: Vec<String> = Vec::new();
     let mut note_missing = |folder: &str| {
         if !missing.iter().any(|m| m == folder) {
@@ -372,7 +406,7 @@ pub fn write_layout(index: usize, library: &Library) -> anyhow::Result<(PathBuf,
     }
 
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let dir = PathBuf::from(base).join("SenseSim").join("samples");
+    let dir = PathBuf::from(base).join("SenseSim").join(dir);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", slug(s.title)));
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;

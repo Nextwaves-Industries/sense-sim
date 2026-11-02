@@ -158,6 +158,7 @@ pub fn track_names(
     pending: Res<PendingSpawns>,
     mut links: ResMut<Links>,
     mut plant: ResMut<Plant>,
+    parked: Query<(), With<crate::tabs::ParkedObject>>,
 ) {
     for (e, o) in &objects {
         match known.get(&e) {
@@ -175,6 +176,10 @@ pub fn track_names(
     }
     for e in removed.read() {
         let Some(name) = known.remove(&e) else { continue };
+        // Parked with its tab, not deleted: its links went with the tab's resources.
+        if parked.contains(e) {
+            continue;
+        }
         let still = objects.iter().any(|(_, o)| o.name == name) || pending.0.iter().any(|p| p.name.as_deref() == Some(name.as_str()));
         if !still {
             links.remove_object(&name);

@@ -208,6 +208,12 @@ impl Library {
                 ));
             }
         }
+        // Assets the assistant made are library assets like any other.
+        for (name, usd) in crate::agent::assetgen::list_custom() {
+            if !list.iter().any(|(e, _)| e.folder == name) {
+                list.push((LibraryEntry { name: name.clone(), folder: name, usd: Some(usd), thumb: None, movable: false }, None));
+            }
+        }
         list.sort_by_key(|(e, _)| e.name.to_ascii_lowercase());
         self.entries = Vec::with_capacity(list.len());
         self.entry_thumb_keys = Vec::with_capacity(list.len());

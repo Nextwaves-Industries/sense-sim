@@ -42,7 +42,7 @@ pub fn defs() -> Vec<ToolDef> {
                 "diameter_m": { "type": "number", "description": "pipe/nozzle/shaft diameter, default 0.05" },
                 "diameter2_m": { "type": "number" }, "length_m": { "type": "number" }, "angle_deg": { "type": "number" },
                 "tank_diameter_m": { "type": "number" }, "height_m": { "type": "number" }, "width_m": { "type": "number" },
-                "pulley_diameter_m": { "type": "number" }, "cylinders": { "type": "integer" }, "motor": { "type": "boolean" },
+                "pulley_diameter_m": { "type": "number" }, "cylinders": { "type": "integer" }, "motor": { "type": "boolean" }, "plinth_m": { "type": "number", "description": "pump: height of the concrete plinth (to line the suction up with a tank nozzle)" },
                 "connect_to": { "type": "string", "description": "\"object.port\" to snap onto" },
                 "my_port": { "type": "string", "description": "which port of the new part mates (default: first that fits)" },
                 "aim": v3.clone(),
@@ -87,15 +87,15 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "plant_set",
-            "Operate an object: on (engines, motors, pumps with a motor, conveyors), rpm, speed_mps (conveyor), valve_open 0..1 (the lever moves), fill 0..1 (tank level), medium (water, oil, coolant, fuel, chemical: colours the flow).",
+            "Operate an object: on (engines, motors, pumps with a motor, conveyors), rpm, speed_mps (conveyor), valve_open 0..1 (the lever moves), fill 0..1 (tank level), medium (water, oil, coolant, fuel, chemical: colours the flow), open_ends_supply (its open pipe ends are fed from outside, like a mains: otherwise an open end only spills).",
             json!({ "type": "object", "properties": {
                 "object": { "type": "string" }, "on": { "type": "boolean" }, "rpm": { "type": "number" }, "speed_mps": { "type": "number" },
-                "valve_open": { "type": "number" }, "fill": { "type": "number" }, "medium": { "type": "string" }
+                "valve_open": { "type": "number" }, "fill": { "type": "number" }, "medium": { "type": "string" }, "open_ends_supply": { "type": "boolean" }
             }, "required": ["object"] }),
         ),
         def(
             "plant_run",
-            "Simulate the plant for `seconds` (default 30) from its current state and report: machine speeds, pump flow and head, valve flows, tank levels (start/end/min/max), conveyor speeds and what feeds what, open pipe ports, leaks and alarms with the time they appear. ok=true when nothing leaks or alarms. Also starts the live animation.",
+            "Simulate the plant for `seconds` (default 30) from its current state and report: machine speeds, pump flow and head, valve flows, tank levels (start/end/min/max), conveyor speeds and what feeds what, open pipe ports, leaks and alarms with the time they appear, the mass balance, and what's assumed rather than known. ok=true when nothing leaks or alarms and the liquid adds up. Not validated on hardware. Also starts the live animation.",
             json!({ "type": "object", "properties": { "seconds": { "type": "number" } } }),
         ),
         def("plant_status", "Live plant state now: speeds, flows, tank levels, alarms, links.", json!({ "type": "object", "properties": {} })),
@@ -177,7 +177,7 @@ fn spec_from(i: &Value) -> Result<Spec, String> {
         "tee" => Spec::Tee { d },
         "reducer" => Spec::Reducer { d1: d, d2: f(i, "diameter2_m").ok_or("reducer needs diameter2_m")? },
         "valve" => Spec::Valve { d },
-        "pump" => Spec::Pump { d, motor: i["motor"].as_bool().unwrap_or(true) },
+        "pump" => Spec::Pump { d, motor: i["motor"].as_bool().unwrap_or(true), base: f(i, "plinth_m").unwrap_or(0.0) },
         "tank" => Spec::Tank { dia: f(i, "tank_diameter_m").unwrap_or(1.0), h: f(i, "height_m").unwrap_or(1.2), d },
         "motor" => Spec::Motor { d: f(i, "diameter_m").unwrap_or(0.03) },
         "pulley" => Spec::Pulley { dia: f(i, "pulley_diameter_m").unwrap_or(0.12), d: f(i, "diameter_m").unwrap_or(0.03) },
@@ -360,6 +360,9 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Started, String> {
             if mv != "none" && kind != LinkKind::Belt {
                 let (tp, td, _) = model.port_world(fixed_ref).unwrap();
                 let o = model.get(&moving_ref.object).unwrap();
+                if world.get::<crate::scene::PlacedObject>(o.entity).is_some_and(|p| p.locked) {
+                    return Err(format!("{} is locked: ask the user to unlock it, or move the other end", o.name));
+                }
                 let mine = o.port(&moving_ref.port).unwrap();
                 let other = o.info.ports.iter().find(|q| q.id != mine.id && q.kind == mine.kind);
                 let free = o.info.spec.is_some() && matches!(o.role, Role::Fitting | Role::Valve | Role::Rotor);
@@ -505,6 +508,9 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Started, String> {
                 if let Some(v) = f(i, "valve_open") {
                     c.valve_open = Some(v.clamp(0.0, 1.0));
                 }
+                if let Some(s) = i["open_ends_supply"].as_bool() {
+                    c.open_ends_supply = s;
+                }
             }
             let mut valve_note = None;
             if let Some(v) = f(i, "valve_open")
@@ -565,6 +571,7 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Started, String> {
                 "running": plant.running, "time_s": r2(plant.live.time as f32), "moving": machines, "pumps": pumps, "tanks": tanks,
                 "links": links.0.iter().map(|l| format!("{} ↔ {} ({})", l.a.label(), l.b.label(), l.kind.name())).take(60).collect::<Vec<_>>(),
                 "alarms": plant.live.alarms,
+                "evidence": "Simulated from hand-checked physics: not validated on hardware",
             }))
         }
         "plant_define_port" => {

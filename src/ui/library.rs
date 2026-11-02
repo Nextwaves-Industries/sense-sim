@@ -9,6 +9,8 @@ use bevy_egui::egui::{self, Align2, Color32, FontId, RichText, Sense, Stroke, St
 use super::{Filter, UiState};
 use crate::library::{DownloadState, Library, LibraryEntry};
 use crate::prototype::{ProtoState, PrototypeCache};
+use crate::rtls::DevicePlace;
+use crate::rtls::device::{DeviceKind, Profile, Profiles};
 use crate::scene::PlaceMode;
 use crate::theme::{self, ACCENT, ONLINE, icon};
 
@@ -25,7 +27,7 @@ fn elided(ui: &egui::Ui, text: &str, width: f32, rows: usize, size: f32, color: 
 
 /// Search field with a magnifier and a clear button.
 pub fn search_box(ui: &mut egui::Ui, text: &mut String, hint: &str) {
-    egui::Frame::new().fill(theme::BG).corner_radius(7).inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| {
+    egui::Frame::new().fill(theme::PANEL).stroke(Stroke::new(1.0, Color32::from_rgb(214, 218, 224))).corner_radius(5).inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(icon::MAGNIFYING_GLASS).color(theme::WEAK));
             // Right-to-left so the field takes exactly the space left; asking for more
@@ -60,7 +62,7 @@ impl Status<'_> {
             }
             (Some(DownloadState::Queued), _) => ("Queued".into(), theme::WEAK),
             _ if self.online => ("Online · click to download".into(), ONLINE),
-            (_, Some(ProtoState::Loading)) => ("Loading…".into(), ACCENT),
+            (_, Some(ProtoState::Loading)) => ("Loading…".into(), theme::WARNING),
             (_, Some(ProtoState::Ready(p))) => (format!("{} tris · {} moving parts", p.triangles, p.joints.len()), theme::WEAK),
             (_, Some(ProtoState::Failed(_))) => ("Failed to load · click to retry".into(), theme::DANGER),
             _ => ("On disk".into(), theme::WEAK),
@@ -87,11 +89,11 @@ impl Status<'_> {
             (Some(_), _) => return,
             _ if self.online => (icon::CLOUD, ONLINE),
             (_, Some(ProtoState::Ready(_))) => (icon::CHECK_CIRCLE, theme::SUCCESS),
-            (_, Some(ProtoState::Loading)) => (icon::CIRCLE_NOTCH, ACCENT),
+            (_, Some(ProtoState::Loading)) => (icon::CIRCLE_NOTCH, theme::WARNING),
             (_, Some(ProtoState::Failed(_))) => (icon::WARNING_CIRCLE, theme::DANGER),
             _ => return,
         };
-        painter.circle_filled(c, 10.0, Color32::from_rgba_unmultiplied(14, 16, 20, 225));
+        painter.circle(c, 10.0, theme::PANEL, Stroke::new(1.0, theme::STROKE));
         painter.text(c, Align2::CENTER_CENTER, glyph, FontId::proportional(13.0), color);
     }
 
@@ -105,31 +107,31 @@ impl Status<'_> {
 
 fn paint_thumb(ui: &egui::Ui, rect: egui::Rect, e: &LibraryEntry, s: &Status, hovered: bool) {
     let p = ui.painter();
-    p.rect_filled(rect, 6.0, theme::BG);
+    p.rect_filled(rect, 4.0, theme::RAISED);
     match &e.thumb {
-        Some(t) => egui::Image::new(t).corner_radius(6).paint_at(ui, rect),
+        Some(t) => egui::Image::new(t).corner_radius(4).paint_at(ui, rect),
         None => {
-            p.text(rect.center(), Align2::CENTER_CENTER, icon::CUBE, FontId::proportional(rect.height() * 0.32), theme::STROKE);
+            p.text(rect.center(), Align2::CENTER_CENTER, icon::CUBE, FontId::proportional(rect.height() * 0.32), theme::FAINT);
         }
     }
     if s.online && e.thumb.is_some() {
-        p.rect_filled(rect, 6.0, Color32::from_black_alpha(if hovered { 60 } else { 100 }));
+        p.rect_filled(rect, 4.0, Color32::from_white_alpha(if hovered { 50 } else { 90 }));
     }
     if let Some(frac) = s.progress() {
-        p.rect_filled(rect, 6.0, Color32::from_black_alpha(90));
+        p.rect_filled(rect, 4.0, Color32::from_white_alpha(170));
         let track = egui::Rect::from_min_size(rect.left_bottom() + vec2(6.0, -10.0), vec2(rect.width() - 12.0, 4.0));
-        p.rect_filled(track, 2.0, Color32::from_gray(70));
+        p.rect_filled(track, 2.0, theme::STROKE);
         p.rect_filled(egui::Rect::from_min_size(track.min, vec2(track.width() * frac, 4.0)), 2.0, ONLINE);
         if rect.height() > 60.0 {
-            p.text(rect.center(), Align2::CENTER_CENTER, format!("{:.0}%", frac * 100.0), FontId::proportional(14.0), Color32::WHITE);
+            p.text(rect.center(), Align2::CENTER_CENTER, format!("{:.0}%", frac * 100.0), FontId::proportional(14.0), theme::TEXT);
         }
     } else if matches!(s.dl, Some(DownloadState::Queued)) && rect.height() > 60.0 {
-        p.text(rect.center(), Align2::CENTER_CENTER, "Queued", FontId::proportional(12.0), Color32::LIGHT_GRAY);
+        p.text(rect.center(), Align2::CENTER_CENTER, "Queued", FontId::proportional(12.0), theme::WEAK);
     }
     if s.active {
-        p.rect_stroke(rect, 6.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
+        p.rect_stroke(rect, 4.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
     } else if hovered {
-        p.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_gray(110)), StrokeKind::Inside);
+        p.rect_stroke(rect, 4.0, Stroke::new(1.0, theme::STROKE_STRONG), StrokeKind::Inside);
     }
 }
 
@@ -141,31 +143,23 @@ struct Clicks {
     want: Vec<usize>,
 }
 
-pub fn show(ui: &mut egui::Ui, library: &mut Library, place: &mut PlaceMode, cache: &mut PrototypeCache, state: &mut UiState) {
+pub fn show(
+    ui: &mut egui::Ui,
+    library: &mut Library,
+    place: &mut PlaceMode,
+    cache: &mut PrototypeCache,
+    state: &mut UiState,
+    (profiles, device_place): (&Profiles, &mut DevicePlace),
+) {
     // Panel width before anything is laid out: a row that overflows widens the
     // Ui, and sizing the grid from that would push the panel wider every frame.
     let panel_w = ui.available_width();
-    theme::panel_header(ui, "Library", |ui| {
-        let (ic, tip) = if state.list_view { (icon::SQUARES_FOUR, "Grid view") } else { (icon::LIST_BULLETS, "List view") };
-        if theme::icon_button(ui, ic, tip).clicked() {
-            state.list_view = !state.list_view;
-        }
-        if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, "Rescan the folder and refresh the online catalog (also rescans every 15 s)").clicked() {
-            library.refresh_remote();
-            library.rescan();
-        }
-        if theme::icon_button(ui, icon::FOLDER_OPEN, &format!("Dataset folder: {}\nClick to choose another", library.root)).clicked()
-            && let Some(p) = rfd::FileDialog::new().pick_folder()
-        {
-            library.set_root(p.to_string_lossy().replace('\\', "/"));
-        }
-    });
     search_box(ui, &mut library.search, "Search assets…");
     ui.add_space(2.0);
 
     let local = library.entries.iter().filter(|e| e.usd.is_some()).count();
     let online = library.entries.len() - local;
-    let labels = [format!("All {}", library.entries.len()), format!("On disk {local}"), format!("Online {online}")];
+    let labels = [format!("All {}", library.entries.len()), format!("Local {local}"), format!("Online {online}")];
     let opts = [(Filter::All, labels[0].as_str()), (Filter::Local, labels[1].as_str()), (Filter::Online, labels[2].as_str())];
     theme::segmented_fill(ui, &mut state.filter, &opts);
     library.show_remote = state.filter != Filter::Local;
@@ -199,9 +193,19 @@ pub fn show(ui: &mut egui::Ui, library: &mut Library, place: &mut PlaceMode, cac
             } else {
                 "Show only on-disk assets with moving parts (doors, lids, drawers…)"
             };
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let (ic, view_tip) = if state.list_view { (icon::SQUARES_FOUR, "Grid view") } else { (icon::LIST_BULLETS, "List view") };
+            if theme::icon_button(ui, ic, view_tip).clicked() {
+                state.list_view = !state.list_view;
+            }
+            if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, "Rescan the folder and refresh the online catalog (also rescans every 15 s)").clicked() {
+                library.refresh_remote();
+                library.rescan();
+            }
             if theme::icon_button_colored(ui, icon::DOOR_OPEN, tip, state.movable_only.then_some(ACCENT), state.movable_only).clicked() {
                 state.movable_only = !state.movable_only;
             }
+            ui.spacing_mut().item_spacing.x = 8.0;
             if !terms.is_empty()
                 && !remote_visible.is_empty()
                 && ui
@@ -227,7 +231,18 @@ pub fn show(ui: &mut egui::Ui, library: &mut Library, place: &mut PlaceMode, cac
     });
     ui.add_space(2.0);
 
+    // Positioning devices (RFID readers and tags, UWB anchors and tags, BLE)
+    // aren't USD assets: they come from the device profiles and are placed by
+    // the positioning system. Listed here so a search finds them too.
+    let devices = matching_devices(profiles, &terms);
+    if !devices.is_empty() {
+        device_section(ui, &devices, place, device_place);
+    }
+
     if visible.is_empty() {
+        if !devices.is_empty() {
+            return;
+        }
         if library.entries.is_empty() {
             theme::empty_state(ui, icon::FOLDER_OPEN, "No assets yet", "Choose your SimReady dataset folder, or wait for the online catalog to load.");
             ui.vertical_centered(|ui| {
@@ -311,7 +326,7 @@ fn entry(
     let name_color = if s.online { ONLINE } else { theme::TEXT };
     if list {
         if hovered || s.active {
-            ui.painter().rect_filled(rect, 6.0, if s.active { theme::RAISED } else { theme::HOVER.gamma_multiply(0.6) });
+            ui.painter().rect_filled(rect, 4.0, if s.active { theme::ACCENT_SOFT } else { theme::RAISED });
         }
         let thumb = egui::Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(ROW_H - 8.0, ROW_H - 8.0));
         paint_thumb(ui, thumb, e, &s, false);
@@ -336,7 +351,7 @@ fn entry(
                 (icon::PLUS, "Place")
             };
             let pill = egui::Rect::from_center_size(thumb.center_bottom() + vec2(0.0, -16.0), vec2(72.0, 22.0));
-            ui.painter().rect_filled(pill, 11.0, Color32::from_rgba_unmultiplied(14, 16, 20, 230));
+            ui.painter().rect_filled(pill, 11.0, theme::INK);
             ui.painter().text(pill.center(), Align2::CENTER_CENTER, theme::label(glyph, text), FontId::proportional(12.0), Color32::WHITE);
         }
         let name = elided(ui, &e.name, rect.width() - 2.0, 2, 11.5, name_color);
@@ -406,4 +421,55 @@ fn entry(
             ui.close();
         }
     });
+}
+
+/// Words a device of this kind is found by, besides its name, vendor and id.
+fn kind_words(k: DeviceKind) -> &'static str {
+    match k {
+        DeviceKind::UwbAnchor => "uwb anchor anchors archor positioning rtls",
+        DeviceKind::UwbTag => "uwb tag tags badge positioning rtls",
+        DeviceKind::BleNode => "ble bluetooth beacon gateway anchor locator positioning rtls",
+        DeviceKind::BleTag => "ble bluetooth tag tags beacon positioning rtls",
+        DeviceKind::RfidReader => "rfid uhf reader readers antenna portal positioning rtls",
+        DeviceKind::RfidTag => "rfid uhf tag tags label inlay epc positioning rtls",
+        DeviceKind::WifiAp => "wifi wi-fi access point ap router ftm rtt positioning rtls",
+        DeviceKind::WifiClient => "wifi wi-fi client phone handheld tablet positioning rtls",
+    }
+}
+
+/// Device profiles matching every search term. Nothing when the search is empty.
+fn matching_devices<'a>(profiles: &'a Profiles, terms: &[String]) -> Vec<&'a Profile> {
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    profiles
+        .0
+        .iter()
+        .filter(|p| {
+            let hay = format!("{} {} {} {} {}", p.name, p.vendor, p.id, p.kind.label(), kind_words(p.kind)).to_lowercase();
+            terms.iter().all(|t| hay.contains(t.as_str()))
+        })
+        .collect()
+}
+
+/// "Positioning devices" list: click one, then click in the scene to place it.
+fn device_section(ui: &mut egui::Ui, devices: &[&Profile], place: &mut PlaceMode, device_place: &mut DevicePlace) {
+    ui.label(RichText::new(format!("Positioning devices · {}", devices.len())).small().strong().color(theme::WEAK));
+    egui::ScrollArea::vertical().id_salt("library_devices").max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let w = ui.available_width();
+        for p in devices {
+            let active = device_place.profile.as_deref() == Some(p.id.as_str());
+            let c = p.kind.color().to_srgba();
+            let dot = theme::ink(Color32::from_rgb((c.red * 255.0) as u8, (c.green * 255.0) as u8, (c.blue * 255.0) as u8));
+            let resp = theme::color_row(ui, w, dot, &format!("{}  ·  {}", p.name, p.kind.label()), active)
+                .on_hover_text(format!("{} · {}\nClick, then click in the scene to place it (Shift keeps placing, Esc stops)", p.vendor, p.kind.label()));
+            if resp.clicked() {
+                device_place.profile = if active { None } else { Some(p.id.clone()) };
+                device_place.waypoints_for = None;
+                place.asset = None;
+            }
+        }
+    });
+    ui.separator();
 }

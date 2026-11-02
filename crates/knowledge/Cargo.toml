@@ -1,0 +1,8 @@
+[package]
+name = "knowledge"
+version = "0.1.0"
+edition = "2024"
+description = "Offline engineering knowledge base for the Sense Sim assistant: a sourced Markdown corpus embedded at build time, section chunking and BM25 retrieval. No UI and no game-engine dependency, so its tests build in seconds."
+
+[dependencies]
+serde_json = "1"

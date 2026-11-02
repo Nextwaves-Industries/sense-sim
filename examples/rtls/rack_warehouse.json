@@ -2,6 +2,10 @@
   "format": "sense_sim_layout",
   "version": 3,
   "objects": [
+    { "name": "floor", "asset": "C:/Users/DeanOS/AppData/Local/SenseSim/structures/floor/13.00x0.02x10.00/floor.usda", "translation": [6.5, -0.02, 5.0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
+    { "name": "wall_back", "asset": "C:/Users/DeanOS/AppData/Local/SenseSim/structures/wall/13.00x4.00x0.20/wall.usda", "translation": [6.5, 0.0, -0.1], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
+    { "name": "wall_left", "asset": "C:/Users/DeanOS/AppData/Local/SenseSim/structures/wall/10.20x4.00x0.20/wall.usda", "translation": [-0.1, 0.0, 5.0], "rotation": [0, 0.70710677, 0, 0.70710677], "scale": [1, 1, 1], "joints": [] },
+    { "name": "ceiling", "asset": "C:/Users/DeanOS/AppData/Local/SenseSim/structures/ceiling/13.00x0.01x10.00/ceiling.usda", "translation": [6.5, 4.0, 5.0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
     { "name": "rack_A1", "asset": "D:/simready-assets/rack_composition_a04/simready_usd/sm_rack_composition_a04_01.usd", "translation": [2.0, 0.0, 2.0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
     { "name": "rack_A2", "asset": "D:/simready-assets/rack_composition_a05/simready_usd/sm_rack_composition_a05_01.usd", "translation": [6.0, 0.0, 2.0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },
     { "name": "rack_B1", "asset": "D:/simready-assets/rack_composition_a04/simready_usd/sm_rack_composition_a04_01.usd", "translation": [2.0, 0.0, 6.0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "joints": [] },

@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
-use egui::{Color32, vec2};
+use egui::vec2;
 
 use crate::agent::catalog::Catalog;
 use crate::library::{DownloadState, Library};
@@ -16,6 +16,8 @@ use crate::theme;
 /// A placeholder box; the key identifies the object it stands for.
 #[derive(Component)]
 pub struct LoadingBox(String);
+
+const MAX_LABELS: usize = 40;
 
 /// Size when nothing is known about the asset yet.
 const UNKNOWN_SIZE: Vec3 = Vec3::new(0.8, 1.0, 0.8);
@@ -45,7 +47,7 @@ pub fn loading_placeholders(
     let mut failed = Vec::new();
     downloads.0.retain_mut(|d| {
         if let Some(usd) = library.entries.iter().find(|e| e.folder == d.folder).and_then(|e| e.usd.clone()) {
-            pending.0.push(PendingSpawn { asset: usd, transform: d.transform, name: d.name.take(), joints: None, select: false });
+            pending.0.push(PendingSpawn { asset: usd, transform: d.transform, name: d.name.take(), joints: None, select: false, locked: false });
             return false;
         }
         if !d.requested {
@@ -88,8 +90,12 @@ pub fn loading_placeholders(
     }
 
     // Sync the box entities.
+    let wanted_keys: std::collections::HashSet<&str> = wanted.iter().map(|w| w.key.as_str()).collect();
+    let mut have: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (e, b) in &boxes {
-        if !wanted.iter().any(|w| w.key == b.0) {
+        if wanted_keys.contains(b.0.as_str()) {
+            have.insert(b.0.as_str());
+        } else {
             commands.entity(e).despawn();
         }
     }
@@ -99,7 +105,7 @@ pub fn loading_placeholders(
     let (mesh, mat) = look
         .get_or_insert_with(|| {
             let mat = StandardMaterial {
-                base_color: Color::srgba(0.62, 0.64, 0.67, 0.4),
+                base_color: Color::srgba(0.45, 0.48, 0.53, 0.4),
                 alpha_mode: AlphaMode::Blend,
                 perceptual_roughness: 0.9,
                 ..default()
@@ -121,7 +127,7 @@ pub fn loading_placeholders(
         }
     };
     for w in &wanted {
-        if !boxes.iter().any(|(_, b)| b.0 == w.key) {
+        if !have.contains(w.key.as_str()) {
             commands.spawn((
                 LoadingBox(w.key.clone()),
                 Mesh3d(mesh.clone()),
@@ -137,12 +143,13 @@ pub fn loading_placeholders(
     let ctx = contexts.ctx_mut()?;
     let (cam, cam_gt) = *camera;
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("loading_labels")));
-    for w in &wanted {
+    // A label per box stops being readable, or cheap, long before a big scene ends.
+    for w in wanted.iter().take(MAX_LABELS) {
         let top = w.transform.transform_point(Vec3::Y * w.size.y.max(0.05));
         let Ok(s) = cam.world_to_viewport(cam_gt, top) else { continue };
-        let galley = painter.layout_no_wrap(w.label.clone(), egui::FontId::proportional(11.0), Color32::from_gray(235));
+        let galley = painter.layout_no_wrap(w.label.clone(), egui::FontId::proportional(11.5), theme::TEXT);
         let r = egui::Rect::from_center_size(egui::pos2(s.x, s.y - 12.0), galley.size() + vec2(10.0, 4.0));
-        painter.rect_filled(r, 4.0, Color32::from_black_alpha(170));
+        theme::viewport_chip(&painter, r);
         painter.galley(r.min + vec2(5.0, 2.0), galley, theme::TEXT);
     }
     Ok(())

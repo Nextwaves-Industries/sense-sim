@@ -76,16 +76,19 @@ impl Div for C {
 pub fn read_probe(path: &Path) -> Result<(Vec<f64>, Vec<f64>)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (mut t, mut v) = (Vec::new(), Vec::new());
-    for line in text.lines() {
+    for (n, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('%') {
             continue;
         }
-        let mut it = line.split_whitespace().map(|x| x.parse::<f64>());
-        if let (Some(Ok(a)), Some(Ok(b))) = (it.next(), it.next()) {
-            t.push(a);
-            v.push(b);
-        }
+        // A line that isn't two finite numbers means the run diverged. MSVC writes NaN as
+        // -nan(ind): skipping those lines would leave a clean-looking series.
+        let mut it = line.split_whitespace().map(|x| x.parse::<f64>().ok().filter(|v| v.is_finite()));
+        let (Some(Some(a)), Some(Some(b))) = (it.next(), it.next()) else {
+            bail!("{} line {}: \"{line}\" is not a finite sample, so the solver diverged", path.display(), n + 1);
+        };
+        t.push(a);
+        v.push(b);
     }
     if t.len() < 4 {
         bail!("{} has no samples", path.display());
@@ -125,10 +128,21 @@ pub fn port_fd(dir: &Path, nr: u32, z0: f64, freqs: &[f64]) -> Result<PortFd> {
 }
 
 /// Power the port delivered into the structure at each frequency, ½·Re(U·I*),
-/// in the same spectral units as the frequency-domain field dumps.
+/// in the same spectral units as the frequency-domain field dumps. Negative means the port
+/// took power back, a bad run: the sign stays, so callers can refuse it.
 pub fn port_accepted_power(dir: &Path, nr: u32, z0: f64, freqs: &[f64]) -> Result<Vec<f64>> {
     let p = port_fd(dir, nr, z0, freqs)?;
-    Ok(p.u.iter().zip(&p.i).map(|(u, i)| (0.5 * (u.re * i.re + u.im * i.im)).abs()).collect())
+    Ok(p.u.iter().zip(&p.i).map(|(u, i)| 0.5 * (u.re * i.re + u.im * i.im)).collect())
+}
+
+/// Refuses a port with no incident wave at some frequency: every ratio to it is noise,
+/// and a dead port would otherwise read as a perfect match.
+fn check_incident(inc: &[C]) -> Result<()> {
+    let peak = inc.iter().map(|a| a.abs()).fold(0.0, f64::max);
+    if !(peak > 1e-30) || inc.iter().any(|a| !(a.abs() > 1e-4 * peak)) {
+        bail!("the port has no incident wave across the sweep (peak {peak:e}): it is shorted out, off the mesh or the run failed");
+    }
+    Ok(())
 }
 
 /// S-parameters and input impedance over a frequency sweep.
@@ -144,6 +158,7 @@ pub struct Sweep {
 impl Sweep {
     pub fn read(dir: &Path, z0: [f64; 2], two_port: bool, freqs: Vec<f64>) -> Result<Self> {
         let p1 = port_fd(dir, 1, z0[0], &freqs)?;
+        check_incident(&p1.inc)?;
         let s11 = p1.refl.iter().zip(&p1.inc).map(|(r, a)| *r / *a).collect();
         let zin = p1.u.iter().zip(&p1.i).map(|(u, i)| *u / *i).collect();
         let s21 = if two_port {
@@ -157,7 +172,8 @@ impl Sweep {
     }
 
     pub fn db(v: C) -> f64 {
-        20.0 * v.abs().max(1e-12).log10()
+        // `max` would turn a NaN into the deepest match on the plot.
+        if v.abs().is_nan() { f64::NAN } else { 20.0 * v.abs().max(1e-12).log10() }
     }
 
     /// Frequency of the deepest S11 and its value (dB).
@@ -345,6 +361,9 @@ pub fn read_fd_field(dir: &Path, name: &str, f: f64) -> Result<(Grid, Vec<[C; 3]
     if abs.ncomp != 3 || arg.data.len() != abs.data.len() {
         bail!("{name}: unexpected dump layout");
     }
+    if abs.data.iter().chain(&arg.data).any(|v| !v.is_finite()) {
+        bail!("{name}: the field has values that aren't finite, so the solver diverged");
+    }
     let v = (0..abs.len())
         .map(|p| {
             let (a, g) = (abs.at(p), arg.at(p));
@@ -428,6 +447,8 @@ pub struct Pattern {
     pub d: Vec<Vec<f64>>,
     pub max_dbi: f64,
     pub max_dir: (f64, f64),
+    /// Radiated power, in the spectral units of `port_accepted_power`.
+    pub p_rad: f64,
 }
 
 /// Far field from E/H frequency dumps named `<name>_E_<face>` / `<name>_H_<face>`.
@@ -482,6 +503,8 @@ pub fn nf2ff(dir: &Path, name: &str, f: f64, step_deg: f64, center: [f64; 3]) ->
         }
     }
     let prad = prad.max(1e-300);
+    // U = k² / (32π²η) · (|Lφ + ηNθ|² + |Lθ − ηNφ|²), over all directions.
+    let p_rad = prad * k * k / (32.0 * PI * PI * ETA0);
     let mut d = vec![vec![0.0; phi.len()]; theta.len()];
     let (mut best, mut at) = (f64::MIN, (0.0, 0.0));
     for ti in 0..theta.len() {
@@ -494,7 +517,7 @@ pub fn nf2ff(dir: &Path, name: &str, f: f64, step_deg: f64, center: [f64; 3]) ->
             }
         }
     }
-    Ok(Pattern { f, theta, phi, d, max_dbi: best, max_dir: at })
+    Ok(Pattern { f, theta, phi, d, max_dbi: best, max_dir: at, p_rad })
 }
 
 #[cfg(test)]
@@ -508,6 +531,51 @@ mod tests {
         let q = a / a;
         assert!((q.re - 1.0).abs() < 1e-12 && q.im.abs() < 1e-12);
         assert!((Sweep::vswr(C::new(0.0, 0.0)) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_probe_that_diverged_is_refused() {
+        // MSVC writes NaN as -nan(ind): dropping those lines would leave a clean-looking series.
+        let d = std::env::temp_dir().join(format!("sensesim_probe_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let good: String = (0..8).map(|i| format!("{}\t{}\n", i as f64 * 1e-12, i as f64 * 0.1)).collect();
+        for (name, bad) in [("nan", "8e-12\t-nan(ind)\n"), ("rust_nan", "8e-12\tNaN\n"), ("inf", "8e-12\tinf\n"), ("msvc_inf", "8e-12\t1.#INF\n")] {
+            let p = d.join(name);
+            std::fs::write(&p, format!("% time value\n{good}{bad}")).unwrap();
+            assert!(read_probe(&p).is_err(), "{name}");
+        }
+        let p = d.join("fine");
+        std::fs::write(&p, format!("% time value\n{good}")).unwrap();
+        assert_eq!(read_probe(&p).unwrap().0.len(), 8);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_port_that_gives_power_back_keeps_the_sign() {
+        let d = std::env::temp_dir().join(format!("sensesim_negative_power_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let file = |k: f64| -> String {
+            (0..400).map(|i| { let t = i as f64 * 1e-11; format!("{t:e}\t{:e}\n", k * (-((t - 1e-9) / 0.2e-9).powi(2)).exp()) }).collect()
+        };
+        std::fs::write(d.join("port_ut1"), file(1.0)).unwrap();
+        std::fs::write(d.join("port_it1"), file(-0.01)).unwrap();
+        let p = port_accepted_power(&d, 1, 50.0, &[1e9]);
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(p.unwrap()[0] < 0.0, "a bad run must not read as accepted power");
+    }
+
+    #[test]
+    fn a_dead_port_is_refused() {
+        // All zeros: every ratio would be 0/0, which `Div` turns into a perfect match.
+        let d = std::env::temp_dir().join(format!("sensesim_dead_port_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let zero: String = (0..16).map(|i| format!("{}\t0\n", i as f64 * 1e-12)).collect();
+        std::fs::write(d.join("port_ut1"), &zero).unwrap();
+        std::fs::write(d.join("port_it1"), &zero).unwrap();
+        let r = Sweep::read(&d, [50.0, 50.0], false, vec![1e9, 2e9]);
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(r.unwrap_err().to_string().contains("no incident wave"));
+        assert!(Sweep::db(C::new(f64::NAN, 0.0)).is_nan());
     }
 
     #[test]

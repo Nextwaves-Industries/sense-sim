@@ -98,6 +98,16 @@ impl Antennas<'_> {
         }
     }
 
+    /// Range shift (m) this device's antenna puts on a UWB link towards `dir`. Only
+    /// patterns that were analysed for it have one (`recipes::uwb_bias`).
+    pub fn bias_m(&self, choice: Option<&AntennaChoice>, tech: Tech, infra: bool, fwd: Vec3, dir: Vec3) -> f32 {
+        match choice {
+            Some(AntennaChoice::Library { name }) => self.library.get(name).map_or(0.0, |a| a.bias_m(fwd, dir)),
+            Some(_) => 0.0,
+            None => self.applied.0.as_ref().filter(|a| infra && a.tech == tech).map_or(0.0, |a| a.bias_m(fwd, dir)),
+        }
+    }
+
     /// Gain of a tag whose orientation the floor map doesn't know: an omni
     /// tag's gain, otherwise isotropic (0 dBi).
     pub fn tag_gain_unaimed(&self, choice: Option<&AntennaChoice>, prof: &Profile) -> f32 {

@@ -204,6 +204,19 @@ fn model(kind: DeviceKind, variant: Variant, meshes: &mut Assets<Mesh>) -> Vec<(
             add(Torus::new(0.0395, 0.0425).into(), Mat::Accent, at(0.0, 0.0, 0.046).with_rotation(along_z));
             add(ball(0.003), Mat::Led, at(0.0, 0.0, 0.032));
         }
+        // Ceiling access point: flat rounded square with a status ring.
+        DeviceKind::WifiAp => {
+            add(disc(0.04, 0.004), Mat::Dark, at(0.0, 0.0, 0.0555).with_rotation(along_z));
+            add(rbox(0.18, 0.18, 0.032, 0.03, 0.008), Mat::Body, at(0.0, 0.0, 0.037));
+            add(Torus::new(0.022, 0.026).into(), Mat::Accent, at(0.0, 0.0, 0.0205).with_rotation(along_z));
+            add(ball(0.0035), Mat::Led, at(0.0, 0.0, 0.021));
+        }
+        // Handheld: a phone-sized slab with a dark screen.
+        DeviceKind::WifiClient => {
+            add(rbox(0.072, 0.148, 0.009, 0.009, 0.0025), Mat::Body, Transform::IDENTITY);
+            add(rbox(0.064, 0.134, 0.001, 0.006, 0.0003), Mat::Dark, at(0.0, 0.0, -0.0048));
+            add(ball(0.002), Mat::Led, at(0.0, 0.07, -0.0048));
+        }
         // Key fob: rounded case, coloured face, button, eyelet and key ring.
         DeviceKind::BleTag => {
             add(rbox(0.036, 0.05, 0.011, 0.013, 0.0035), Mat::Body, Transform::IDENTITY);
@@ -462,6 +475,150 @@ pub struct PointerDrag {
     moved: bool,
 }
 
+/// The handles drawn on the selected device. Rotation is in 3D because a
+/// reader or antenna aims where it faces, down and sideways included.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceHandle {
+    /// Around world up.
+    Yaw,
+    /// Around the device's right: aims it up or down.
+    Tilt,
+    /// Around the device's facing direction.
+    Roll,
+    Lift,
+}
+
+const ROTATE_HANDLES: [DeviceHandle; 3] = [DeviceHandle::Yaw, DeviceHandle::Tilt, DeviceHandle::Roll];
+const ALL_HANDLES: [DeviceHandle; 4] = [DeviceHandle::Yaw, DeviceHandle::Tilt, DeviceHandle::Roll, DeviceHandle::Lift];
+
+impl DeviceHandle {
+    fn axis(self, t: &Transform) -> Vec3 {
+        match self {
+            DeviceHandle::Yaw | DeviceHandle::Lift => Vec3::Y,
+            DeviceHandle::Tilt => *t.right(),
+            DeviceHandle::Roll => *t.forward(),
+        }
+    }
+
+    /// The handles that would stick: a followed tag takes its rotation from
+    /// the object it rides, and a moving one its height from its path.
+    fn available(d: &Device) -> &'static [DeviceHandle] {
+        match d.motion {
+            Motion::Follow { .. } => &[],
+            Motion::Static => &ALL_HANDLES,
+            _ => &ROTATE_HANDLES,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct DeviceHandles {
+    hovered: Option<DeviceHandle>,
+    active: Option<DeviceHandle>,
+}
+
+/// World radius of the rings: a constant size on screen, and clear of the
+/// selection sphere (and most of the model) up close.
+fn ring_radius(cam: Vec3, p: Vec3) -> f32 {
+    (cam.distance(p) * 0.09).max(0.2)
+}
+
+fn lift_segment(p: Vec3, r: f32) -> (Vec3, Vec3) {
+    (p + Vec3::Y * r * 1.1, p + Vec3::Y * r * 1.6)
+}
+
+/// The handle under the cursor, with the point grabbed on it.
+fn pick_handle(d: &Device, t: &Transform, cam: Vec3, cursor: Vec2, to_screen: &impl Fn(Vec3) -> Option<Vec2>) -> Option<(DeviceHandle, Vec3)> {
+    let (c, r) = (t.translation, ring_radius(cam, t.translation));
+    let mut best: Option<(f32, DeviceHandle, Vec3)> = None;
+    for &h in DeviceHandle::available(d) {
+        if h == DeviceHandle::Lift {
+            let (a, b) = lift_segment(c, r);
+            if let (Some(sa), Some(sb)) = (to_screen(a), to_screen(b)) {
+                let dist = crate::scene::dist_to_segment(cursor, sa, sb);
+                if dist < 9.0 && best.is_none_or(|(bd, ..)| dist < bd) {
+                    best = Some((dist, h, a));
+                }
+            }
+            continue;
+        }
+        let (u, v) = h.axis(t).any_orthonormal_pair();
+        let pts: Vec<Vec3> = (0..=64)
+            .map(|k| {
+                let a = k as f32 / 64.0 * TAU;
+                c + (u * a.cos() + v * a.sin()) * r
+            })
+            .collect();
+        for w in pts.windows(2) {
+            if let (Some(sa), Some(sb)) = (to_screen(w[0]), to_screen(w[1])) {
+                let dist = crate::scene::dist_to_segment(cursor, sa, sb);
+                if dist < 8.0 && best.is_none_or(|(bd, ..)| dist < bd) {
+                    best = Some((dist, h, w[0]));
+                }
+            }
+        }
+    }
+    best.map(|(_, h, grab)| (h, grab))
+}
+
+/// A handle being dragged. Everything is measured from the press, so the
+/// device can't drift or jump as it turns.
+pub struct HandleDrag {
+    entity: Entity,
+    handle: DeviceHandle,
+    start: Transform,
+    axis: Vec3,
+    press: Vec2,
+    /// From the pivot to where the press met the ring's plane. `None` when the
+    /// ring is nearly edge-on, where that plane can't be aimed at.
+    from: Option<Vec3>,
+    /// The fallback then: screen direction the grabbed point moves in as the
+    /// angle grows, and radians per pixel along it.
+    slide: Vec2,
+    rad_per_px: f32,
+    /// Where the press was along the vertical line, for lifting.
+    lift_param: f32,
+}
+
+fn begin_handle(entity: Entity, handle: DeviceHandle, t: &Transform, grab: Vec3, ray: Ray3d, press: Vec2, to_screen: &impl Fn(Vec3) -> Option<Vec2>) -> HandleDrag {
+    let c = t.translation;
+    let axis = handle.axis(t);
+    let from = if ray.direction.dot(axis).abs() > 0.3 { crate::scene::ray_plane(ray, c, axis).map(|p| p - c) } else { None };
+    const STEP: f32 = 0.05;
+    let moved = match (to_screen(grab), to_screen(c + Quat::from_axis_angle(axis, STEP) * (grab - c))) {
+        (Some(a), Some(b)) => b - a,
+        _ => Vec2::ZERO,
+    };
+    let (slide, rad_per_px) = if moved.length() > 1.0 { (moved.normalize(), STEP / moved.length()) } else { (Vec2::X, 0.01) };
+    let lift_param = crate::scene::closest_param_on_line(ray, c.with_y(0.0), Vec3::Y).unwrap_or(0.0);
+    HandleDrag { entity, handle, start: *t, axis, press, from, slide, rad_per_px, lift_param }
+}
+
+/// Signed angle around `axis` from `from` to `to`.
+fn angle_around(axis: Vec3, from: Vec3, to: Vec3) -> f32 {
+    axis.dot(from.cross(to)).atan2(from.dot(to))
+}
+
+fn apply_handle(h: &HandleDrag, ray: Ray3d, cursor: Vec2, snap: bool, t: &mut Transform) {
+    let c = h.start.translation;
+    if h.handle == DeviceHandle::Lift {
+        if let Some(s) = crate::scene::closest_param_on_line(ray, c.with_y(0.0), Vec3::Y) {
+            let y = c.y + s - h.lift_param;
+            t.translation.y = if snap { crate::scene::snap(y, 0.05) } else { y }.clamp(0.0, 50.0);
+        }
+        return;
+    }
+    let angle = match h.from {
+        Some(from) => {
+            let Some(p) = crate::scene::ray_plane(ray, c, h.axis) else { return };
+            angle_around(h.axis, from, p - c)
+        }
+        None => (cursor - h.press).dot(h.slide) * h.rad_per_px,
+    };
+    let angle = if snap { crate::scene::snap(angle, std::f32::consts::PI / 12.0) } else { angle };
+    t.rotation = (Quat::from_axis_angle(h.axis, angle) * h.start.rotation).normalize();
+}
+
 /// Runs before the scene's `interact`: places, picks and drags devices and
 /// consumes the click so the scene does not also act on it.
 #[allow(clippy::too_many_arguments)]
@@ -480,11 +637,16 @@ pub fn device_pointer(
     mut rsel: ResMut<RtlsSelection>,
     mut selection: ResMut<Selection>,
     profiles: Res<Profiles>,
-    mut drag: Local<PointerDrag>,
+    (mut drag, mut handles, mut handle_drag): (Local<PointerDrag>, ResMut<DeviceHandles>, Local<Option<HandleDrag>>),
 ) {
     let (cam, cam_gt, mut orbit) = camera.into_inner();
     let cursor = window.cursor_position();
     let ray = cursor.and_then(|c| cam.viewport_to_world(cam_gt, c).ok());
+    handles.hovered = None;
+    if !mouse.pressed(MouseButton::Left) {
+        *handle_drag = None;
+        handles.active = None;
+    }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
@@ -572,6 +734,14 @@ pub fn device_pointer(
         return;
     }
 
+    // ---- Dragging a rotate ring or the lift arrow
+    if let Some(h) = handle_drag.as_ref() {
+        if let (Some(ray), Some(c), Ok((_, _, mut t))) = (ray, cursor, devices.get_mut(h.entity)) {
+            apply_handle(h, ray, c, ctrl, &mut t);
+        }
+        return;
+    }
+
     // ---- Dragging
     if let Some(e) = drag.entity {
         if !mouse.pressed(MouseButton::Left) {
@@ -597,7 +767,7 @@ pub fn device_pointer(
         let carry = devices
             .get(e)
             .ok()
-            .filter(|(_, d, _)| matches!(d.kind, DeviceKind::UwbTag | DeviceKind::BleTag))
+            .filter(|(_, d, _)| matches!(d.kind, DeviceKind::UwbTag | DeviceKind::BleTag | DeviceKind::WifiClient))
             .map(|(_, d, _)| profiles.resolve(&d.profile, d.kind).mount_height_m);
         // Snap onto whatever is under the cursor (rack tops, shelf faces,
         // walls, ceilings); Shift drags on a plane at the current height.
@@ -651,7 +821,24 @@ pub fn device_pointer(
     if block.pointer {
         return;
     }
-    if let Some(c) = cursor {
+    // The selected device's handles come first: they are thin, and a device
+    // or object behind one must not take the click.
+    let to_screen = |p: Vec3| cam.world_to_viewport(cam_gt, p).ok();
+    let on_handle = rsel.device.zip(cursor).and_then(|(sel, c)| {
+        let (_, d, t) = devices.get(sel).ok()?;
+        pick_handle(d, t, cam_gt.translation(), c, &to_screen).map(|(h, grab)| (sel, h, grab))
+    });
+    if let Some((sel, h, grab)) = on_handle {
+        handles.hovered = Some(h);
+        if mouse.just_pressed(MouseButton::Left)
+            && let (Some(ray), Some(c), Ok((_, _, t))) = (ray, cursor, devices.get(sel))
+        {
+            mouse.clear_just_pressed(MouseButton::Left);
+            *handle_drag = Some(begin_handle(sel, h, t, grab, ray, c, &to_screen));
+            handles.active = Some(h);
+            return;
+        }
+    } else if let Some(c) = cursor {
         let mut best: Option<(f32, Entity)> = None;
         for (e, _, t) in devices.iter() {
             if let Ok(s) = cam.world_to_viewport(cam_gt, t.translation) {
@@ -663,7 +850,7 @@ pub fn device_pointer(
         }
         rsel.hovered = best.map(|(_, e)| e);
     }
-    if mouse.just_pressed(MouseButton::Left) {
+    if on_handle.is_none() && mouse.just_pressed(MouseButton::Left) {
         if let (Some(e), Some(ray)) = (rsel.hovered, ray) {
             mouse.clear_just_pressed(MouseButton::Left);
             rsel.device = Some(e);
@@ -749,6 +936,8 @@ pub fn draw(
     devices: Query<(Entity, &Device, &Transform)>,
     zones: Query<(Entity, &Zone)>,
     hide: Res<crate::ui::HideOverlays>,
+    handles: Res<DeviceHandles>,
+    camera: Single<&GlobalTransform, With<OrbitCamera>>,
 ) {
     if hide.0 > 0 {
         return;
@@ -788,6 +977,29 @@ pub fn draw(
         if rsel.device == Some(e) || rsel.hovered == Some(e) {
             let c = if rsel.device == Some(e) { Color::srgb(1.0, 0.69, 0.13) } else { Color::WHITE };
             hg.sphere(Isometry3d::from_translation(p), 0.16, c);
+        }
+        if rsel.device == Some(e) {
+            let r = ring_radius(camera.translation(), p);
+            let hot = Color::srgb(0.12, 0.42, 0.94);
+            let shade = |h: DeviceHandle, base: Color| if handles.active == Some(h) || (handles.active.is_none() && handles.hovered == Some(h)) { hot } else { base };
+            for &h in DeviceHandle::available(d) {
+                match h {
+                    DeviceHandle::Lift => {
+                        let (a, b) = lift_segment(p, r);
+                        hg.arrow(a, b, shade(h, Color::srgb(0.14, 0.66, 0.3)));
+                    }
+                    _ => {
+                        let base = match h {
+                            DeviceHandle::Yaw => Color::srgb(0.96, 0.52, 0.04),
+                            DeviceHandle::Tilt => Color::srgb(0.72, 0.25, 0.85),
+                            _ => Color::srgb(0.1, 0.65, 0.7),
+                        };
+                        hg.circle(Isometry3d::new(p, Quat::from_rotation_arc(Vec3::Z, h.axis(t))), r, shade(h, base)).resolution(64);
+                    }
+                }
+            }
+            // Where it is aimed, along the roll axis.
+            hg.arrow(p, p + *t.forward() * r * 1.35, Color::srgb(0.1, 0.65, 0.7));
         }
     }
 
@@ -878,5 +1090,72 @@ pub fn draw(
         let c = Color::srgb(1.0, 0.69, 0.13);
         hg.sphere(Isometry3d::from_translation(p), 0.1, c);
         hg.line(p, Vec3::new(p.x, 0.0, p.z), c.with_alpha(0.5));
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+
+    fn drag(handle: DeviceHandle, t: &Transform, from: Vec3) -> HandleDrag {
+        HandleDrag { entity: Entity::PLACEHOLDER, handle, start: *t, axis: handle.axis(t), press: Vec2::ZERO, from: Some(from), slide: Vec2::X, rad_per_px: 0.01, lift_param: 0.0 }
+    }
+
+    /// A ray straight at `target` along `-axis`, as if looking down the ring.
+    fn ray_at(target: Vec3, axis: Vec3) -> Ray3d {
+        Ray3d::new(target + axis * 5.0, Dir3::new(-axis).unwrap())
+    }
+
+    #[test]
+    fn tilt_ring_aims_a_reader_down() {
+        let mut t = Transform::from_xyz(1.0, 3.0, 2.0);
+        let right = *t.right();
+        let (up, fwd) = (*t.up(), *t.forward());
+        // A quarter turn around right, from the facing direction to down.
+        let h = drag(DeviceHandle::Tilt, &t, fwd);
+        apply_handle(&h, ray_at(t.translation - up, right), Vec2::ZERO, false, &mut t);
+        assert!(t.forward().dot(Vec3::NEG_Y) > 0.999, "{:?}", t.forward());
+        assert_eq!(t.translation, Vec3::new(1.0, 3.0, 2.0));
+    }
+
+    #[test]
+    fn yaw_ring_keeps_the_tilt() {
+        let mut t = Transform::default();
+        t.rotate_local_x(-0.5);
+        let h = drag(DeviceHandle::Yaw, &t, Vec3::Z);
+        apply_handle(&h, ray_at(Vec3::X, Vec3::Y), Vec2::ZERO, false, &mut t);
+        let (yaw, tilt, _) = t.rotation.to_euler(EulerRot::YXZ);
+        assert!((tilt + 0.5).abs() < 1e-4, "tilt {tilt}");
+        assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "yaw {yaw}");
+    }
+
+    #[test]
+    fn edge_on_ring_turns_with_the_cursor_and_snaps() {
+        let mut t = Transform::default();
+        let mut h = drag(DeviceHandle::Roll, &t, Vec3::X);
+        h.from = None;
+        let ray = ray_at(Vec3::ZERO, Vec3::X);
+        apply_handle(&h, ray, Vec2::new(10.0, 0.0), false, &mut t);
+        assert!((t.rotation.angle_between(Quat::IDENTITY) - 0.1).abs() < 1e-4);
+        apply_handle(&h, ray, Vec2::new(30.0, 0.0), true, &mut t);
+        assert!((t.rotation.angle_between(Quat::IDENTITY) - std::f32::consts::PI / 12.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn ceiling_mount_keeps_facing_down_when_yawed() {
+        let mut t = Transform::default().looking_to(Vec3::NEG_Y, Vec3::Z);
+        let h = drag(DeviceHandle::Yaw, &t, Vec3::Z);
+        apply_handle(&h, ray_at(Vec3::X, Vec3::Y), Vec2::ZERO, false, &mut t);
+        assert!(t.forward().dot(Vec3::NEG_Y) > 0.999);
+    }
+
+    #[test]
+    fn followed_tags_have_no_handles_and_walking_ones_no_lift() {
+        let mut d = Device { id: "T".into(), kind: DeviceKind::UwbTag, profile: String::new(), enabled: true, motion: Motion::Static, address: String::new(), auto: false, radio: Default::default() };
+        assert!(DeviceHandle::available(&d).contains(&DeviceHandle::Lift));
+        d.motion = Motion::Wander { center: [0.0; 3], radius: 1.0, speed: 1.0 };
+        assert_eq!(DeviceHandle::available(&d), &ROTATE_HANDLES);
+        d.motion = Motion::Follow { object: String::new(), offset: [0.0; 3] };
+        assert!(DeviceHandle::available(&d).is_empty());
     }
 }

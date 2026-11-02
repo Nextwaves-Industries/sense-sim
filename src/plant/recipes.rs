@@ -86,7 +86,7 @@ pub fn world_box(t: &Transform, (a, b): (Vec3, Vec3)) -> (Vec3, Vec3) {
 }
 
 impl Assembly {
-    fn add(&mut self, name: String, spec: Spec, t: Transform) -> Result<String> {
+    pub(crate) fn add(&mut self, name: String, spec: Spec, t: Transform) -> Result<String> {
         let spec = spec.normalized();
         self.items.push(Item { name: name.clone(), usd: spec.usd()?, transform: t, spec: Some(spec) });
         Ok(name)
@@ -104,7 +104,7 @@ impl Assembly {
         Ok((w, d, p.size))
     }
     /// Places `spec` so its port `mine` mates with `target`, and links them.
-    fn attach(&mut self, name: String, spec: Spec, mine: &str, target: &PortRef, aim: Option<Vec3>) -> Result<String> {
+    pub(crate) fn attach(&mut self, name: String, spec: Spec, mine: &str, target: &PortRef, aim: Option<Vec3>) -> Result<String> {
         let spec = spec.normalized();
         let (tp, td, _) = self.port(target)?;
         let ports = spec.ports();
@@ -136,7 +136,7 @@ impl Assembly {
         v
     }
     /// Routes a pipe between two item ports.
-    fn pipe(&mut self, from: &PortRef, to: &PortRef, d: f32, extra: &[Obstacle], names: &mut Namer) -> Result<f32> {
+    pub(crate) fn pipe(&mut self, from: &PortRef, to: &PortRef, d: f32, extra: &[Obstacle], names: &mut Namer) -> Result<f32> {
         let (p0, d0, _) = self.port(from)?;
         let (p1, d1, _) = self.port(to)?;
         let obstacles = self.obstacles(extra);
@@ -162,16 +162,21 @@ fn r2(v: f32) -> f64 {
 }
 
 /// Two tanks, a pump and three valves: the pump lifts liquid from tank A
-/// into the top of tank B, and B drains back to A by gravity through a
-/// throttled return valve, so the loop settles at a steady flow.
+/// into the top of tank B, and B drains back to A by gravity through the
+/// open return line. The discharge valve is throttled to 50° so the pump
+/// delivers what the return can carry: the levels settle (about 23 % / 77 %)
+/// and the loop circulates steadily, about 2.4 l/s of water.
 pub fn pump_loop(names: &mut Namer, at: Vec3, yaw: f32, d: f32, tank_dia: f32, tank_h: f32, extra: &[Obstacle]) -> Result<Assembly> {
     let mut a = Assembly::default();
     let tank = Spec::Tank { dia: tank_dia, h: tank_h, d };
     let gap = (tank_dia * 0.5 + 1.6).max(2.0);
     let ta = a.add(names.name("tank_a"), tank, Transform::IDENTITY)?;
     let tb = a.add(names.name("tank_b"), tank, Transform::from_xyz(gap * 2.0, 0.0, 0.0))?;
-    // Pump in the middle, suction facing tank A.
-    let pump = a.add(names.name("pump"), Spec::Pump { d, motor: true }, Transform::from_xyz(gap * 0.9, 0.0, 0.0).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)))?;
+    // Pump in the middle, suction facing tank A, on a plinth that puts its
+    // suction at the tank outlet's height: a straight, self-venting suction line.
+    let Spec::Tank { dia, h, d: dn } = tank.normalized() else { unreachable!() };
+    let base = (super::parts::tank_nozzle_y(dia, h, dn) - super::parts::pump_axis(dn)).max(0.0);
+    let pump = a.add(names.name("pump"), Spec::Pump { d, motor: true, base },Transform::from_xyz(gap * 0.9, 0.0, 0.0).with_rotation(Quat::from_rotation_y(std::f32::consts::PI)))?;
     let v1 = a.attach(names.name("valve_suction"), Spec::Valve { d }, "a", &PortRef::new(&ta, "outlet"), Some(Vec3::X))?;
     let v2 = a.attach(names.name("valve_discharge"), Spec::Valve { d }, "a", &PortRef::new(&pump, "outlet"), Some(Vec3::Y))?;
     let v3 = a.attach(names.name("valve_return"), Spec::Valve { d }, "a", &PortRef::new(&tb, "return"), Some(-Vec3::X))?;
@@ -181,10 +186,10 @@ pub fn pump_loop(names: &mut Namer, at: Vec3, yaw: f32, d: f32, tank_dia: f32, t
     a.controls.push((pump.clone(), Control { on: true, ..default() }));
     a.controls.push((ta.clone(), Control { fill: Some(0.85), medium: Some("water".into()), ..default() }));
     a.controls.push((tb.clone(), Control { fill: Some(0.15), medium: Some("water".into()), ..default() }));
-    a.levers.push((v3.clone(), 45.0));
+    a.levers.push((v2.clone(), 50.0));
     a.place(at, yaw);
     a.summary = json!({
-        "tanks": [ta, tb], "pump": pump, "valves": { "suction": v1, "discharge": v2, "return (45° throttled)": v3 },
+        "tanks": [ta, tb], "pump": pump, "valves": { "suction": v1, "discharge (50° throttled)": v2, "return": v3 },
         "pipe_m": r2(l1 + l2 + l3),
     });
     Ok(a)
@@ -200,7 +205,7 @@ pub fn engine_drive(names: &mut Namer, at: Vec3, yaw: f32, cylinders: u32, extra
     let (_, eb) = spec_bounds(&Spec::Engine { n: cylinders }.normalized());
     let (eng_pulley, _, eng_dia) = a.port(&PortRef::new(&engine, "pulley"))?;
     // Driven pump beside the engine, its pulley in the engine pulley's plane.
-    let pump_spec = Spec::Pump { d, motor: false };
+    let pump_spec = Spec::Pump { d, motor: false, base: 0.0 };
     let mut pump_t = Transform::from_xyz(0.0, 0.0, eb.z + 0.45);
     let pulley_spec = Spec::Pulley { dia: 0.08, d: 0.044 * (d / 0.05_f32).clamp(0.6, 4.0) };
     let pump = a.add(names.name("coolant_pump"), pump_spec, pump_t)?;

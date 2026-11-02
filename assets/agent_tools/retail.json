@@ -1,0 +1,180 @@
+[
+  {
+    "name": "gondola_shelf",
+    "description": "Create a retail gondola shelf asset (the double-post store shelving with a back panel, stocked with product-sized boxes) sized to the real one, then place it with place_objects or place_from_photo using the returned asset name. Set stock to 0 for an empty shelf.",
+    "parameters": {
+      "name": { "type": "string", "description": "asset name", "default": "gondola_shelf" },
+      "length_m": { "type": "number", "default": 1.2 },
+      "height_m": { "type": "number", "default": 1.8 },
+      "depth_m": { "type": "number", "description": "one-sided depth", "default": 0.5 },
+      "shelves": { "type": "integer", "default": 5 },
+      "stock": { "type": "integer", "description": "product boxes per shelf", "default": 8 },
+      "color": { "type": "string", "description": "shelf color #rrggbb", "default": "#d8dadb" }
+    },
+    "steps": [
+      {
+        "tool": "create_asset",
+        "input": {
+          "name": "${name}",
+          "description": "gondola store shelf",
+          "parts": [
+            { "size": ["${length_m}", 0.12, "${depth_m}"], "at": [0, 0.06, 0], "material": { "color": "${color}", "roughness": 0.45 } },
+            { "size": ["${length_m}", "${height_m}", 0.03], "at": [0, "${height_m/2}", "${-depth_m/2+0.015}"], "material": { "color": "${color}", "roughness": 0.45 } },
+            { "size": [0.04, "${height_m}", 0.05], "at": ["${-length_m/2+0.02}", "${height_m/2}", "${-depth_m/2+0.04}"], "material": "steel" },
+            { "size": [0.04, "${height_m}", 0.05], "at": ["${length_m/2-0.02}", "${height_m/2}", "${-depth_m/2+0.04}"], "material": "steel" },
+            {
+              "$repeat": "shelves", "as": "i",
+              "item": { "size": ["${length_m-0.02}", 0.025, "${depth_m-0.04}"], "at": [0, "${0.12+0.0125+i*(height_m-0.2)/shelves}", 0.01], "material": { "color": "${color}", "roughness": 0.4 } }
+            },
+            {
+              "$repeat": "shelves", "as": "i",
+              "item": {
+                "$repeat": "stock", "as": "j",
+                "item": {
+                  "size": ["${(length_m-0.04)/stock*0.92}", "${(height_m-0.2)/shelves*(0.45+0.3*abs(sin(i*3.1+j*1.7)))}", "${(depth_m-0.08)*0.85}"],
+                  "at": [
+                    "${-length_m/2+0.02+(j+0.5)*(length_m-0.04)/stock}",
+                    "${0.12+0.025+i*(height_m-0.2)/shelves+(height_m-0.2)/shelves*(0.45+0.3*abs(sin(i*3.1+j*1.7)))/2}",
+                    0.02
+                  ],
+                  "material": { "color": ["${0.25+0.7*abs(sin(i*2.3+j*1.1))}", "${0.25+0.7*abs(sin(i*1.3+j*2.9+1))}", "${0.25+0.7*abs(cos(i*4.1+j*0.7))}"], "roughness": 0.5 }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "checkout_counter",
+    "description": "Create a retail checkout counter asset with a belt, card terminal and register screen, then place it with place_objects or place_from_photo using the returned asset name.",
+    "parameters": {
+      "name": { "type": "string", "description": "asset name", "default": "checkout_counter" },
+      "length_m": { "type": "number", "default": 1.8 },
+      "height_m": { "type": "number", "default": 0.9 },
+      "depth_m": { "type": "number", "default": 0.7 },
+      "color": { "type": "string", "description": "body color #rrggbb", "default": "#e6e6e3" }
+    },
+    "steps": [
+      {
+        "tool": "create_asset",
+        "input": {
+          "name": "${name}",
+          "description": "store checkout counter register till",
+          "parts": [
+            { "size": ["${length_m}", "${height_m-0.04}", "${depth_m}"], "at": [0, "${(height_m-0.04)/2}", 0], "material": { "color": "${color}", "roughness": 0.4 } },
+            { "size": ["${length_m+0.02}", 0.04, "${depth_m+0.02}"], "at": [0, "${height_m-0.02}", 0], "material": "steel" },
+            { "size": ["${length_m*0.6}", 0.01, "${depth_m*0.7}"], "at": ["${-length_m*0.17}", "${height_m+0.005}", 0], "material": "plastic_black" },
+            { "size": [0.05, 0.3, 0.05], "at": ["${length_m*0.35}", "${height_m+0.15}", "${-depth_m*0.25}"], "material": "black_metal" },
+            { "size": [0.34, 0.24, 0.03], "at": ["${length_m*0.35}", "${height_m+0.36}", "${-depth_m*0.25}"], "material": "plastic_black" },
+            { "shape": "panel", "size": [0.3, 0.2, 0.001], "at": ["${length_m*0.35}", "${height_m+0.36}", "${-depth_m*0.25+0.017}"], "material": { "color": "#9fc4e8", "emissive": "#2f4c66" } },
+            { "size": [0.09, 0.03, 0.16], "at": ["${length_m*0.35}", "${height_m+0.015}", "${depth_m*0.25}"], "material": "plastic_black" }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "refrigerated_case",
+    "description": "Create an upright glass-door refrigerated display case asset (fridge or freezer), with lit shelves and stock, then place it with place_objects or place_from_photo using the returned asset name.",
+    "parameters": {
+      "name": { "type": "string", "description": "asset name", "default": "refrigerated_case" },
+      "length_m": { "type": "number", "default": 1.3 },
+      "height_m": { "type": "number", "default": 2.0 },
+      "depth_m": { "type": "number", "default": 0.75 },
+      "shelves": { "type": "integer", "default": 5 },
+      "doors": { "type": "integer", "default": 2 },
+      "color": { "type": "string", "description": "body color #rrggbb", "default": "#2c2f33" }
+    },
+    "steps": [
+      {
+        "tool": "create_asset",
+        "input": {
+          "name": "${name}",
+          "description": "store fridge freezer refrigerated glass door display case cooler",
+          "parts": [
+            { "size": ["${length_m}", 0.14, "${depth_m}"], "at": [0, 0.07, 0], "material": { "color": "${color}", "metallic": 0.4, "roughness": 0.5 } },
+            { "size": ["${length_m}", 0.2, "${depth_m}"], "at": [0, "${height_m-0.1}", 0], "material": { "color": "${color}", "metallic": 0.4, "roughness": 0.5 } },
+            { "size": ["${length_m}", "${height_m-0.34}", 0.03], "at": [0, "${height_m/2-0.03}", "${-depth_m/2+0.015}"], "material": "white_paint" },
+            { "size": [0.03, "${height_m-0.34}", "${depth_m}"], "at": ["${-length_m/2+0.015}", "${height_m/2-0.03}", 0], "material": { "color": "${color}" } },
+            { "size": [0.03, "${height_m-0.34}", "${depth_m}"], "at": ["${length_m/2-0.015}", "${height_m/2-0.03}", 0], "material": { "color": "${color}" } },
+            {
+              "$repeat": "shelves", "as": "i",
+              "item": { "size": ["${length_m-0.06}", 0.02, "${depth_m-0.12}"], "at": [0, "${0.2+i*(height_m-0.42)/shelves}", -0.03], "material": "white_paint" }
+            },
+            {
+              "$repeat": "shelves", "as": "i",
+              "item": {
+                "$repeat": 6, "as": "j",
+                "item": {
+                  "shape": "cylinder",
+                  "size": [0.09, "${(height_m-0.42)/shelves*0.6}", 0.09],
+                  "at": ["${-length_m/2+0.1+j*(length_m-0.2)/5}", "${0.21+i*(height_m-0.42)/shelves+(height_m-0.42)/shelves*0.3}", -0.05],
+                  "material": { "color": ["${0.2+0.7*abs(sin(i*1.9+j*2.3))}", "${0.2+0.7*abs(cos(i*2.7+j*1.3))}", "${0.2+0.7*abs(sin(i*0.9+j*3.7))}"], "roughness": 0.3 }
+                }
+              }
+            },
+            { "size": ["${length_m-0.1}", 0.03, 0.05], "at": [0, "${height_m-0.22}", "${depth_m/2-0.1}"], "material": "led_panel" },
+            {
+              "$repeat": "doors", "as": "d",
+              "item": { "shape": "panel", "size": ["${(length_m-0.03)/doors-0.02}", "${height_m-0.36}", 0.001], "at": ["${-length_m/2+0.015+(d+0.5)*(length_m-0.03)/doors}", "${height_m/2-0.03}", "${depth_m/2+0.002}"], "material": "glass" }
+            },
+            {
+              "$repeat": "doors", "as": "d",
+              "item": { "size": [0.025, "${height_m*0.3}", 0.03], "at": ["${-length_m/2+0.015+(d+1)*(length_m-0.03)/doors-0.05}", "${height_m*0.5}", "${depth_m/2+0.02}"], "material": "steel" }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "ceiling_light_grid",
+    "description": "Hang a regular grid of lit ceiling panels just under the ceiling. x0/z0 and x1/z1 are opposite corners of the area in meters. Give the real spacing from the photo.",
+    "parameters": {
+      "x0": { "type": "number" },
+      "z0": { "type": "number" },
+      "x1": { "type": "number" },
+      "z1": { "type": "number" },
+      "ceiling_height_m": { "type": "number" },
+      "spacing_x_m": { "type": "number", "default": 2.4 },
+      "spacing_z_m": { "type": "number", "default": 2.4 },
+      "panel_length_m": { "type": "number", "default": 1.2 },
+      "panel_width_m": { "type": "number", "default": 0.3 }
+    },
+    "steps": [
+      {
+        "tool": "create_asset",
+        "input": {
+          "name": "ceiling_light_${round(panel_length_m*100)}x${round(panel_width_m*100)}",
+          "description": "ceiling light fluorescent LED panel lamp fixture",
+          "mount": "ceiling",
+          "parts": [
+            { "size": ["${panel_length_m+0.04}", 0.05, "${panel_width_m+0.04}"], "at": [0, 0.035, 0], "material": "plastic_white" },
+            { "size": ["${panel_length_m}", 0.01, "${panel_width_m}"], "at": [0, 0.005, 0], "material": "led_panel" }
+          ]
+        }
+      },
+      {
+        "tool": "place_objects",
+        "input": {
+          "objects": [
+            {
+              "$repeat": "max(1, floor(abs(x1-x0)/spacing_x_m))", "as": "i",
+              "item": {
+                "$repeat": "max(1, floor(abs(z1-z0)/spacing_z_m))", "as": "j",
+                "item": {
+                  "asset": "ceiling_light_${round(panel_length_m*100)}x${round(panel_width_m*100)}",
+                  "x": "${min(x0,x1)+(i+0.5)*abs(x1-x0)/max(1, floor(abs(x1-x0)/spacing_x_m))}",
+                  "z": "${min(z0,z1)+(j+0.5)*abs(z1-z0)/max(1, floor(abs(z1-z0)/spacing_z_m))}",
+                  "y": "${ceiling_height_m-0.06}"
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+]

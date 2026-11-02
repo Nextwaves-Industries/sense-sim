@@ -360,12 +360,14 @@ pub struct Hub {
     control_tx: Sender<Control>,
     pub control_rx: Receiver<Control>,
     pub published: u64,
+    /// Nothing goes out: a test run isn't the live site.
+    pub muted: bool,
 }
 
 impl Default for Hub {
     fn default() -> Self {
         let (control_tx, control_rx) = unbounded();
-        Self { sinks: Vec::new(), applied: None, control_tx, control_rx, published: 0 }
+        Self { sinks: Vec::new(), applied: None, control_tx, control_rx, published: 0, muted: false }
     }
 }
 
@@ -421,7 +423,7 @@ impl Hub {
     }
 
     pub fn publish(&mut self, event: &RtlsEvent) {
-        if self.sinks.is_empty() {
+        if self.muted || self.sinks.is_empty() {
             return;
         }
         let class = event.class();

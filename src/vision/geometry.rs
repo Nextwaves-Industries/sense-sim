@@ -291,6 +291,29 @@ impl PhotoCamera {
         Some(Vec2::new(0.5 + self.fx_norm * c.x / c.z, 0.5 + self.fx_norm * self.aspect * c.y / c.z))
     }
 
+    /// World direction through image point (u, v), scaled so that a point at
+    /// `t` times it lies `t` along the camera's forward axis.
+    pub fn ray(&self, u: f32, v: f32) -> Vec3 {
+        let c = Vec3::new((u - 0.5) / self.fx_norm, (v - 0.5) / (self.fx_norm * self.aspect), 1.0);
+        let f = &self.frame;
+        Vec3::new(c.dot(f.x), c.dot(f.y), c.dot(f.z))
+    }
+
+    /// Where the ray through (u, v) meets the level plane at height `y`.
+    pub fn plane_point(&self, u: f32, v: f32, y: f32) -> Option<Vec3> {
+        let d = self.ray(u, v);
+        let t = (y - self.frame.h) / d.y;
+        (d.y.abs() > 1e-4 && t > 0.0).then(|| self.eye() + d * t)
+    }
+
+    /// Row (0 at the top) where the horizon crosses column `u`.
+    pub fn horizon_v(&self, u: f32) -> f32 {
+        let n = self.frame.y;
+        let fy = self.fx_norm * self.aspect;
+        let ny = if n.y.abs() < 1e-5 { -1e-5 } else { n.y };
+        0.5 - fy * (n.z + n.x * (u - 0.5) / self.fx_norm) / ny
+    }
+
     /// 2D bounds [u0, v0, u1, v1] of a set of world points (clipped to the image).
     pub fn project_bounds(&self, pts: &[Vec3]) -> Option<[f32; 4]> {
         let mut mn = Vec2::splat(f32::MAX);

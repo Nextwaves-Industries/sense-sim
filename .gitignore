@@ -11,6 +11,9 @@
 # Debug dumps
 /devs.json
 
+# Personal Claude Code settings
+.claude/settings.local.json
+
 # Editors and OS
 .vscode/
 .idea/

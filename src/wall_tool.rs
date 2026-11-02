@@ -123,7 +123,7 @@ pub fn draw_walls(
                 match structures::usd_for(Kind::Wall, size) {
                     Ok(asset) => {
                         cache.request(&asset);
-                        pending.0.push(PendingSpawn { asset, transform, name: None, joints: None, select: false });
+                        pending.0.push(PendingSpawn { asset, transform, name: None, joints: None, select: false, locked: false });
                         tool.start = Some(p);
                     }
                     Err(e) => status.0 = format!("Could not create wall: {e}"),
