@@ -124,7 +124,9 @@ impl GpuPrefs {
         // WGPU_BACKEND set by the user still wins (WgpuSettings::default reads it).
         if std::env::var_os("WGPU_BACKEND").is_none() {
             match self.backend {
-                Backend::Auto => {}
+                // Explicit: SolidCraft's dependencies compile in wgpu's OpenGL backend, and "any"
+                // would then let it be chosen, which is the mix SolidCraft reports crashing.
+                Backend::Auto => s.backends = Some(Backends::VULKAN | Backends::DX12),
                 Backend::Dx12 => s.backends = Some(Backends::DX12),
                 Backend::Vulkan => s.backends = Some(Backends::VULKAN),
                 Backend::Gl => s.backends = Some(Backends::GL),
@@ -323,7 +325,7 @@ impl Gpu {
 
 fn enumerate_adapters() -> Vec<AdapterRow> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let mut rows: Vec<AdapterRow> = bevy::tasks::block_on(instance.enumerate_adapters(Backends::all()))
+    let mut rows: Vec<AdapterRow> = bevy::tasks::block_on(instance.enumerate_adapters(Backends::VULKAN | Backends::DX12))
         .into_iter()
         .map(|a| {
             let i = a.get_info();

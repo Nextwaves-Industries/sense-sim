@@ -13,6 +13,8 @@ mod agent;
 mod antenna;
 mod bvh;
 mod context_menu;
+#[cfg(feature = "design")]
+mod design;
 #[cfg(debug_assertions)]
 mod drive;
 mod gpu;
@@ -27,6 +29,8 @@ mod remote;
 mod rtls;
 mod samples;
 mod scene;
+#[cfg(feature = "design")]
+mod sim;
 mod tabs;
 mod theme;
 mod ui;
@@ -49,6 +53,14 @@ use prototype::PrototypeCache;
 use scene::*;
 
 pub const APP_NAME: &str = "Sense Sim";
+
+/// File > Quit: with a design workspace, through its protection of unsaved work.
+pub fn quit() {
+    #[cfg(feature = "design")]
+    design::request_quit();
+    #[cfg(not(feature = "design"))]
+    std::process::exit(0);
+}
 
 const UPLOAD_BYTES_PER_FRAME: usize = 48 * 1024 * 1024;
 
@@ -80,8 +92,13 @@ fn main() {
     let mut sample: Option<usize> = None;
     let mut plant_test: Option<String> = None;
     let mut probe_ports: Vec<String> = Vec::new();
+    let mut design_test: Option<String> = None;
+    let mut sim_test: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--design-test" => design_test = args.next(),
+            "--sim-test" => sim_test = args.next(),
+            "--sim-test-all" => {}
             "--plant-test" => plant_test = args.next(),
             "--ports" => probe_ports.extend(args.next()),
             "--mcp-port" => mcp_port = args.next().and_then(|p| p.parse().ok()),
@@ -158,7 +175,7 @@ fn main() {
                     resolution: (1600u32, 950u32).into(),
                     present_mode: gpu_prefs.present_mode(),
                     // Scripted tests block for their whole run; no window to look frozen.
-                    visible: rtls_test.is_none() && plant_test.is_none(),
+                    visible: rtls_test.is_none() && plant_test.is_none() && std::env::var_os("SENSESIM_TEST_HIDDEN").is_none(),
                     ..default()
                 }),
                 ..default()
@@ -235,6 +252,22 @@ fn main() {
     #[cfg(feature = "antenna-studio")]
     app.add_plugins(antenna::AntennaPlugin).add_systems(EguiPrimaryContextPass, antenna::ui::studio_ui.after(ui::ui_system).before(ime::sync_ime));
 
+    #[cfg(feature = "design")]
+    {
+        app.add_plugins((design::DesignPlugin, sim::SimPlugin));
+        if let Some(out) = &sim_test {
+            design::use_test_autosave();
+            app.insert_resource(sim::autotest::SimTest::new(out.clone())).add_systems(Update, (sim::autotest::run.before(sim::persist::peek_actions), sim::autotest::tools_step));
+            app.world_mut().resource_mut::<ui::UiState>().skip_start(None);
+        }
+        if let Some(out) = &design_test {
+            design::use_test_autosave();
+            app.insert_resource(design::autotest::DesignTest::new(out.clone())).add_systems(Update, design::autotest::run);
+            app.world_mut().resource_mut::<ui::UiState>().skip_start(None);
+        }
+    }
+    #[cfg(not(feature = "design"))]
+    let _ = (&design_test, &sim_test);
     app.world_mut().resource_mut::<Library>().search = search;
     if let Some(out) = shot {
         app.insert_resource(AutoShot { out: out.into(), frames_ready: 0, taken: false, export: export.map(Into::into), pose, preview, no_select, delay: shot_delay })

@@ -8,7 +8,7 @@ C++ or Python USD install is needed.
 
 ## Install
 
-Run `dist\SenseSim-Setup-1.3.0.exe`. It installs per-user (no admin) into
+Run `dist\SenseSim-Setup-1.5.0.exe`. It installs per-user (no admin) into
 `%LOCALAPPDATA%\Programs\Sense Sim`, adds a Start Menu entry (desktop shortcut
 optional) and an uninstaller in *Apps & features*.
 

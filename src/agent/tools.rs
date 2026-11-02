@@ -558,6 +558,8 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
     v.extend(crate::outcomes::tools::defs());
     v.push(bim_tool_def());
     v.extend(crate::plant::tools::defs());
+    #[cfg(feature = "design")]
+    v.extend(crate::sim::tools::defs());
     v.extend(toolmaker::defs());
     #[cfg(feature = "antenna-studio")]
     v.extend(crate::antenna::tools::defs());
@@ -1446,6 +1448,8 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             None => ToolOutput::err(format!("unknown tool '{other}'")),
         },
         other if super::knowledge::is_tool(other) => super::knowledge::run(other, i),
+        #[cfg(feature = "design")]
+        other if other.starts_with("design_") || other.starts_with("sim_") => crate::sim::tools::start(world, other, i),
         other => ToolOutput::err(format!("unknown tool '{other}'")),
     };
     Some(out)

@@ -83,6 +83,10 @@ pub struct LeftPanelSlot {
     pub rtls_open: bool,
     /// Active RTLS alarms, set every frame by the RTLS system.
     pub rtls_alerts: u32,
+    /// Asks for the Simulations panel.
+    pub open_simulations: bool,
+    /// A simulation result is on show: the empty-scene hint would cover it.
+    pub results_shown: bool,
     pub rtls_status: RtlsStatus,
     /// Part of the canvas no tree or detail card covers; other cards anchor to it.
     pub free: Option<egui::Rect>,
@@ -724,7 +728,7 @@ pub fn ui_system(
 
     // ---------------- Empty scene hint
     let page_needs_scene = !slot.rtls_open || !matches!(rtls.local.page(), crate::rtls::ui::Page::Fdtd | crate::rtls::ui::Page::Outcomes);
-    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && page_needs_scene {
+    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && !slot.results_shown && page_needs_scene {
         egui::Area::new(egui::Id::new("empty_scene"))
             .order(egui::Order::Background)
             .pivot(Align2::CENTER_CENTER)

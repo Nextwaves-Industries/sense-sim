@@ -229,6 +229,9 @@ fn simulation_tools(ui: &mut egui::Ui, slot: &mut LeftPanelSlot, rtls: &mut Rtls
 
     theme::ribbon_caption(ui, "Solvers");
     go(ui, icon::WAVE_SINE, "RF solver", "Simulate antennas and materials with the openEMS field solver", Page::Fdtd);
+    if theme::ribbon_button(ui, icon::STACK, "Simulations", true, false, "Create and run simulations: structural, flow, thermal, electromagnetic").clicked() {
+        slot.open_simulations = true;
+    }
 }
 
 #[cfg(feature = "antenna-studio")]

@@ -203,7 +203,7 @@ pub fn show(
                         }
                     }
                     if menu_entry(ui, icon::SIGN_OUT, "Quit", "", true) {
-                        std::process::exit(0);
+                        crate::quit();
                     }
                 });
                 // Editing and viewing the scene: the workspaces have their own.
