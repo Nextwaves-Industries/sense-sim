@@ -303,9 +303,7 @@ fn main() {
     }
     let mut layouts = layouts.into_iter().map(std::path::PathBuf::from);
     if let Some(path) = layouts.next() {
-        app.world_mut().resource_mut::<ui::UiState>().name_scene(tabs::title_of(&path));
-        app.world_mut().resource_mut::<undo::UndoStack>().rebase();
-        app.world_mut().resource_mut::<Actions>().0.push(Action::LoadLayout(path));
+        ui::open_at_launch(app.world_mut(), path);
     }
     let more: Vec<tabs::NewTab> = layouts.map(|p| tabs::NewTab { title: tabs::title_of(&p), path: Some(p.clone()), load: Some(p) }).collect();
     if !more.is_empty() {

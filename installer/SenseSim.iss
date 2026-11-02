@@ -39,7 +39,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{a
 
 [Registry]
 ; Per user, like the install: double-clicking a project opens the app.
-Root: HKA; Subkey: "Software\Classes\.sesim"; ValueType: string; ValueName: ""; ValueData: "SenseSim.Project"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.sesim"; ValueType: string; ValueName: ""; ValueData: "SenseSim.Project"; Flags: uninsdeletevalue uninsdeletekeyifempty
 Root: HKA; Subkey: "Software\Classes\SenseSim.Project"; ValueType: string; ValueName: ""; ValueData: "Sense Sim project"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\SenseSim.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\SenseSim.ico"
 Root: HKA; Subkey: "Software\Classes\SenseSim.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""

@@ -370,6 +370,15 @@ fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     Some(ctx.load_texture("logo", ci, egui::TextureOptions::LINEAR))
 }
 
+/// Opens the file the app was started with, such as a double-clicked project. Saving goes back to it.
+pub(crate) fn open_at_launch(world: &mut World, path: PathBuf) {
+    let mut state = world.resource_mut::<UiState>();
+    state.name_scene(crate::tabs::title_of(&path));
+    state.layout_path = Some(path.clone());
+    world.resource_mut::<crate::undo::UndoStack>().rebase();
+    world.resource_mut::<Actions>().0.push(Action::LoadLayout(path));
+}
+
 fn pick_layout_save(scene_name: &str) -> Option<PathBuf> {
     let file = format!("{}.{}", crate::samples::slug(scene_name), crate::project_file::EXTENSION);
     rfd::FileDialog::new().add_filter("Sense Sim project", &[crate::project_file::EXTENSION]).set_file_name(file).save_file().map(|p| crate::project_file::save_path(&p))
@@ -916,4 +925,22 @@ pub fn asset_name(asset: &std::path::Path) -> String {
         .or_else(|| asset.file_stem())
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod open_at_launch_tests {
+    use super::*;
+
+    #[test]
+    fn a_project_opened_at_launch_saves_back_to_its_own_file() {
+        let mut w = World::new();
+        w.init_resource::<UiState>();
+        w.init_resource::<crate::undo::UndoStack>();
+        w.init_resource::<Actions>();
+        open_at_launch(&mut w, PathBuf::from(r"C:\plans\dock.sesim"));
+        let state = w.resource::<UiState>();
+        assert_eq!(state.layout_path.as_deref(), Some(std::path::Path::new(r"C:\plans\dock.sesim")));
+        assert_eq!(state.scene_title(), "dock");
+        assert!(matches!(w.resource::<Actions>().0.as_slice(), [Action::LoadLayout(p)] if p.ends_with("dock.sesim")));
+    }
 }
