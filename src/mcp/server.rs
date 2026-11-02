@@ -205,7 +205,8 @@ mod tests {
         // A tool call that wrongly reaches the queue waits forever, so fail instead of hanging.
         tcp.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
         let origin = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
-        write!(tcp, "POST /mcp HTTP/1.1\r\nHost: {host}\r\n{origin}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        // HTTP/1.0 so a long reply isn't chunked, which this little reader doesn't undo.
+        write!(tcp, "POST /mcp HTTP/1.0\r\nHost: {host}\r\n{origin}Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
         let mut reply = String::new();
         tcp.read_to_string(&mut reply).unwrap();
         let status = reply.split(' ').nth(1).unwrap().parse().unwrap();

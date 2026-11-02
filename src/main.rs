@@ -32,6 +32,7 @@ mod scene;
 #[cfg(feature = "design")]
 mod sim;
 mod tabs;
+mod twin;
 mod theme;
 mod ui;
 mod undo;
@@ -192,6 +193,7 @@ fn main() {
     .add_plugins(outcomes::OutcomesPlugin)
     .add_plugins(context_menu::InteractionPlugin)
     .add_plugins(tabs::TabsPlugin)
+    .add_plugins(twin::TwinPlugin)
     .add_plugins(rtls::RtlsPlugin {
         autotest: rtls_test.as_ref().map(|_| rtls::sim::AutoTest { duration: rtls_duration as f64, report: rtls_report.clone().into(), frames_ready: 0, deploy: rtls_deploy }),
         headless: shot.is_some() || rtls_test.is_some() || plant_test.is_some(),

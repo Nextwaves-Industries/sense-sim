@@ -119,6 +119,8 @@ pub struct LeftPanelSlot {
     pub studio_rename: Option<String>,
     /// The open antenna project, for the top bar.
     pub studio_doc: workbench::StudioDoc,
+    /// The Factory workbench's card.
+    pub twin: crate::twin::TwinSlot,
     /// The page Antenna Studio shows, for the ribbon.
     #[cfg(feature = "antenna-studio")]
     pub studio_page: crate::antenna::ui::Page,
@@ -304,6 +306,19 @@ impl UiState {
                 slot.studio_open = true;
                 continue;
             }
+            // Scripted screenshots of the Factory workbench.
+            if let Some(what) = name.strip_prefix("twin-") {
+                use crate::twin::{TwinPage, TwinRequest};
+                match what {
+                    "demo" => slot.twin.requests.push(TwinRequest::Demo(Some(crate::twin::DEMO_SIZES[0]))),
+                    "demo-500" => slot.twin.requests.push(TwinRequest::Demo(Some(500))),
+                    "demo-5000" => slot.twin.requests.push(TwinRequest::Demo(Some(5000))),
+                    "events" => slot.twin.page = TwinPage::Events,
+                    "connection" => slot.twin.page = TwinPage::Connection,
+                    _ => {}
+                }
+                continue;
+            }
             if let Some(page) = name.strip_prefix("antenna-") {
                 slot.studio_goto.push(page.to_string());
                 continue;
@@ -397,6 +412,7 @@ pub fn ui_system(
     let overlays = hide.0 == 0 && !slot.canvas_taken();
     hide.0 = hide.0.saturating_sub(1);
     slot.rtls = None;
+    slot.twin.rect = None;
     match state.theme_stage {
         0 => {
             theme::apply_fonts(&ctx);
@@ -608,6 +624,15 @@ pub fn ui_system(
         free.min.x += w + M;
     }
 
+    if overlays && slot.twin.open && slot.bench.current == Workbench::Factory {
+        let w = state.detail_w.min(free.width() - M).max(300.0);
+        slot.twin.rect = Some(egui::Rect::from_min_size(pos2(free.left(), central.top() + M), vec2(w, central.height() - 2.0 * M)));
+        let (mut dw, range) = (state.detail_w, 320.0..=760.0);
+        theme::width_grip(&ctx, "twin_detail", pos2(free.left() + w + 5.0, central.top() + M + 120.0), &mut dw, range, 1.0);
+        state.detail_w = dw;
+        free.min.x += w + M;
+    }
+
     // ---------------- Scene tree (right), properties card beside it
     if overlays && wide {
         outliner::card(&ctx, right_rect, &mut objects, &selection, &mut actions, &mut state);
@@ -728,7 +753,11 @@ pub fn ui_system(
 
     // ---------------- Empty scene hint
     let page_needs_scene = !slot.rtls_open || !matches!(rtls.local.page(), crate::rtls::ui::Page::Fdtd | crate::rtls::ui::Page::Outcomes);
+<<<<<<< HEAD
     if overlays && object_count == 0 && place.asset.is_none() && !walls.active && !slot.results_shown && page_needs_scene {
+=======
+    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && page_needs_scene && slot.bench.current != Workbench::Factory {
+>>>>>>> 93773a6 (Factory workbench: device list, events and 3D markers)
         egui::Area::new(egui::Id::new("empty_scene"))
             .order(egui::Order::Background)
             .pivot(Align2::CENTER_CENTER)

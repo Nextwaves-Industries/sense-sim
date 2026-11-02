@@ -42,6 +42,7 @@ fn named_key(name: &str) -> Option<(KeyCode, Key)> {
         "ArrowUp" => (KeyCode::ArrowUp, Key::ArrowUp),
         "ArrowLeft" => (KeyCode::ArrowLeft, Key::ArrowLeft),
         "ArrowRight" => (KeyCode::ArrowRight, Key::ArrowRight),
+        "z" => (KeyCode::KeyZ, Key::Character("z".into())),
         _ => return None,
     })
 }

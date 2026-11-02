@@ -25,10 +25,12 @@ pub enum Workbench {
     Simulation,
     /// Run connected equipment.
     Plant,
+    /// See the real hardware found on the network.
+    Factory,
 }
 
 impl Workbench {
-    pub const ALL: [Workbench; 6] = [Workbench::Layout, Workbench::Design, Workbench::Placement, Workbench::Antenna, Workbench::Simulation, Workbench::Plant];
+    pub const ALL: [Workbench; 7] = [Workbench::Layout, Workbench::Design, Workbench::Placement, Workbench::Antenna, Workbench::Simulation, Workbench::Plant, Workbench::Factory];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -38,6 +40,7 @@ impl Workbench {
             Workbench::Antenna => "Antenna Design",
             Workbench::Simulation => "Simulation",
             Workbench::Plant => "Plant",
+            Workbench::Factory => "Factory",
         }
     }
 
@@ -49,6 +52,7 @@ impl Workbench {
             Workbench::Antenna => icon::TARGET,
             Workbench::Simulation => icon::WAVE_SINE,
             Workbench::Plant => icon::DROP,
+            Workbench::Factory => icon::FACTORY,
         }
     }
 
@@ -60,6 +64,7 @@ impl Workbench {
             Workbench::Antenna => "Design an antenna: models, solvers, results, optimisation",
             Workbench::Simulation => "Test the system live, run RF solvers and check predictions",
             Workbench::Plant => "Run connected equipment: ports, flow and alarms",
+            Workbench::Factory => "See the real hardware on the network: how many of what, and how it is doing",
         }
     }
 
@@ -81,6 +86,7 @@ impl Workbench {
             "antenna" => Workbench::Antenna,
             "simulation" => Workbench::Simulation,
             "plant" => Workbench::Plant,
+            "factory" => Workbench::Factory,
             _ => return None,
         })
     }
