@@ -17,6 +17,7 @@ pub mod markdown;
 pub mod panel;
 pub mod photocheck;
 pub mod placer;
+pub mod planning;
 pub mod prompt;
 pub mod screen;
 pub mod session;
@@ -87,6 +88,8 @@ enum Event {
     Usage { model: String, usage: llm::Usage },
     /// The harness needs an answer from the user to go on.
     Question(Question),
+    /// The user approved a plan: plan mode is over for this request.
+    PlanApproved,
 }
 
 #[derive(Resource)]
@@ -138,6 +141,8 @@ pub struct Agent {
     storage_rx: Option<Receiver<(u64, usize)>>,
     /// Clear was pressed once, and waits for the second press.
     pub confirm_clear: bool,
+    /// Look and propose first; change nothing until a plan is approved.
+    pub plan_mode: bool,
 }
 
 impl Agent {
@@ -177,6 +182,7 @@ impl Agent {
             storage: None,
             storage_rx: None,
             confirm_clear: false,
+            plan_mode: false,
         }
     }
 
@@ -389,12 +395,16 @@ impl Agent {
             session,
             context_limit: self.config.provider().context_limit(),
             files: Some(workspace::files_dir(&chat_id)),
+            planning: self.plan_mode,
         };
         let mut history = before.clone();
         history.push(Message::user(content));
         let mut tool_defs = tools::tool_defs(false);
         tool_defs.extend(self.mcp.tool_defs());
         tool_defs.extend(workspace::defs());
+        if self.plan_mode {
+            tool_defs.push(planning::def());
+        }
         let (ev_tx, ev_rx) = unbounded();
         self.events = Some(ev_rx);
         self.cancel = Arc::default();
@@ -450,12 +460,14 @@ fn worker(
     options: RunOptions,
 ) {
     let provider: Arc<dyn llm::Provider> = Arc::new(budget::Metered { inner: provider, budget: options.budget.clone(), ev: ev.clone() });
-    let mut spec = harness::AgentSpec { system: prompt::SYSTEM.to_string(), max_steps, tools: tool_defs };
+    let system = if options.planning { format!("{}{}", prompt::SYSTEM, planning::NOTE) } else { prompt::SYSTEM.to_string() };
+    let mut spec = harness::AgentSpec { system, max_steps, tools: tool_defs };
     let mut turn = harness::Turn::new(history, cancel, tx, mcp, ev);
     turn.budget = options.budget;
     turn.session = options.session;
     turn.context_limit = options.context_limit;
     turn.files = options.files;
+    turn.planning.store(options.planning, Ordering::Relaxed);
     let error = harness::run_loop(&provider, &mut spec, &mut turn, &mut checks::SelfChecks::default());
     turn.save();
     let _ = turn.ev.send(Event::Finished { history: turn.history, error });
@@ -468,6 +480,7 @@ struct RunOptions {
     session: Option<session::SessionWriter>,
     context_limit: u64,
     files: Option<std::path::PathBuf>,
+    planning: bool,
 }
 
 fn pump_events(mut agent: ResMut<Agent>) {
@@ -504,6 +517,7 @@ fn pump_events(mut agent: ResMut<Agent>) {
                 total.cached += usage.cached;
                 total.output += usage.output;
             }
+            Event::PlanApproved => agent.plan_mode = false,
             Event::Question(q) => {
                 agent.questions.push(q);
                 let idx = agent.questions.len() - 1;

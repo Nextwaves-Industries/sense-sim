@@ -55,11 +55,17 @@ pub struct CallCtx {
     pub origin: Origin,
     pub log: Option<TurnLog>,
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Plan mode: while set, nothing may change. Shared, so approving lifts it mid-run.
+    pub planning: Option<Arc<AtomicBool>>,
 }
 
 impl CallCtx {
     pub fn harness(cancel: Arc<AtomicBool>) -> Self {
-        Self { origin: Origin::Harness, log: None, cancel: Some(cancel) }
+        Self { origin: Origin::Harness, log: None, cancel: Some(cancel), planning: None }
+    }
+
+    pub fn planning(&self) -> bool {
+        self.planning.as_ref().is_some_and(|p| p.load(Ordering::Relaxed))
     }
 
     pub fn cancelled(&self) -> bool {
@@ -97,7 +103,7 @@ pub enum Class {
 /// Tools that exist only inside the assistant's own loop. The MCP port has no login, and a macro
 /// runs unattended, so neither may reach them.
 pub fn agent_only(name: &str) -> bool {
-    super::workspace::is_tool(name) || matches!(name, "python_run" | "delegate" | "open_layout_tab" | "open_in_design")
+    super::workspace::is_tool(name) || matches!(name, "python_run" | "delegate" | "open_layout_tab" | "open_in_design" | "propose_plan")
 }
 
 /// What a tool does, ignoring where it writes. Input matters for a few that do different things.
@@ -108,7 +114,7 @@ pub fn class_of(name: &str, input: &Value) -> Class {
     }
     match name {
         // Control and lookups.
-        "ask_user" | "update_plan" | "get_screen" | "read_file" | "list_files" | "open_file" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
+        "ask_user" | "update_plan" | "get_screen" | "propose_plan" | "read_file" | "list_files" | "open_file" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
         | "search_knowledge" | "read_knowledge" | "list_knowledge" | "design_commands" | "design_bodies" | "design_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
         | "sim_results" | "sim_probe" | "plant_list_ports" | "plant_status" | "outcomes_ledger" | "site_material_ranges" | "rtls_list_regions" | "rtls_list_profiles" | "rtls_list_devices" | "rtls_status"
         | "rtls_coverage" | "antenna_assess" | "antenna_calc" | "antenna_sweep_results" | "antenna_converge_results" | "antenna_yield_results" | "antenna_gate_results" | "antenna_list_samples"
@@ -260,6 +266,11 @@ pub fn decide(name: &str, input: &Value, ctx: &CallCtx, policy: &Policy) -> Verd
     let folder = touched.map(|w| Path::new(w).parent().unwrap_or(Path::new(w)).to_string_lossy().to_lowercase());
     if touched.is_some() && matches!(class, Class::Project | Class::Read) {
         class = Class::Files;
+    }
+
+    // Reading elsewhere still only asks. Everything else that isn't looking waits for the plan.
+    if ctx.planning() && !matches!(class, Class::Read | Class::View | Class::Macro) && !(class == Class::Files && written.is_none()) {
+        return Verdict::Refuse(format!("Plan mode is on, so {name} can't run yet. Put it in your plan with propose_plan, and it can run once the user approves."));
     }
 
     let (asks, text, remember) = match class {
@@ -451,9 +462,36 @@ mod tests {
         assert!(refused(&decide("outcomes_check", &json!({ "measured": 1.0 }), &ctx, &p)));
     }
 
+    /// Enforced here, so plan mode doesn't rest on the model behaving.
+    #[test]
+    fn plan_mode_lets_it_look_but_not_touch() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let ctx = CallCtx { planning: Some(flag.clone()), ..Default::default() };
+        let roots = [workspace_root()];
+        let no = HashSet::new();
+        let p = Policy { mode: Mode::All, approved: &no, roots: &roots, external: false };
+        for name in ["get_scene", "search_knowledge", "antenna_calc", "get_screen", "screenshot", "set_camera", "propose_plan", "custom_shelf"] {
+            assert_eq!(decide(name, &json!({}), &ctx, &p), Verdict::Run, "{name} only looks");
+        }
+        for name in ["place_objects", "antenna_set", "antenna_run", "sim_run", "define_tool", "write_file", "open_external", "rtls_configure_outputs", "outcomes_check", "something_new"] {
+            assert!(refused(&decide(name, &json!({}), &ctx, &p)), "{name} would change something");
+        }
+        assert!(refused(&decide("save_layout", &json!({ "path": r"C:\x\a.json" }), &ctx, &p)), "writing elsewhere");
+        // An external tool could do anything.
+        let ext = Policy { mode: Mode::All, approved: &no, roots: &roots, external: true };
+        assert!(refused(&decide("github__create_issue", &json!({}), &ctx, &ext)));
+        // Reading outside the project still follows the mode, as it does outside plan mode.
+        let edits = Policy { mode: Mode::Edits, approved: &no, roots: &roots, external: false };
+        assert!(asks(&decide("read_file", &json!({ "path": r"C:\x\a.csv" }), &ctx, &edits)));
+
+        // Approving lifts it at once, for calls already under way.
+        flag.store(false, Ordering::Relaxed);
+        assert_eq!(decide("place_objects", &json!({}), &ctx, &p), Verdict::Run);
+    }
+
     #[test]
     fn the_assistants_own_tools_are_out_of_reach_of_mcp_and_macros() {
-        for name in ["read_file", "list_files", "write_file", "open_file", "open_external", "python_run", "delegate", "open_layout_tab", "open_in_design"] {
+        for name in ["read_file", "list_files", "write_file", "open_file", "open_external", "python_run", "delegate", "open_layout_tab", "open_in_design", "propose_plan"] {
             assert!(agent_only(name), "{name}");
             assert!(refused(&verdict(name, json!({}), Origin::Mcp, Mode::All)), "{name}");
         }

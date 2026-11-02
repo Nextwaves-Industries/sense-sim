@@ -184,7 +184,7 @@ fn macro_steps_inherit_who_asked() {
     });
     let log = TurnLog::default();
     let (name, input) = a_macro();
-    let out = toolmaker::run(&name, &input, tx, CallCtx { origin: Origin::Mcp, log: Some(log.clone()), cancel: None });
+    let out = toolmaker::run(&name, &input, tx, CallCtx { origin: Origin::Mcp, log: Some(log.clone()), ..Default::default() });
     assert!(!out.is_error, "{}", out.summary());
     let origins = seen.join().unwrap();
     assert!(!origins.is_empty());

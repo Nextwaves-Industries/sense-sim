@@ -154,7 +154,7 @@ fn run(case: Case) -> String {
             // Ids come from a process-wide counter.
             Event::Image(_) => "  image".to_string(),
             // Only sent when a reply carries usage, or a budget runs out. These cases do neither.
-            Event::Usage { .. } | Event::Question(_) => unreachable!("not in these cases"),
+            Event::Usage { .. } | Event::Question(_) | Event::PlanApproved => unreachable!("not in these cases"),
             Event::Finished { history, error } => {
                 let mut s = format!("  finished error={error:?}");
                 for m in &history {

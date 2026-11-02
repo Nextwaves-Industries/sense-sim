@@ -15,7 +15,7 @@ use super::gate::{CallCtx, Origin};
 use super::llm::{Block, Message, Provider, ToolDef};
 use super::session::SessionWriter;
 use super::tools::{self, ToolJob, ToolOutput};
-use super::{Event, Question, images, toolmaker, workspace};
+use super::{Event, Question, images, planning, toolmaker, workspace};
 use crate::mcp::client::McpHub;
 
 /// Who made a tool call.
@@ -100,12 +100,14 @@ pub(super) struct Turn {
     pub context_limit: u64,
     /// The chat's working folder.
     pub files: Option<PathBuf>,
+    /// Plan mode: nothing may change while this is set. Approving a plan clears it.
+    pub planning: Arc<AtomicBool>,
     save_warned: bool,
 }
 
 impl Turn {
     pub fn new(history: Vec<Message>, cancel: Arc<AtomicBool>, tx: Sender<ToolJob>, mcp: Arc<McpHub>, ev: Sender<Event>) -> Self {
-        Self { history, log: TurnLog::default(), cancel, tx, mcp, ev, budget: Arc::default(), session: None, context_used: None, context_limit: 0, files: None, save_warned: false }
+        Self { history, log: TurnLog::default(), cancel, tx, mcp, ev, budget: Arc::default(), session: None, context_used: None, context_limit: 0, files: None, planning: Arc::default(), save_warned: false }
     }
 
     /// Writes what's final. Called between rounds, so no unanswered tool call reaches the disk.
@@ -257,13 +259,17 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
         let tools_changed = uses.iter().any(|(_, n, _)| n == "define_tool" || n == "delete_tool");
         checks.before_tools(&uses.iter().map(|(_, n, _)| n.as_str()).collect::<Vec<_>>());
 
-        let (tx, mcp, cancel, ev, log, files) = (&turn.tx, &turn.mcp, &turn.cancel, &turn.ev, &turn.log, &turn.files);
+        let (tx, mcp, cancel, ev, log, files, plan_flag) = (&turn.tx, &turn.mcp, &turn.cancel, &turn.ev, &turn.log, &turn.files, &turn.planning);
+        let shared_turn = &*turn;
         // Everything goes through the bridge, where the gate is: external tools too.
         let run = |name: &str, input: &Value| {
             if cancel.load(Ordering::Relaxed) {
                 ToolOutput::err("cancelled by the user")
             } else {
-                let ctx = CallCtx { origin: Origin::Assistant, log: Some(log.clone()), cancel: Some(cancel.clone()) };
+                if name == planning::TOOL {
+                    return planning::ask(input, shared_turn);
+                }
+                let ctx = CallCtx { origin: Origin::Assistant, log: Some(log.clone()), cancel: Some(cancel.clone()), planning: Some(plan_flag.clone()) };
                 match files.as_deref().filter(|_| workspace::is_tool(name)) {
                     // These run here, not on the app's main thread, once the gate has agreed.
                     Some(files) => {
@@ -448,6 +454,95 @@ mod tests {
         let (turn, _, _) = run(s.clone(), Limits::default(), 0, None);
         assert_eq!(turn.history.len(), 4);
         assert_eq!(s.seen.lock().unwrap().len(), 2);
+    }
+
+    /// Runs a plan-mode conversation: the model proposes, and `answer` decides.
+    fn plan_run(answer: &'static str) -> (Arc<Script>, Turn, Vec<(String, bool)>) {
+        let plan = json!({ "summary": "Add a panel", "steps": ["Place it", "Check it"] });
+        let propose = Message { role: Role::Assistant, content: vec![Block::ToolUse { id: "p".into(), name: planning::TOOL.into(), input: plan }], raw: None, usage: None };
+        let s = script(vec![propose, tool("after"), text("done")], Usage::default());
+        let (tx, jobs) = unbounded::<ToolJob>();
+        let (seen_tx, seen_rx) = unbounded();
+        std::thread::spawn(move || {
+            for job in jobs {
+                let _ = seen_tx.send((job.name.clone(), job.ctx.planning()));
+                let _ = job.reply.send(ToolOutput::text("{}"));
+            }
+        });
+        let (ev, events) = unbounded();
+        std::thread::spawn(move || {
+            for e in events {
+                if let Event::Question(mut q) = e {
+                    q.answer(answer.to_string());
+                }
+            }
+        });
+        let provider: Arc<dyn Provider> = s.clone();
+        let mut turn = Turn::new(vec![Message::user(vec![Block::Text("add a reader panel".into())])], Arc::default(), tx, Arc::new(McpHub::default()), ev);
+        turn.planning.store(true, Ordering::Relaxed);
+        let mut spec = AgentSpec { system: "main".into(), max_steps: 20, tools: Vec::new() };
+        run_loop(&provider, &mut spec, &mut turn, &mut NoChecks);
+        let jobs: Vec<(String, bool)> = seen_rx.try_iter().collect();
+        (s, turn, jobs)
+    }
+
+    fn plan_result(turn: &Turn) -> (String, bool) {
+        turn.history.iter().flat_map(|m| &m.content).find_map(|b| match b {
+            Block::ToolResult { id, content, is_error } if id == "p" => Some((content.iter().map(|c| if let Block::Text(t) = c { t.clone() } else { String::new() }).collect(), *is_error)),
+            _ => None,
+        }).expect("the plan got an answer")
+    }
+
+    #[test]
+    fn approving_a_plan_lifts_plan_mode_and_seeds_the_checklist() {
+        let (_, turn, jobs) = plan_run(planning::APPROVE);
+        assert!(!turn.planning.load(Ordering::Relaxed));
+        let (said, failed) = plan_result(&turn);
+        assert!(!failed && said.contains("approved"), "{said}");
+        assert_eq!(jobs[0].0, "update_plan", "the checklist comes from the approved plan");
+        let later = jobs.iter().find(|(n, _)| n == "get_scene").expect("the model went on to work");
+        assert!(!later.1, "its calls are no longer held back");
+    }
+
+    #[test]
+    fn cancelling_keeps_plan_mode_and_says_to_stop() {
+        let (_, turn, jobs) = plan_run("Cancel");
+        assert!(turn.planning.load(Ordering::Relaxed), "nothing may change after a cancel");
+        let (said, failed) = plan_result(&turn);
+        assert!(failed && said.contains("nothing changes"), "{said}");
+        assert!(jobs.iter().all(|(_, planning)| *planning), "{jobs:?}");
+        assert!(!jobs.iter().any(|(n, _)| n == "update_plan"), "no checklist for a plan nobody approved");
+    }
+
+    #[test]
+    fn typing_asks_for_changes_and_is_never_consent() {
+        for words in ["use the EU band instead", "approve", "yes", "Approve and start please"] {
+            let (_, turn, _) = plan_run(Box::leak(words.to_string().into_boxed_str()));
+            assert!(turn.planning.load(Ordering::Relaxed), "{words}");
+            let (said, failed) = plan_result(&turn);
+            assert!(failed && said.contains(words) && said.contains("Revise"), "{words}: {said}");
+        }
+    }
+
+    #[test]
+    fn a_plan_with_no_steps_goes_back_without_troubling_the_user() {
+        let (ev, events) = unbounded();
+        let (tx, _jobs) = unbounded::<ToolJob>();
+        let turn = Turn::new(Vec::new(), Arc::default(), tx, Arc::new(McpHub::default()), ev);
+        let out = planning::ask(&json!({ "summary": "vague" }), &turn);
+        assert!(out.is_error);
+        assert!(events.try_recv().is_err(), "no card for that");
+    }
+
+    #[test]
+    fn stop_ends_the_wait_for_a_plan_and_nothing_is_approved() {
+        let (ev, _events) = unbounded();
+        let (tx, _jobs) = unbounded::<ToolJob>();
+        let turn = Turn::new(Vec::new(), Arc::new(AtomicBool::new(true)), tx, Arc::new(McpHub::default()), ev);
+        turn.planning.store(true, Ordering::Relaxed);
+        let out = planning::ask(&json!({ "summary": "s", "steps": ["a"] }), &turn);
+        assert!(out.is_error);
+        assert!(turn.planning.load(Ordering::Relaxed));
     }
 
     #[test]

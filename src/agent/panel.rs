@@ -542,6 +542,15 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
             {
                 agent.attach_file(&p);
             }
+            // Blue means act, so it's plain until on. Takes effect from the next message.
+            let (fill, ink) = if agent.plan_mode { (theme::ACCENT, theme::ON_ACCENT) } else { (theme::RAISED, theme::WEAK) };
+            if ui
+                .add(egui::Button::new(RichText::new(format!("{} Plan", icon::NOTE_PENCIL)).small().color(ink)).fill(fill).corner_radius(10))
+                .on_hover_text("Plan first: the assistant looks and proposes, and changes nothing until you approve")
+                .clicked()
+            {
+                agent.plan_mode = !agent.plan_mode;
+            }
             let p = agent.config.provider();
             let chip = format!("{} · {}", p.kind.label(), p.effective_model());
             if ui
