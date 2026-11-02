@@ -9,6 +9,7 @@
 //! What a device *is* comes from the service. Where it *stands* belongs to the layout, in
 //! [`TwinScene`], because a scan can't tell.
 
+mod lines;
 mod persist;
 mod source;
 mod ui;
@@ -35,6 +36,8 @@ pub const DEMO_SIZES: [usize; 3] = [60, 500, 5000];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum TwinPage {
+    Lines,
+    /// Where the workbench opens: a real plant has devices long before anyone defines its lines.
     #[default]
     Devices,
     Events,
@@ -61,11 +64,13 @@ pub struct TwinSlot {
     pub suspect: usize,
     pub stale: usize,
     pub events: usize,
+    pub lines: usize,
+    pub lines_health: theme::Dot,
 }
 
 impl Default for TwinSlot {
     fn default() -> Self {
-        Self { open: true, page: TwinPage::default(), rect: None, labels: true, requests: Vec::new(), status: LinkStatus::default(), total: 0, down: 0, suspect: 0, stale: 0, events: 0 }
+        Self { open: true, page: TwinPage::default(), rect: None, labels: true, requests: Vec::new(), status: LinkStatus::default(), total: 0, down: 0, suspect: 0, stale: 0, events: 0, lines: 0, lines_health: theme::Dot::Optional }
     }
 }
 
@@ -130,6 +135,7 @@ pub struct TwinInventory {
     /// Goes up whenever the device list or the connection changes.
     pub generation: u64,
     pub counts: Counts,
+    pub lines: lines::LineTally,
 }
 
 impl TwinInventory {
@@ -162,6 +168,7 @@ impl TwinInventory {
             *counts.by_vendor.entry(vendor.to_string()).or_default() += 1;
         }
         self.counts = counts;
+        self.lines = lines::LineTally::of(self);
     }
 }
 
@@ -218,6 +225,8 @@ fn pump_link(
     twin.suspect = counts.suspect;
     twin.stale = counts.stale;
     twin.events = inventory.mirror.events.len();
+    twin.lines = inventory.lines.total;
+    twin.lines_health = inventory.lines.health();
 }
 
 pub struct TwinPlugin;

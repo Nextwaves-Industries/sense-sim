@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn messages_round_trip() {
         let mut wire = Vec::new();
-        let sent = Request::Sync { since: Some(Cursor { epoch: 1, rev: 2, seq: 3 }) };
+        let sent = Request::Sync { since: Some(Cursor { epoch: 1, rev: 2, seq: 3, line_rev: 4 }) };
         write_frame(&mut wire, &sent).unwrap();
         write_frame(&mut wire, &Request::Hello { protocol: PROTOCOL_VERSION }).unwrap();
 

@@ -710,7 +710,7 @@ fn seq_comes_back_from_the_journal_when_the_inventory_lags() {
     let twin = Twin::start(&unique_pipe(), &["--data-dir", data.arg()]);
     let mut client = twin.client();
     let reply = client.sync(None).unwrap();
-    assert_eq!(reply.cursor, Cursor { epoch: 42, rev: 2, seq: 40 });
+    assert_eq!(reply.cursor, Cursor { epoch: 42, rev: 2, seq: 40, line_rev: 0 });
     assert_eq!(reply.events.len(), 40, "recent events are restored");
     drop(client);
     twin.stop();

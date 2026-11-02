@@ -318,6 +318,7 @@ impl UiState {
                     _ => {}
                 }
                 continue;
+                    "lines" => slot.twin.page = TwinPage::Lines,
             }
             if let Some(page) = name.strip_prefix("antenna-") {
                 slot.studio_goto.push(page.to_string());

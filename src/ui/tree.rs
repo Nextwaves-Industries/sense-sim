@@ -202,6 +202,7 @@ fn page_rows(ui: &mut egui::Ui, w: f32, bench: Workbench, slot: &mut LeftPanelSl
         }
     }
 }
+        (TwinPage::Lines, "Lines", icon::FLOW_ARROW, twin.lines_health, lines.as_str()),
 
 /// The Factory card's pages, with how the plant is doing at a glance.
 fn factory_rows(ui: &mut egui::Ui, w: f32, slot: &mut LeftPanelSlot) {
@@ -214,7 +215,7 @@ fn factory_rows(ui: &mut egui::Ui, w: f32, slot: &mut LeftPanelSlot) {
         LinkStatus::Lost(_) => Dot::Todo,
         LinkStatus::NoService => Dot::Optional,
     };
-    let (devices, events) = (twin.total.to_string(), twin.events.to_string());
+    let (lines, devices, events) = (twin.lines.to_string(), twin.total.to_string(), twin.events.to_string());
     let rows = [
         (TwinPage::Devices, "Devices", icon::LIST_BULLETS, health, devices.as_str()),
         (TwinPage::Events, "Events", icon::PULSE, Dot::Optional, events.as_str()),

@@ -7,6 +7,7 @@ use bevy_egui::EguiContexts;
 use bevy_egui::egui::{self, Align2, Margin, RichText, vec2};
 use twin_proto::model::{Coverage, Device, DeviceClass, DeviceId, Event, Liveness, Severity};
 
+use super::lines::{LineList, lines_page};
 use super::yard::Yard;
 use super::{DEMO_SIZES, LinkStatus, TwinInventory, TwinMarker, TwinPage, TwinRequest, TwinScene, TwinSelection};
 use crate::scene::OrbitCamera;
@@ -113,7 +114,7 @@ impl ListState {
     }
 }
 
-fn problem_rank(liveness: Liveness) -> u8 {
+pub(super) fn problem_rank(liveness: Liveness) -> u8 {
     match liveness {
         Liveness::Down => 0,
         Liveness::Suspect => 1,
@@ -130,9 +131,9 @@ fn matches_filter(device: &Device, needle: &str) -> bool {
 
 /// What the Factory card asked for this frame.
 #[derive(Default)]
-struct Asked {
-    select: Option<DeviceId>,
-    focus: Option<DeviceId>,
+pub(super) struct Asked {
+    pub(super) select: Option<DeviceId>,
+    pub(super) focus: Option<DeviceId>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -148,6 +149,7 @@ pub fn twin_ui(
     yard: Res<Yard>,
     markers: Query<(&TwinMarker, &Transform)>,
     mut list: Local<ListState>,
+    mut line_list: Local<LineList>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     if hide.0 > 0 || slot.canvas_taken() || slot.bench.current != Workbench::Factory {
@@ -160,6 +162,7 @@ pub fn twin_ui(
         egui::Area::new(egui::Id::new("twin_card")).order(egui::Order::Middle).fixed_pos(rect.min).show(&ctx, |ui| {
             theme::fixed_card(ui, rect.width(), rect.height(), |ui| {
                 let title = match slot.twin.page {
+                    TwinPage::Lines => "Production lines",
                     TwinPage::Devices => "Factory devices",
                     TwinPage::Events => "Factory events",
                     TwinPage::Connection => "Connection",
@@ -175,6 +178,7 @@ pub fn twin_ui(
                     slot.twin.open = false;
                 }
                 match slot.twin.page {
+                    TwinPage::Lines => lines_page(ui, &inventory, &selection, &mut line_list, &mut asked, &mut slot),
                     TwinPage::Devices => devices_page(ui, &inventory, &selection, &mut list, &mut asked, &mut slot),
                     TwinPage::Events => events_page(ui, &inventory, &mut asked),
                     TwinPage::Connection => connection_page(ui, &inventory, &mut slot),

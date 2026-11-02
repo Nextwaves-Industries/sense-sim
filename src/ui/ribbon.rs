@@ -313,6 +313,9 @@ fn factory_tools(ui: &mut egui::Ui, slot: &mut LeftPanelSlot) {
     let twin = &mut slot.twin;
 
     theme::ribbon_caption(ui, "Plant");
+    if theme::ribbon_button(ui, icon::FLOW_ARROW, "Lines", true, twin.open && twin.page == TwinPage::Lines, "Each production line as a pipeline of its machines: plan, made and cycle time").clicked() {
+        twin.toggle_page(TwinPage::Lines);
+    }
     if theme::ribbon_button(ui, icon::LIST_BULLETS, "Devices", true, twin.open && twin.page == TwinPage::Devices, "How many machines, PLCs and sensors are on the network, and how they are doing").clicked() {
         twin.toggle_page(TwinPage::Devices);
     }

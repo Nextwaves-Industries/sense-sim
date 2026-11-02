@@ -129,7 +129,7 @@ fn run(pipe: &str, commands: &Receiver<Command>, updates: &Sender<Update>) {
         match reply {
             Ok(reply) => {
                 cursor = Some(reply.cursor);
-                if reply.full || !reply.changed.is_empty() || !reply.events.is_empty() {
+                if reply.full || !reply.changed.is_empty() || !reply.lines.is_empty() || !reply.events.is_empty() {
                     let _ = updates.send(Update::Sync(reply));
                 }
             }
