@@ -1,0 +1,14 @@
+[package]
+name = "console"
+version = "0.1.0"
+edition = "2024"
+description = "Operator console: scan setup, enrolment, device commands, hook editing"
+publish = false
+
+[[bin]]
+name = "SenseConsole"
+path = "src/main.rs"
+
+[dependencies]
+twin_proto = { path = "../twin_proto" }
+twin_control_proto = { path = "../twin_control_proto" }

@@ -1,0 +1,13 @@
+[package]
+name = "twin_mock"
+version = "0.1.0"
+edition = "2024"
+description = "Fake devices for automated tests. Never ships and only listens on loopback"
+publish = false
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Default features pull aws-lc-rs, which needs cmake and nasm.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+httparse = "1"
+serde_json = "1"

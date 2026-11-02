@@ -10,7 +10,19 @@ path = "src/main.rs"
 
 [workspace]
 exclude = ["third_party"]
-members = ["crates/sim-core", "crates/antenna_core", "crates/proof", "crates/ifc"]
+members = [
+    "crates/sim-core",
+    "crates/antenna_core",
+    "crates/proof",
+    "crates/ifc",
+    "crates/twin_proto",
+    "crates/twin_control_proto",
+    "crates/twin_probes",
+    "crates/twin_mock",
+    "crates/twind",
+    "crates/console",
+    "crates/collector",
+]
 
 [[example]]
 name = "design_host"

@@ -1,0 +1,9 @@
+[package]
+name = "twin_probes"
+version = "0.1.0"
+edition = "2024"
+description = "Discovery probes and fingerprint catalog, shared by the twin service and the collector"
+publish = false
+
+[dependencies]
+twin_proto = { path = "../twin_proto" }
