@@ -1,0 +1,6 @@
+[package]
+name = "twin_control_proto"
+version = "0.1.0"
+edition = "2024"
+description = "Device command messages, for the twin service and the operator console only"
+publish = false

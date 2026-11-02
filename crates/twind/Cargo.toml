@@ -1,0 +1,26 @@
+[package]
+name = "twind"
+version = "0.1.0"
+edition = "2024"
+description = "Sense Twin service: everything that talks to real devices lives here"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "SenseTwin"
+path = "src/main.rs"
+
+[dependencies]
+twin_proto = { path = "../twin_proto" }
+twin_control_proto = { path = "../twin_control_proto" }
+# Default features pull aws-lc-rs, which needs cmake and nasm. ring already builds here via ureq.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.11"
+x509-parser = "0.18"
+httparse = "1"
+serde_json = "1"
+
+[dev-dependencies]
+twin_mock = { path = "../twin_mock" }

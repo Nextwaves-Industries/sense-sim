@@ -1,0 +1,9 @@
+[package]
+name = "twin_proto"
+version = "0.1.0"
+edition = "2024"
+description = "Read-only data shared by the twin service, the collector and the viewer"
+publish = false
+
+[dev-dependencies]
+toml = "1"

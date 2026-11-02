@@ -1,0 +1,14 @@
+[package]
+name = "collector"
+version = "0.1.0"
+edition = "2024"
+description = "Plant PC inventory and own-segment discovery. Contains no device command code"
+publish = false
+
+[[bin]]
+name = "SenseCollector"
+path = "src/main.rs"
+
+[dependencies]
+twin_proto = { path = "../twin_proto" }
+twin_probes = { path = "../twin_probes" }
