@@ -559,6 +559,11 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
             json!({ "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }),
         ),
     ];
+    v.push(def(
+        "get_screen",
+        "What the user has on screen right now: workbench, open card or workspace, scene, selection, the tool they're using, what is running, and what they did lately. Their message already says this as it stood when they sent it; call this during a long task, when they may have moved on.",
+        json!({ "type": "object", "properties": {} }),
+    ));
     if mcp {
         v.push(def(
             "load_reference_image",
@@ -1468,6 +1473,10 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
                 ToolOutput::text(format!("writing {}", p.display()))
             }
             None => ToolOutput::err("path is required"),
+        },
+        "get_screen" => match world.resource::<Agent>().screen_note() {
+            Some(note) => ToolOutput::text(note),
+            None => ToolOutput::text("The user has turned off sharing what is on screen. Ask them if you need to know."),
         },
         "load_reference_image" => match images::load_file(Path::new(i["path"].as_str().unwrap_or(""))) {
             Ok((id, data, mime)) => ToolOutput {

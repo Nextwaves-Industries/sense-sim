@@ -659,6 +659,9 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
         theme::setting_row(ui, "Max steps", "Model calls per request before it stops", |ui| {
             changed |= ui.add(egui::DragValue::new(&mut cfg.max_steps).range(5..=300)).lost_focus();
         });
+        theme::setting_row(ui, "Share what's on screen", "Workbench, open card, selection and recent actions go with each message", |ui| {
+            changed |= theme::toggle_switch(ui, &mut cfg.share_screen).changed();
+        });
         theme::setting_row(ui, "Approvals", "What the assistant may do without asking", |ui| {
             egui::ComboBox::from_id_salt("approval").selected_text(cfg.approval.label()).width(280.0).show_ui(ui, |ui| {
                 for m in super::gate::Mode::ALL {

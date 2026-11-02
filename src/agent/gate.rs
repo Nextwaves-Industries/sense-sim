@@ -100,7 +100,7 @@ pub fn class_of(name: &str, input: &Value) -> Class {
     }
     match name {
         // Control and lookups.
-        "ask_user" | "update_plan" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
+        "ask_user" | "update_plan" | "get_screen" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
         | "search_knowledge" | "read_knowledge" | "list_knowledge" | "design_commands" | "design_bodies" | "design_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
         | "sim_results" | "sim_probe" | "plant_list_ports" | "plant_status" | "outcomes_ledger" | "site_material_ranges" | "rtls_list_regions" | "rtls_list_profiles" | "rtls_list_devices" | "rtls_status"
         | "rtls_coverage" | "antenna_assess" | "antenna_calc" | "antenna_sweep_results" | "antenna_converge_results" | "antenna_yield_results" | "antenna_gate_results" | "antenna_list_samples"

@@ -164,6 +164,9 @@ pub struct AgentConfig {
     /// Attach clearly relevant knowledge base passages to each message.
     #[serde(default = "yes")]
     pub knowledge_auto: bool,
+    /// Tell the model which screen the user is on and what they have selected.
+    #[serde(default = "yes")]
+    pub share_screen: bool,
 }
 
 fn default_effort() -> String {
@@ -192,6 +195,7 @@ impl Default for AgentConfig {
             max_steps: default_steps(),
             approval: Default::default(),
             knowledge_auto: true,
+            share_screen: true,
         }
     }
 }

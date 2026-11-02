@@ -369,6 +369,71 @@ fn pick_layout_save(scene_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new().add_filter("Layout", &["json"]).set_file_name(file).save_file()
 }
 
+/// How the app stands, for the assistant, which can't see these panels.
+#[allow(clippy::too_many_arguments)]
+fn what_is_on_screen(
+    slot: &LeftPanelSlot,
+    rtls: &crate::rtls::ui::RtlsUiState,
+    state: &UiState,
+    place: &PlaceMode,
+    walls: &crate::wall_tool::WallTool,
+    device_place: &crate::rtls::DevicePlace,
+    selection: &Selection,
+    objects: &ObjectQuery,
+    object_count: usize,
+    unsaved: bool,
+    edits: u64,
+) -> crate::agent::screen::Screen {
+    let name_of = |e: Entity| objects.get(e).ok().map(|(_, o, _, _)| o.name.clone());
+    let mut selected: Vec<String> = selection.selected.and_then(name_of).into_iter().collect();
+    selected.extend(selection.group.iter().filter(|e| Some(**e) != selection.selected).filter_map(|e| name_of(*e)));
+
+    #[cfg(feature = "antenna-studio")]
+    let studio_view = || format!("Antenna Studio, the {:?} page", slot.studio_page);
+    #[cfg(not(feature = "antenna-studio"))]
+    let studio_view = || "Antenna Studio".to_string();
+    let view = if slot.studio_open {
+        Some(studio_view())
+    } else if slot.design_open {
+        Some("the 3D Design workspace".to_string())
+    } else if slot.rtls_open {
+        Some(format!("the {} card", rtls.local.page().title()))
+    } else {
+        None
+    };
+    let project = if slot.studio_open {
+        Some(slot.studio_doc.name.clone()).filter(|n| !n.is_empty())
+    } else if slot.design_open {
+        slot.design_info.designs.get(slot.design_info.active).map(|(name, _)| name.clone())
+    } else {
+        None
+    };
+    let tool = if walls.active {
+        Some("drawing walls".to_string())
+    } else if let Some(asset) = &place.asset {
+        Some(format!("placing {}", asset.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "an asset".into())))
+    } else if let Some(profile) = &device_place.profile {
+        Some(format!("placing {profile} devices"))
+    } else if device_place.waypoints_for.is_some() {
+        Some("adding path waypoints to a tag".to_string())
+    } else {
+        None
+    };
+    crate::agent::screen::Screen {
+        workbench: slot.bench.current.name().to_string(),
+        view,
+        project,
+        scene: state.scene_name.clone(),
+        file: state.layout_path.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().to_string()),
+        unsaved,
+        objects: object_count,
+        selected,
+        tool,
+        jobs: slot.jobs.iter().map(|j| if j.progress >= 0.0 { format!("{} {:.0}%", j.text, j.progress * 100.0) } else { j.text.clone() }).collect(),
+        edits,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn ui_system(
     mut contexts: EguiContexts,
@@ -574,6 +639,8 @@ pub fn ui_system(
     let unsaved = undo_stack.dirty() || (state.layout_path.is_none() && object_count > 0);
     tabs.mirror(&state.scene_name, state.layout_path.as_ref(), unsaved);
     agent.project_dir = state.layout_path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+    let on_screen = what_is_on_screen(&slot, &rtls, &state, &place, &walls, &device_place, &selection, &objects, object_count, unsaved, undo_stack.revision());
+    agent.observe_screen(on_screen);
     let selected_name = selection.selected.and_then(|e| objects.get(e).ok()).map(|(_, o, _, _)| o.name.clone());
     let selected_more = selection.group.iter().filter(|e| Some(**e) != selection.selected).count();
     // Nothing of the scene is drawn while a workspace has the canvas, so "0 of N triangles" would only mislead.

@@ -16,6 +16,7 @@ pub mod panel;
 pub mod photocheck;
 pub mod placer;
 pub mod prompt;
+pub mod screen;
 pub mod structures;
 pub mod toolmaker;
 pub mod tools;
@@ -113,6 +114,9 @@ pub struct Agent {
     pub approved: std::collections::HashSet<String>,
     /// The folder of the open layout, which counts as the project.
     pub project_dir: Option<std::path::PathBuf>,
+    /// What is on screen, mirrored from the UI.
+    screen: screen::Screen,
+    activity: screen::Activity,
 }
 
 impl Agent {
@@ -143,7 +147,22 @@ impl Agent {
             discard_run: false,
             approved: Default::default(),
             project_dir: None,
+            screen: Default::default(),
+            activity: Default::default(),
         }
+    }
+
+    /// The UI reports how it stands, every frame.
+    pub fn observe_screen(&mut self, now: screen::Screen) {
+        if now != self.screen {
+            self.activity.observe(&self.screen, &now, self.running, std::time::Instant::now());
+            self.screen = now;
+        }
+    }
+
+    /// What the model is told about the user's screen, unless they turned it off.
+    pub fn screen_note(&self) -> Option<String> {
+        self.config.share_screen.then(|| screen::describe(&self.screen, &self.activity, std::time::Instant::now()))
     }
 
     /// Fetches the active provider's model list in the background.
@@ -250,6 +269,10 @@ impl Agent {
         }
         let shown = if text.is_empty() { "Rebuild this scene with SimReady assets.".to_string() } else { text };
         content.push(Block::Text(shown.clone()));
+        // "This", "here" and "the selected one" mean nothing to the model without it.
+        if let Some(note) = self.screen_note() {
+            content.push(Block::Text(note));
+        }
         let context = if self.config.knowledge_auto { knowledge::auto_context(&shown) } else { None };
         self.transcript.push(ChatItem::User { text: shown, images: attachments });
         if let Some(c) = context {
@@ -517,6 +540,22 @@ mod lifecycle_tests {
         assert!(agent.transcript.is_empty(), "the old run wrote into the new chat");
         assert!(!agent.running, "Send has to work again");
         assert!(!agent.discard_run);
+    }
+
+    #[test]
+    fn the_screen_goes_with_a_message_unless_turned_off() {
+        let mut agent = Agent::new(AgentConfig::default());
+        let screen = screen::Screen { workbench: "Placement".into(), view: Some("the Deploy card".into()), selected: vec!["Anchor_2".into()], ..Default::default() };
+        agent.observe_screen(screen.clone());
+        let note = agent.screen_note().unwrap();
+        assert!(note.contains("Placement") && note.contains("Deploy") && note.contains("Anchor_2"), "{note}");
+
+        // What the user did since shows up too.
+        agent.observe_screen(screen::Screen { selected: vec!["Anchor_3".into()], ..screen });
+        assert!(agent.screen_note().unwrap().contains("selected Anchor_3"));
+
+        agent.config.share_screen = false;
+        assert!(agent.screen_note().is_none());
     }
 
     #[test]

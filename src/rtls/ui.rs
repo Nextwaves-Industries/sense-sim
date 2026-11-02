@@ -58,7 +58,7 @@ pub enum Page {
 }
 
 impl Page {
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             Page::Deploy => "Deploy",
             Page::Test => "Test live",

@@ -50,6 +50,10 @@ impl UndoStack {
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
+    /// Counts edits, for noticing that one just happened.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     /// Changed since it was last saved or opened.
     pub fn dirty(&self) -> bool {
         self.revision != self.saved
