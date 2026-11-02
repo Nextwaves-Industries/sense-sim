@@ -25,7 +25,7 @@ fn world(mode: Mode) -> World {
 fn send(w: &World, ctx: CallCtx) -> Receiver<ToolOutput> {
     let (reply, rx) = unbounded();
     let input = json!({ "name": "no_such_tool_for_the_gate_test" });
-    w.resource::<ToolBridge>().tx.send(ToolJob { name: TOOL.into(), input, reply, ctx }).unwrap();
+    w.resource::<ToolBridge>().tx.send(ToolJob { name: TOOL.into(), input, reply, ctx, check_only: false }).unwrap();
     rx
 }
 

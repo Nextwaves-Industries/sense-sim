@@ -144,6 +144,12 @@ OpenEMS), or records a real measurement (`outcomes_check`, `site_survey_fit`, `s
 `site_acceptance_score`, drift tools, `design_fit_measured`), asks in every mode. MCP clients can't
 be asked, so those calls are refused for them.
 
+**Files.** Each chat has a working folder under `%LOCALAPPDATA%/SenseSim/agent`. `open_file` opens
+a file by type: a layout in a new tab, DXF or Gerber in Antenna Studio, STEP in 3D Design, IFC as a
+building, an image for the assistant to see. `open_external` shows a document, folder or web page in
+its own app; it can't run programs, and it asks first. Settings shows how much saved chats take up,
+and can clear them.
+
 **Long tasks.** A request stops and asks once it passes its budget (2M charged tokens, 600 model
 calls or 3 hours by default; set in gent.json). The panel shows tokens used, and a cost for models
 you give a price to under "prices" in gent.json. When a conversation nears the model's limit, old

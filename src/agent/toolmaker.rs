@@ -310,7 +310,7 @@ fn sample(p: &Value) -> Value {
 /// Tools a macro may never run. MCP clients can define and call macros, and a step isn't marked
 /// as coming from them, so without this a macro would reach what the MCP server refuses.
 fn barred_from_macros(tool: &str, input: &Value) -> bool {
-    tool.starts_with("twin_") || tool == "rtls_configure_outputs" || (tool == "rtls_openems" && input["action"] == "start")
+    tool.starts_with("twin_") || super::gate::agent_only(tool) || tool == "rtls_configure_outputs" || (tool == "rtls_openems" && input["action"] == "start")
 }
 
 /// Validates and saves a tool. Returns its callable name.

@@ -78,7 +78,7 @@ pub fn thousands(n: u64) -> String {
 }
 
 /// A provider that writes down what it spends.
-pub struct Metered {
+pub(super) struct Metered {
     pub inner: Arc<dyn Provider>,
     pub budget: Arc<Budget>,
     pub ev: Sender<Event>,

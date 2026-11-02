@@ -1,6 +1,7 @@
 //! The agent loop: ask the model, run the tools it asks for, and repeat until it stops and the
 //! checks let it. What may be called, and what must hold before stopping, come from outside.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,7 +15,7 @@ use super::gate::{CallCtx, Origin};
 use super::llm::{Block, Message, Provider, ToolDef};
 use super::session::SessionWriter;
 use super::tools::{self, ToolJob, ToolOutput};
-use super::{Event, Question, images, toolmaker};
+use super::{Event, Question, images, toolmaker, workspace};
 use crate::mcp::client::McpHub;
 
 /// Who made a tool call.
@@ -97,12 +98,14 @@ pub(super) struct Turn {
     pub context_used: Option<u64>,
     /// What the conversation has to fit in. 0: never compact.
     pub context_limit: u64,
+    /// The chat's working folder.
+    pub files: Option<PathBuf>,
     save_warned: bool,
 }
 
 impl Turn {
     pub fn new(history: Vec<Message>, cancel: Arc<AtomicBool>, tx: Sender<ToolJob>, mcp: Arc<McpHub>, ev: Sender<Event>) -> Self {
-        Self { history, log: TurnLog::default(), cancel, tx, mcp, ev, budget: Arc::default(), session: None, context_used: None, context_limit: 0, save_warned: false }
+        Self { history, log: TurnLog::default(), cancel, tx, mcp, ev, budget: Arc::default(), session: None, context_used: None, context_limit: 0, files: None, save_warned: false }
     }
 
     /// Writes what's final. Called between rounds, so no unanswered tool call reaches the disk.
@@ -254,13 +257,22 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
         let tools_changed = uses.iter().any(|(_, n, _)| n == "define_tool" || n == "delete_tool");
         checks.before_tools(&uses.iter().map(|(_, n, _)| n.as_str()).collect::<Vec<_>>());
 
-        let (tx, mcp, cancel, ev, log) = (&turn.tx, &turn.mcp, &turn.cancel, &turn.ev, &turn.log);
+        let (tx, mcp, cancel, ev, log, files) = (&turn.tx, &turn.mcp, &turn.cancel, &turn.ev, &turn.log, &turn.files);
         // Everything goes through the bridge, where the gate is: external tools too.
         let run = |name: &str, input: &Value| {
             if cancel.load(Ordering::Relaxed) {
                 ToolOutput::err("cancelled by the user")
             } else {
-                tools::call_ctx(tx, name, input.clone(), CallCtx { origin: Origin::Assistant, log: Some(log.clone()), cancel: Some(cancel.clone()) })
+                let ctx = CallCtx { origin: Origin::Assistant, log: Some(log.clone()), cancel: Some(cancel.clone()) };
+                match files.as_deref().filter(|_| workspace::is_tool(name)) {
+                    // These run here, not on the app's main thread, once the gate has agreed.
+                    Some(files) => {
+                        let input = workspace::resolve(input, files);
+                        let allowed = tools::gate_only(tx, name, input.clone(), ctx.clone());
+                        if allowed.is_error { allowed } else { workspace::run(name, &input, files, tx, &ctx) }
+                    }
+                    None => tools::call_ctx(tx, name, input.clone(), ctx),
+                }
             }
         };
         // Lookups, downloads and external MCP tools don't touch the scene:
@@ -287,7 +299,7 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
             for entry in log.unseen() {
                 checks.observe(&entry);
             }
-            if name == "perceive_photo" || name == "load_reference_image" {
+            if name == "perceive_photo" || name == "load_reference_image" || name == "open_file" {
                 for b in &out.content {
                     if let Block::Image { data, mime } = b {
                         let _ = ev.send(Event::Image(images::put(data.clone(), mime)));

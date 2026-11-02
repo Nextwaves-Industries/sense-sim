@@ -78,8 +78,10 @@ pub enum Class {
     View,
     /// Changes other project state: designs, studies, runs, saved tools, predictions.
     Project,
-    /// Writes a file outside the project and the workspace.
+    /// Writes or reads a file outside the project and the workspace.
     Files,
+    /// Shows something in another app on this computer.
+    OpensOutside,
     /// Aims the app at a real system outside it.
     Outside,
     /// Records something as a real measurement.
@@ -92,6 +94,12 @@ pub enum Class {
     Unknown,
 }
 
+/// Tools that exist only inside the assistant's own loop. The MCP port has no login, and a macro
+/// runs unattended, so neither may reach them.
+pub fn agent_only(name: &str) -> bool {
+    super::workspace::is_tool(name) || matches!(name, "python_run" | "delegate" | "open_layout_tab" | "open_in_design")
+}
+
 /// What a tool does, ignoring where it writes. Input matters for a few that do different things.
 pub fn class_of(name: &str, input: &Value) -> Class {
     use Class::*;
@@ -100,7 +108,7 @@ pub fn class_of(name: &str, input: &Value) -> Class {
     }
     match name {
         // Control and lookups.
-        "ask_user" | "update_plan" | "get_screen" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
+        "ask_user" | "update_plan" | "get_screen" | "read_file" | "list_files" | "open_file" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
         | "search_knowledge" | "read_knowledge" | "list_knowledge" | "design_commands" | "design_bodies" | "design_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
         | "sim_results" | "sim_probe" | "plant_list_ports" | "plant_status" | "outcomes_ledger" | "site_material_ranges" | "rtls_list_regions" | "rtls_list_profiles" | "rtls_list_devices" | "rtls_status"
         | "rtls_coverage" | "antenna_assess" | "antenna_calc" | "antenna_sweep_results" | "antenna_converge_results" | "antenna_yield_results" | "antenna_gate_results" | "antenna_list_samples"
@@ -122,13 +130,15 @@ pub fn class_of(name: &str, input: &Value) -> Class {
 
         "set_camera" | "frame_all" | "screenshot" | "compare_to_photo" | "design_show" | "antenna_reconfig_view" => View,
 
-        "download_assets" | "set_photo_layout" | "create_asset" | "define_tool" | "delete_tool" | "save_layout" | "export_usda" | "design_run" | "sim_study_create" | "sim_study_set" | "sim_run" | "sim_cancel"
+        "write_file" | "open_layout_tab" | "open_in_design" | "download_assets" | "set_photo_layout" | "create_asset" | "define_tool" | "delete_tool" | "save_layout" | "export_usda" | "design_run" | "sim_study_create" | "sim_study_set" | "sim_run" | "sim_cancel"
         | "plant_run" | "plant_define_port" | "design_uwb_bias" | "design_shelf" | "design_aoa" | "design_integrate" | "design_tag" | "design_coexist" | "design_field_yield" | "design_tunnel"
         | "design_medical_coexist" | "design_sar" | "site_survey_plan" | "site_trace" | "site_guess_materials" | "site_survey_clear" | "site_survey_practice" | "site_stress" | "site_set_material"
         | "site_conditions" | "site_erces" | "site_compare_tech" | "site_acceptance_plan" | "site_acceptance_preview" | "site_anchor_practice" | "site_battery" | "site_esl" | "site_route_coverage"
         | "site_proximity" | "site_set_antenna" | "site_import_bim" | "rtls_set_region" | "rtls_run" | "rtls_control" | "antenna_spec" | "antenna_sweep" | "antenna_converge" | "antenna_match" | "antenna_yield"
         | "antenna_array" | "antenna_save_pattern" | "antenna_import_cad" | "antenna_states" | "antenna_gate_test" | "antenna_find_phases" | "antenna_open_sample" | "antenna_new" | "antenna_set" | "antenna_run"
         | "antenna_optimize" | "antenna_cancel" | "antenna_reconfig_set" | "antenna_reconfig_solve" | "antenna_reconfig_search" => Project,
+
+        "open_external" => OpensOutside,
 
         // Where results go: webhooks, Modbus, UDP, writes to a real energy system.
         "rtls_configure_outputs" => Outside,
@@ -155,6 +165,11 @@ fn written_path<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
         _ => return None,
     };
     input[key].as_str().filter(|s| !s.is_empty())
+}
+
+/// The file a tool would read into the chat.
+fn read_path<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
+    matches!(name, "read_file" | "list_files" | "open_file").then(|| input["path"].as_str()).flatten().filter(|s| !s.is_empty())
 }
 
 /// Where this app's own working files go.
@@ -220,6 +235,9 @@ pub fn decide(name: &str, input: &Value, ctx: &CallCtx, policy: &Policy) -> Verd
     if ctx.origin == Origin::Harness {
         return Verdict::Run;
     }
+    if ctx.origin == Origin::Mcp && agent_only(name) {
+        return Verdict::Refuse(format!("{name} is only for the assistant in the app."));
+    }
     let mut class = if policy.external { Class::External } else { class_of(name, input) };
 
     // A script's output must never become a measurement, whatever anyone clicks: the person
@@ -235,9 +253,12 @@ pub fn decide(name: &str, input: &Value, ctx: &CallCtx, policy: &Policy) -> Verd
             }
         }
     }
-    let written = written_path(name, input).filter(|w| !policy.roots.iter().any(|r| is_under(w, r)));
-    let folder = written.map(|w| Path::new(w).parent().unwrap_or(Path::new(w)).to_string_lossy().to_lowercase());
-    if written.is_some() && matches!(class, Class::Project) {
+    let outside = |p: &&str| !policy.roots.iter().any(|r| is_under(p, r));
+    let written = written_path(name, input).filter(outside);
+    let read = read_path(name, input).filter(outside);
+    let touched = written.or(read);
+    let folder = touched.map(|w| Path::new(w).parent().unwrap_or(Path::new(w)).to_string_lossy().to_lowercase());
+    if touched.is_some() && matches!(class, Class::Project | Class::Read) {
         class = Class::Files;
     }
 
@@ -246,13 +267,14 @@ pub fn decide(name: &str, input: &Value, ctx: &CallCtx, policy: &Policy) -> Verd
         Class::Scene | Class::View | Class::Project => (policy.mode == Mode::Ask, format!("Allow the assistant to run {name}?"), Some(("Allow edits for this chat".to_string(), REMEMBER_EDITS.to_string()))),
         Class::Files => (
             policy.mode != Mode::All,
-            format!("Allow the assistant to write a file outside this project?\n{}", written.unwrap_or_default()),
+            if written.is_some() { format!("Allow the assistant to write a file outside this project?\n{}", touched.unwrap_or_default()) } else { format!("Allow the assistant to read this, from outside this project? What it reads goes to the AI provider.\n{}", touched.unwrap_or_default()) },
             folder.map(|f| ("Allow this folder for this chat".to_string(), format!("folder:{f}"))),
         ),
         Class::External => {
             let server = name.split("__").next().unwrap_or(name);
             (policy.mode != Mode::All, format!("Allow the external tool {name}, from the MCP server \"{server}\"? It isn't part of this app, and could do anything that server can."), Some(("Allow this server for this chat".to_string(), format!("server:{server}"))))
         }
+        Class::OpensOutside => (policy.mode != Mode::All, "Allow the assistant to open this in another app?".to_string(), None),
         Class::Outside => (true, format!("Allow the assistant to connect this app to a system outside it? {name} sends data out or starts a server. Check the addresses below."), None),
         Class::Measurement => (true, format!("Allow the assistant to record this as a real measurement? Only allow it if these numbers or this file came from a real instrument. {name} will count them as measured from now on."), None),
         Class::Unknown => (true, format!("The app doesn't know what {name} does. Allow it?"), None),
@@ -294,7 +316,8 @@ mod tests {
     /// A new tool has to be given a class: until then it asks, and this fails to say so.
     #[test]
     fn every_tool_has_a_class() {
-        let unknown: Vec<String> = crate::agent::tools::tool_defs(true).into_iter().map(|d| d.name).filter(|n| class_of(n, &json!({})) == Class::Unknown).collect();
+        let all = crate::agent::tools::tool_defs(true).into_iter().chain(crate::agent::workspace::defs());
+        let unknown: Vec<String> = all.map(|d| d.name).filter(|n| class_of(n, &json!({})) == Class::Unknown).collect();
         assert!(unknown.is_empty(), "add these to class_of in gate.rs: {unknown:?}");
     }
 
@@ -426,6 +449,35 @@ mod tests {
         let no = HashSet::new();
         let p = Policy { mode: Mode::All, approved: &no, roots: &roots, external: false };
         assert!(refused(&decide("outcomes_check", &json!({ "measured": 1.0 }), &ctx, &p)));
+    }
+
+    #[test]
+    fn the_assistants_own_tools_are_out_of_reach_of_mcp_and_macros() {
+        for name in ["read_file", "list_files", "write_file", "open_file", "open_external", "python_run", "delegate", "open_layout_tab", "open_in_design"] {
+            assert!(agent_only(name), "{name}");
+            assert!(refused(&verdict(name, json!({}), Origin::Mcp, Mode::All)), "{name}");
+        }
+        assert!(!agent_only("get_scene"));
+    }
+
+    #[test]
+    fn reading_inside_is_free_and_reading_elsewhere_asks() {
+        let inside = workspace_root().join("chat").join("files").join("a.csv").to_string_lossy().to_string();
+        for name in ["read_file", "list_files", "open_file"] {
+            assert!(runs(&verdict(name, json!({ "path": inside }), Origin::Assistant, Mode::Edits)), "{name}");
+            let Verdict::Ask(a) = verdict(name, json!({ "path": r"C:\Users\me\Documents\a.csv" }), Origin::Assistant, Mode::Edits) else { panic!("{name}") };
+            assert!(a.text.contains("goes to the AI provider"), "{}", a.text);
+            assert!(a.remember.is_some(), "a folder can be allowed");
+            assert!(runs(&verdict(name, json!({ "path": r"C:\Users\me\Documents\a.csv" }), Origin::Assistant, Mode::All)), "{name}");
+        }
+    }
+
+    #[test]
+    fn opening_in_another_app_asks_each_time_unless_all_is_on() {
+        let Verdict::Ask(a) = verdict("open_external", json!({ "target": "https://x.example" }), Origin::Assistant, Mode::Edits) else { panic!() };
+        assert!(a.remember.is_none());
+        assert!(a.text.contains("https://x.example"));
+        assert!(runs(&verdict("open_external", json!({ "target": "https://x.example" }), Origin::Assistant, Mode::All)));
     }
 
     #[test]

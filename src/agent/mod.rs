@@ -24,6 +24,7 @@ pub mod structures;
 pub mod toolmaker;
 pub mod tools;
 pub mod verify;
+pub mod workspace;
 #[path = "../vision/mod.rs"]
 pub mod vision;
 
@@ -132,6 +133,11 @@ pub struct Agent {
     pub usage: std::collections::BTreeMap<String, llm::Usage>,
     /// The last chat, if the app was closed on one.
     pub resumable: Option<session::SavedChat>,
+    /// Bytes and chats on disk, once measured for Settings.
+    pub storage: Option<(u64, usize)>,
+    storage_rx: Option<Receiver<(u64, usize)>>,
+    /// Clear was pressed once, and waits for the second press.
+    pub confirm_clear: bool,
 }
 
 impl Agent {
@@ -168,7 +174,36 @@ impl Agent {
             chat_model: None,
             usage: Default::default(),
             resumable: session::latest(),
+            storage: None,
+            storage_rx: None,
+            confirm_clear: false,
         }
+    }
+
+    /// Measures saved chats in the background, for Settings.
+    pub fn measure_storage(&mut self) {
+        if let Some(rx) = &self.storage_rx {
+            if let Ok(found) = rx.try_recv() {
+                self.storage = Some(found);
+                self.storage_rx = None;
+            }
+            return;
+        }
+        if self.storage.is_none() {
+            let (tx, rx) = unbounded();
+            std::thread::spawn(move || {
+                let _ = tx.send(workspace::storage_used());
+            });
+            self.storage_rx = Some(rx);
+        }
+    }
+
+    /// Deletes saved chats and their working files, all but the one in use.
+    pub fn clear_saved_chats(&mut self) {
+        workspace::clear_chats(self.chat_id.as_deref());
+        self.resumable = None;
+        self.storage = None;
+        self.confirm_clear = false;
     }
 
     /// Tokens used so far, in a few words, with the cost where a price is known.
@@ -353,11 +388,13 @@ impl Agent {
             budget: Arc::new(budget::Budget::new(budget::Limits { tokens: self.config.budget_tokens, calls: self.config.budget_calls, minutes: self.config.budget_minutes })),
             session,
             context_limit: self.config.provider().context_limit(),
+            files: Some(workspace::files_dir(&chat_id)),
         };
         let mut history = before.clone();
         history.push(Message::user(content));
         let mut tool_defs = tools::tool_defs(false);
         tool_defs.extend(self.mcp.tool_defs());
+        tool_defs.extend(workspace::defs());
         let (ev_tx, ev_rx) = unbounded();
         self.events = Some(ev_rx);
         self.cancel = Arc::default();
@@ -418,6 +455,7 @@ fn worker(
     turn.budget = options.budget;
     turn.session = options.session;
     turn.context_limit = options.context_limit;
+    turn.files = options.files;
     let error = harness::run_loop(&provider, &mut spec, &mut turn, &mut checks::SelfChecks::default());
     turn.save();
     let _ = turn.ev.send(Event::Finished { history: turn.history, error });
@@ -429,6 +467,7 @@ struct RunOptions {
     budget: Arc<budget::Budget>,
     session: Option<session::SessionWriter>,
     context_limit: u64,
+    files: Option<std::path::PathBuf>,
 }
 
 fn pump_events(mut agent: ResMut<Agent>) {

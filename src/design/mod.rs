@@ -250,6 +250,26 @@ fn steal_input(workspace: Res<Workspace>, mut stolen: NonSendMut<Stolen>, mut in
     }
 }
 
+/// Opens a file in the workspace and brings it to the front, for the assistant. Not over work that
+/// hasn't been saved: the person's design matters more than the request.
+pub fn open_file(world: &mut World, file: &std::path::Path) -> Result<String, String> {
+    if file.as_os_str().is_empty() {
+        return Err("path is required".into());
+    }
+    {
+        let mut guard = world.non_send_mut::<Slot>();
+        let slot: &mut Slot = &mut guard;
+        match slot.host.as_mut() {
+            Some(h) if h.app.session.is_dirty() => return Err(format!("The open design has unsaved changes, so {} wasn't opened. Ask the user to save or close it first.", file.display())),
+            // In the background: a STEP file can take a while.
+            Some(h) => h.app.open_path_async(&file.to_string_lossy()),
+            None => slot.open_when_started = Some(file.to_path_buf()),
+        }
+    }
+    *world.resource_mut::<Workspace>() = Workspace::Design;
+    Ok(format!("opening {} in 3D Design, which is now in front. It loads in the background: check with design_bodies.", file.display()))
+}
+
 /// No rendering the scene behind the workspace. After the UI, and every frame while designing: the
 /// shell can set this flag too, every frame, for views of its own.
 fn sync_camera(workspace: Res<Workspace>, mut cameras: Query<&mut Camera, With<OrbitCamera>>) {

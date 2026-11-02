@@ -63,6 +63,8 @@ pub struct ToolJob {
     pub reply: Sender<ToolOutput>,
     /// Who asked, and what a macro's steps inherit.
     pub ctx: CallCtx,
+    /// Only to ask the gate: the caller runs the tool itself once it's allowed.
+    pub check_only: bool,
 }
 
 #[derive(Resource, Clone)]
@@ -97,7 +99,19 @@ fn send_and_wait(tx: &Sender<ToolJob>, name: &str, input: Value, ctx: CallCtx, c
         return crate::antenna::assist::wait(tx, &input, cancel);
     }
     let (rtx, rrx) = unbounded();
-    if tx.send(ToolJob { name: name.into(), input, reply: rtx, ctx }).is_err() {
+    send_job(tx, ToolJob { name: name.into(), input, reply: rtx, ctx, check_only: false }, rrx, cancel)
+}
+
+/// Asks the gate about a tool that runs on the caller's thread, and waits for the verdict. An
+/// error says why not; anything else means go ahead.
+pub fn gate_only(tx: &Sender<ToolJob>, name: &str, input: Value, ctx: CallCtx) -> ToolOutput {
+    let cancel = ctx.cancel.clone();
+    let (rtx, rrx) = unbounded();
+    send_job(tx, ToolJob { name: name.into(), input, reply: rtx, ctx, check_only: true }, rrx, cancel.as_deref())
+}
+
+fn send_job(tx: &Sender<ToolJob>, job: ToolJob, rrx: Receiver<ToolOutput>, cancel: Option<&AtomicBool>) -> ToolOutput {
+    if tx.send(job).is_err() {
         return ToolOutput::err("viewer is shutting down");
     }
     loop {
@@ -693,11 +707,7 @@ fn run_gated(world: &mut World, job: ToolJob) {
         gate::decide(&job.name, &job.input, &job.ctx, &Policy { mode: agent.config.approval, approved: &agent.approved, roots: &roots, external: agent.mcp.has_tool(&job.name) })
     };
     match verdict {
-        Verdict::Run => {
-            if let Some(out) = start(world, job) {
-                let _ = reply.send(out);
-            }
-        }
+        Verdict::Run => go_ahead(world, job),
         Verdict::Refuse(why) => {
             let _ = reply.send(ToolOutput::err(why));
         }
@@ -719,6 +729,16 @@ fn run_gated(world: &mut World, job: ToolJob) {
 }
 
 const ALLOW: &str = "Allow";
+
+/// The gate has agreed: runs the tool, or tells a caller that runs it itself.
+fn go_ahead(world: &mut World, job: ToolJob) {
+    let reply = job.reply.clone();
+    if job.check_only {
+        let _ = reply.send(ToolOutput::text("allowed"));
+    } else if let Some(out) = start(world, job) {
+        let _ = reply.send(out);
+    }
+}
 
 fn short(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s.to_string() }
@@ -1474,6 +1494,21 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             }
             None => ToolOutput::err("path is required"),
         },
+        // Reached through open_file, which only the assistant's own loop has.
+        "open_layout_tab" => match i["path"].as_str() {
+            Some(p) => {
+                let p = PathBuf::from(p);
+                let tab = crate::tabs::NewTab { title: crate::tabs::title_of(&p), path: Some(p.clone()), load: Some(p.clone()) };
+                world.resource_mut::<crate::tabs::Tabs>().request(crate::tabs::Request::Open(vec![tab]));
+                ToolOutput::text(format!("opening {} in a new tab; the scene that was open stays in its own tab", p.display()))
+            }
+            None => ToolOutput::err("path is required"),
+        },
+        #[cfg(feature = "design")]
+        "open_in_design" => match crate::design::open_file(world, Path::new(i["path"].as_str().unwrap_or(""))) {
+            Ok(said) => ToolOutput::text(said),
+            Err(e) => ToolOutput::err(e),
+        },
         "get_screen" => match world.resource::<Agent>().screen_note() {
             Some(note) => ToolOutput::text(note),
             None => ToolOutput::text("The user has turned off sharing what is on screen. Ask them if you need to know."),
@@ -1548,13 +1583,10 @@ fn poll(world: &mut World, w: Wait) -> Option<Wait> {
             if let Some((_, key)) = always {
                 world.resource_mut::<Agent>().approved.insert(key.clone());
             }
-            let reply = job.reply.clone();
             if once || always.is_some() {
-                if let Some(out) = start(world, job) {
-                    let _ = reply.send(out);
-                }
+                go_ahead(world, job);
             } else {
-                let _ = reply.send(ToolOutput::err(format!("The user did not allow {}. Don't try to reach the same result another way; say what you wanted to do and why.", job.name)));
+                let _ = job.reply.send(ToolOutput::err(format!("The user did not allow {}. Don't try to reach the same result another way; say what you wanted to do and why.", job.name)));
             }
             None
         }
@@ -2078,7 +2110,7 @@ mod lock_tests {
 
     fn tool(world: &mut World, name: &str, input: Value) -> ToolOutput {
         let (reply, _rx) = unbounded();
-        start(world, ToolJob { name: name.into(), input, reply, ctx: CallCtx::default() }).expect("finishes at once")
+        start(world, ToolJob { name: name.into(), input, reply, ctx: CallCtx::default(), check_only: false }).expect("finishes at once")
     }
 
     #[test]
@@ -2140,7 +2172,7 @@ mod routing_tests {
     fn reaches_a_handler(name: &str) -> bool {
         let mut world = World::new();
         let (tx, _rx) = unbounded();
-        let job = ToolJob { name: name.into(), input: json!({}), reply: tx, ctx: CallCtx::default() };
+        let job = ToolJob { name: name.into(), input: json!({}), reply: tx, ctx: CallCtx::default(), check_only: false };
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(&mut world, job))) {
             Ok(Some(out)) => !(out.is_error && out.summary().starts_with("unknown tool")),
             Ok(None) | Err(_) => true,

@@ -664,6 +664,9 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
             });
         }
     }
+    agent.measure_storage();
+    let (agent_storage, confirm_clear) = (agent.storage, agent.confirm_clear);
+    let (mut clear_pressed, mut clear_confirmed, mut clear_cancelled) = (false, false, false);
     {
         let cfg = &mut agent.config;
         theme::setting_row(ui, "Effort", "How hard the model thinks (Anthropic, Muse)", |ui| {
@@ -679,6 +682,22 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
         theme::setting_row(ui, "Token budget", "Per request, charged tokens before it stops and asks. 0 for no limit", |ui| {
             changed |= ui.add(egui::DragValue::new(&mut cfg.budget_tokens).speed(10_000.0).range(0..=100_000_000)).lost_focus();
         });
+        theme::setting_row(ui, "Saved chats", "Chats and the assistant's working files, on this computer", |ui| {
+            match agent_storage {
+                Some((bytes, chats)) if !confirm_clear => {
+                    ui.label(RichText::new(format!("{chats} chats, {:.1} MB", bytes as f64 / 1e6)).color(theme::WEAK));
+                    clear_pressed = ui.button("Clear").clicked();
+                }
+                Some((_, chats)) => {
+                    ui.label(RichText::new(format!("Delete {chats} chats and their files?")).color(theme::WARNING));
+                    clear_confirmed = ui.button("Delete").clicked();
+                    clear_cancelled = ui.button("Keep").clicked();
+                }
+                None => {
+                    ui.label(RichText::new("measuring…").color(theme::WEAK));
+                }
+            }
+        });
         theme::setting_row(ui, "Share what's on screen", "Workbench, open card, selection and recent actions go with each message", |ui| {
             changed |= theme::toggle_switch(ui, &mut cfg.share_screen).changed();
         });
@@ -689,6 +708,15 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
                 }
             });
         });
+    }
+    if clear_pressed {
+        agent.confirm_clear = true;
+    }
+    if clear_cancelled {
+        agent.confirm_clear = false;
+    }
+    if clear_confirmed {
+        agent.clear_saved_chats();
     }
     ui.horizontal(|ui| {
         if theme::primary_button(ui, "Test connection").clicked() {
