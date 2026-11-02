@@ -1,5 +1,5 @@
 //! egui UI: top bar, tool ribbon, status bar, and over the full-bleed 3D canvas
-//! the floating cards: project tree (library, simulations, downloads) on the
+//! the floating cards: project tree (library, simulations) on the
 //! left, scene tree and nav cube on the right, detail cards beside them.
 
 mod design_bar;
@@ -131,7 +131,6 @@ pub struct Sections {
     library: bool,
     /// The workbench's own part of the tree.
     bench: bool,
-    downloads: bool,
     jobs: bool,
     scene: bool,
     scene_root: bool,
@@ -139,7 +138,7 @@ pub struct Sections {
 
 impl Default for Sections {
     fn default() -> Self {
-        Self { library: true, bench: true, downloads: false, jobs: false, scene: true, scene_root: true }
+        Self { library: true, bench: true, jobs: false, scene: true, scene_root: true }
     }
 }
 
@@ -147,6 +146,10 @@ impl Default for Sections {
 pub struct UiState {
     layout_path: Option<PathBuf>,
     sections: Sections,
+    /// The list under the top bar's Downloads button is showing.
+    downloads_open: bool,
+    /// Where that button is, for the list to hang from.
+    downloads_anchor: Option<egui::Rect>,
     left_w: f32,
     right_w: f32,
     detail_w: f32,
@@ -188,6 +191,8 @@ impl Default for UiState {
         Self {
             layout_path: None,
             sections: Sections::default(),
+            downloads_open: false,
+            downloads_anchor: None,
             left_w: 284.0,
             right_w: 262.0,
             detail_w: 420.0,
@@ -313,12 +318,12 @@ impl UiState {
                     "demo" => slot.twin.requests.push(TwinRequest::Demo(Some(crate::twin::DEMO_SIZES[0]))),
                     "demo-500" => slot.twin.requests.push(TwinRequest::Demo(Some(500))),
                     "demo-5000" => slot.twin.requests.push(TwinRequest::Demo(Some(5000))),
+                    "lines" => slot.twin.page = TwinPage::Lines,
                     "events" => slot.twin.page = TwinPage::Events,
                     "connection" => slot.twin.page = TwinPage::Connection,
                     _ => {}
                 }
                 continue;
-                    "lines" => slot.twin.page = TwinPage::Lines,
             }
             if let Some(page) = name.strip_prefix("antenna-") {
                 slot.studio_goto.push(page.to_string());
@@ -326,7 +331,7 @@ impl UiState {
             }
             match name.as_str() {
                 "assistant" => agent.open = true,
-                "downloads" => self.sections.downloads = true,
+                "downloads" => self.downloads_open = true,
                 "jobs" => self.sections.jobs = true,
                 "start-empty" => self.start.select_empty(),
                 "start-antenna" => self.start.select_antenna(),
@@ -891,6 +896,8 @@ pub fn ui_system(
     }
 
     tabbar::confirm_close(&ctx, &mut tabs, &mut state, &mut actions);
+
+    downloads::dropdown(&ctx, &mut state, &mut library, slot.bench.current.has_library());
 
     let over_ui = ctx.pointer_latest_pos().map(|p| !central.contains(p) || ctx.layer_id_at(p).is_some_and(|l| l.order != egui::Order::Background)).unwrap_or(true);
     // The Studio's canvas is on the background order, but the scene isn't what's under it.

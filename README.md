@@ -47,7 +47,7 @@ on the *Library* section or in Settings → Library; the choice is remembered.
 - **Library:** search, filter *All / Local / Online*, switch grid or list view, click a card,
   then click in the scene to place it. Online assets have a blue name and a cloud badge; clicking
   one downloads it and then places it. After a search, *Get N* queues every online match.
-  Downloads run two at a time and show progress on the card and in the Downloads section.
+  Downloads run two at a time and show progress on the card and under the Downloads button in the top bar.
   The folder is rescanned every 15 s.
 - **View toolbar (top centre of the canvas):** frame all, grid, hover bounds, shadows, viewport settings.
 - **Nav cube (bottom right):** click a face to look at it, drag it to orbit. The arrows step the view,

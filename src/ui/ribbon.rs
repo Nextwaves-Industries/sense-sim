@@ -380,7 +380,7 @@ fn view_tools(ui: &mut egui::Ui, state: &mut UiState, actions: &mut Actions, set
         state.sections.library = !state.sections.library;
     }
     toggle(ui, icon::TREE_STRUCTURE, "Scene", &mut state.sections.scene, "The list of objects in the scene");
-    toggle(ui, icon::CLOUD_ARROW_DOWN, "Downloads", &mut state.sections.downloads, "Asset downloads");
+    toggle(ui, icon::CLOUD_ARROW_DOWN, "Downloads", &mut state.downloads_open, "Asset downloads");
     toggle(ui, icon::SPARKLE, "Assistant", assistant_open, "The AI assistant");
     ui.add_space(GROUP_GAP);
 

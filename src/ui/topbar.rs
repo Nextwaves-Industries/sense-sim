@@ -280,8 +280,10 @@ pub fn show(
 
                 let n = active_dl + queued_dl;
                 let tip = if n > 0 { format!("Downloads: {active_dl} active, {queued_dl} queued") } else { "Downloads".into() };
-                if outlined(ui, icon::CLOUD_ARROW_DOWN, "Downloads", n).on_hover_text(tip).clicked() {
-                    state.sections.downloads = !state.sections.downloads;
+                let downloads = outlined(ui, icon::CLOUD_ARROW_DOWN, "Downloads", n).on_hover_text(tip);
+                state.downloads_anchor = Some(downloads.rect);
+                if downloads.clicked() {
+                    state.downloads_open = !state.downloads_open;
                 }
             });
         });

@@ -1,12 +1,39 @@
-//! Downloads tab: active and queued Hugging Face downloads.
+//! The Downloads list under the top bar's button: active and queued Hugging Face downloads.
 
-use bevy_egui::egui::{self, RichText, vec2};
+use bevy_egui::egui::{self, Align2, Margin, RichText, vec2};
 
 use super::{Filter, UiState};
 use crate::library::{DownloadState, Library};
 use crate::theme::{self, ONLINE, icon};
 
-pub fn show(ui: &mut egui::Ui, library: &mut Library, state: &mut UiState) {
+const WIDTH: f32 = 340.0;
+
+/// Shows the list under the button. Run this last in the frame: whatever opened the list has had
+/// its say by then, and the click that opened it doesn't count as a click elsewhere.
+pub fn dropdown(ctx: &egui::Context, state: &mut UiState, library: &mut Library, has_library: bool) {
+    let shown_id = egui::Id::new("downloads_shown");
+    let was_shown = ctx.data(|d| d.get_temp::<bool>(shown_id)).unwrap_or(false);
+    ctx.data_mut(|d| d.insert_temp(shown_id, state.downloads_open));
+    let (true, Some(anchor)) = (state.downloads_open, state.downloads_anchor) else { return };
+
+    let screen = ctx.content_rect();
+    let mut close = false;
+    let area = egui::Area::new(egui::Id::new("downloads_dropdown")).order(egui::Order::Foreground).pivot(Align2::RIGHT_TOP).fixed_pos(anchor.right_bottom() + vec2(0.0, 4.0)).constrain_to(screen).show(ctx, |ui| {
+        theme::fixed_card(ui, WIDTH, screen.bottom() - anchor.bottom() - 12.0, |ui| {
+            let (active, queued) = library.download_count();
+            theme::card_title(ui, &format!("Downloads ({})", active + queued), |ui| close = theme::close_button(ui, "Close").clicked());
+            egui::Frame::new().inner_margin(Margin { left: 12, right: 12, top: 8, bottom: 10 }).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                show(ui, library, state, has_library);
+            });
+        });
+    });
+    if close || (was_shown && area.response.clicked_elsewhere()) {
+        state.downloads_open = false;
+    }
+}
+
+fn show(ui: &mut egui::Ui, library: &mut Library, state: &mut UiState, has_library: bool) {
     let list = library.downloads();
     let queued = list.iter().filter(|(_, s)| matches!(s, DownloadState::Queued)).count();
     if queued > 0 && ui.add(egui::Button::new(theme::label(icon::X, "Cancel queued")).small()).clicked() {
@@ -17,12 +44,16 @@ pub fn show(ui: &mut egui::Ui, library: &mut Library, state: &mut UiState) {
 
     if list.is_empty() {
         ui.label(RichText::new("Online assets (blue, with a cloud badge) download when you click them in the library.").small().color(theme::WEAK));
-        ui.vertical_centered(|ui| {
-            if ui.button(theme::label(icon::GLOBE, "Browse online assets")).clicked() {
-                state.filter = Filter::Online;
-                state.sections.library = true;
-            }
-        });
+        // Not every workbench has a library to show them in.
+        if has_library {
+            ui.vertical_centered(|ui| {
+                if ui.button(theme::label(icon::GLOBE, "Browse online assets")).clicked() {
+                    state.filter = Filter::Online;
+                    state.sections.library = true;
+                    state.downloads_open = false;
+                }
+            });
+        }
         return;
     }
 

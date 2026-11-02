@@ -102,7 +102,7 @@ pub fn show(
                         let text = format!("{} downloading {active}, queued {queued}", icon::CLOUD_ARROW_DOWN);
                         let r = ui.add(egui::Label::new(RichText::new(text).color(egui::Color32::from_rgb(140, 190, 255))).sense(egui::Sense::click()));
                         if r.on_hover_text("Show downloads").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            state.sections.downloads = true;
+                            state.downloads_open = true;
                         }
                     }
                     if !status.0.is_empty() {

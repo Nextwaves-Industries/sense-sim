@@ -1,10 +1,10 @@
 //! The project tree on the left, for the workbench in front: its own pages (each
-//! shows how far it is set up and opens its detail card), the asset library,
-//! downloads and the "Job status" card under it all.
+//! shows how far it is set up and opens its detail card), the asset library and
+//! the "Job status" card under it all.
 
 use bevy_egui::egui::{self, Align, Layout, Margin, RichText, vec2};
 
-use super::{LeftPanelSlot, UiState, Workbench, downloads, library};
+use super::{LeftPanelSlot, UiState, Workbench, library};
 use crate::library::Library;
 use crate::prototype::PrototypeCache;
 use crate::rtls::DevicePlace;
@@ -59,11 +59,13 @@ pub fn left_card(
                     }
                     ui.add_space(4.0);
                 }
-                theme::hairline(ui);
             }
 
             // ---- Library
             if bench.has_library() {
+                if bench != Workbench::Layout {
+                    theme::hairline(ui);
+                }
                 let mut open = state.sections.library;
                 theme::section_header(ui, "library", &mut open, icon::CUBE, theme::ACCENT, "Library", |ui| {
                     if theme::add_button(ui, "Choose the dataset folder").clicked()
@@ -83,22 +85,6 @@ pub fn left_card(
                         });
                     });
                 }
-                theme::hairline(ui);
-            }
-
-            // ---- Downloads
-            let list_len = {
-                let (a, q) = lib.download_count();
-                a + q
-            };
-            let mut open = state.sections.downloads;
-            theme::section_header(ui, "downloads", &mut open, icon::CLOUD_ARROW_DOWN, theme::WEAK, &format!("Downloads ({list_len})"), |_| {});
-            state.sections.downloads = open;
-            if open {
-                egui::Frame::new().inner_margin(Margin { left: 10, right: 10, top: 2, bottom: 8 }).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                    downloads::show(ui, lib, state);
-                });
             }
         });
     });
@@ -202,7 +188,6 @@ fn page_rows(ui: &mut egui::Ui, w: f32, bench: Workbench, slot: &mut LeftPanelSl
         }
     }
 }
-        (TwinPage::Lines, "Lines", icon::FLOW_ARROW, twin.lines_health, lines.as_str()),
 
 /// The Factory card's pages, with how the plant is doing at a glance.
 fn factory_rows(ui: &mut egui::Ui, w: f32, slot: &mut LeftPanelSlot) {
@@ -217,6 +202,7 @@ fn factory_rows(ui: &mut egui::Ui, w: f32, slot: &mut LeftPanelSlot) {
     };
     let (lines, devices, events) = (twin.lines.to_string(), twin.total.to_string(), twin.events.to_string());
     let rows = [
+        (TwinPage::Lines, "Lines", icon::FLOW_ARROW, twin.lines_health, lines.as_str()),
         (TwinPage::Devices, "Devices", icon::LIST_BULLETS, health, devices.as_str()),
         (TwinPage::Events, "Events", icon::PULSE, Dot::Optional, events.as_str()),
         (TwinPage::Connection, "Connection", icon::PLUG, link, twin.status.label()),
