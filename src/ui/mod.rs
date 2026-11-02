@@ -59,6 +59,12 @@ pub struct LeftPanelSlot {
     pub open_rtls: bool,
     /// Active RTLS alarms, set every frame by the RTLS system; shown as a red dot on the rail.
     pub rtls_alerts: u32,
+    /// Asks for the Design workspace; the design system takes it from here.
+    pub open_design: bool,
+    /// Asks for the Simulations panel.
+    pub open_simulations: bool,
+    /// A simulation result is on show: the empty-scene hint would cover it.
+    pub results_shown: bool,
 }
 
 #[derive(Resource)]
@@ -289,7 +295,7 @@ pub fn ui_system(
                         actions.0.push(Action::ClearScene);
                     }
                     if menu_entry(ui, icon::SIGN_OUT, "Quit", "", true) {
-                        std::process::exit(0);
+                        crate::quit();
                     }
                 });
                 ui.menu_button("Edit", |ui| {
@@ -448,6 +454,14 @@ pub fn ui_system(
                         state.open_tab(tab);
                     }
                 }
+            }
+            let design = ui.add(egui::Button::new(RichText::new(icon::CUBE).size(18.0).color(theme::WEAK)).frame_when_inactive(false).min_size(vec2(36.0, 36.0)));
+            if design.on_hover_text("3D design").clicked() {
+                slot.open_design = true;
+            }
+            let simulate = ui.add(egui::Button::new(RichText::new(icon::STACK).size(18.0).color(theme::WEAK)).frame_when_inactive(false).min_size(vec2(36.0, 36.0)));
+            if simulate.on_hover_text("Simulations").clicked() {
+                slot.open_simulations = true;
             }
             ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
                 let r = ui.add(egui::Button::new(RichText::new(icon::GEAR_SIX).size(18.0).color(theme::WEAK)).frame_when_inactive(false).min_size(vec2(36.0, 36.0)));
@@ -619,7 +633,7 @@ pub fn ui_system(
     }
 
     // ---------------- Empty scene hint
-    if overlays && object_count == 0 && place.asset.is_none() && !walls.active {
+    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && !slot.results_shown {
         egui::Area::new(egui::Id::new("empty_scene"))
             .order(egui::Order::Middle)
             .pivot(Align2::CENTER_CENTER)

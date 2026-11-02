@@ -17,3 +17,7 @@
 *.swp
 .DS_Store
 Thumbs.db
+
+# sim-core's own builds and the combined check build
+/crates/sim-core/target*/
+/target-check/

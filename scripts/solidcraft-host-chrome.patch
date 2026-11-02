@@ -1,0 +1,102 @@
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 8dfdf51c..2a3ca830 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -513,6 +513,9 @@ pub struct SolveApp {
+     pub(crate) viewport_status_fixture: viewport_status_fixture::Fixture,
+     /// Compact browser embed: retain model panels and joint controls without application chrome.
+     pub embedded: bool,
++    /// A host application draws the bars above this UI: no application bar here. The modelling
++    /// ribbon stays, and the host opens the File menu with [`toolbar::toggle_file_menu`].
++    pub host_chrome: bool,
+     pub session: Session,
+     pub ui: UiState,
+     pub(crate) shell: shell::State,
+@@ -898,6 +901,7 @@ impl SolveApp {
+             fit_waits: 0,
+             flat_view: Default::default(),
+             embedded: false,
++            host_chrome: false,
+             home: home::HomeState::default(),
+             space_mouse: Default::default(),
+             file_load: file_load::FileLoad::default(),
+@@ -2933,7 +2937,9 @@ impl SolveApp {
+         self.poll_deferred(ui.ctx());
+         self.poll_delete_check(ui.ctx());
+         timeline::tick_playback(self, ui.ctx());
+-        if !self.embedded {
++        if self.host_chrome {
++            toolbar::host_menus(self, ui);
++        } else if !self.embedded {
+             toolbar::app_bar(self, ui);
+         }
+         issue_report::CadInput::block(self, ui, report_input);
+@@ -3018,7 +3024,10 @@ impl SolveApp {
+                 viewport_ui.disable();
+             }
+             self.show_workspace(&mut viewport_ui);
+-            shell::paint_top_corners(ui.painter(), full, theme::Tokens::get().app_bar);
++            // They continue the application bar, which a host's bars replace.
++            if !self.host_chrome {
++                shell::paint_top_corners(ui.painter(), full, theme::Tokens::get().app_bar);
++            }
+             toolbar::toolbar(self, ui);
+             theme::TabAccent::publish(self, ui.ctx());
+         }
+diff --git a/crates/ui-egui/src/toolbar.rs b/crates/ui-egui/src/toolbar.rs
+index 07ba04b0..b7da4e4b 100644
+--- a/crates/ui-egui/src/toolbar.rs
++++ b/crates/ui-egui/src/toolbar.rs
+@@ -516,6 +516,33 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
+     crate::help::show(app, &ui.ctx().clone(), pos2(help_x - 14.0, APP_BAR_HEIGHT));
+ }
+ 
++/// What the application bar would have opened, for a host that draws the bars itself.
++pub fn host_menus(app: &mut SolveApp, ui: &mut egui::Ui) {
++    file_menu(app, ui.ctx());
++}
++
++/// Opens or closes the File menu, at `x` along the top of this UI, for a host's own button.
++pub fn toggle_file_menu(app: &mut SolveApp, ctx: &egui::Context, x: f32) {
++    app.ui.palette_open = false;
++    let open = file_menu_open(ctx);
++    let pass = ctx.cumulative_pass_nr();
++    ctx.data_mut(|d| {
++        d.insert_temp(egui::Id::new("sc_file_menu"), !open);
++        d.insert_temp(egui::Id::new("sc_file_menu_opened"), pass);
++        d.insert_temp(egui::Id::new("sc_file_menu_x"), x);
++    });
++}
++
++/// Whether the File menu shows.
++pub fn file_menu_open(ctx: &egui::Context) -> bool {
++    ctx.data(|d| d.get_temp::<bool>(egui::Id::new("sc_file_menu")).unwrap_or(false))
++}
++
++/// Closes the File menu: a host saw a click outside this UI, which never reaches the menu.
++pub fn close_file_menu(ctx: &egui::Context) {
++    ctx.data_mut(|d| d.insert_temp(egui::Id::new("sc_file_menu"), false));
++}
++
+ /// File, edit and application actions shared by the in-window and native menus.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum FileAction {
+@@ -622,7 +649,7 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
+     let mut close = false;
+     let resp = Container::new(ctx, Surface::Popup)
+         .area(egui::Id::new("sc_file_area"))
+-        .fixed_pos(pos2(ctx.data(|d| d.get_temp::<f32>(egui::Id::new("sc_file_menu_x"))).unwrap_or(100.0), APP_BAR_HEIGHT))
++        .fixed_pos(pos2(ctx.data(|d| d.get_temp::<f32>(egui::Id::new("sc_file_menu_x"))).unwrap_or(100.0), if app.host_chrome { 0.0 } else { APP_BAR_HEIGHT }))
+         .order(egui::Order::Foreground)
+         .show(ctx, |ui| {
+             crate::ui_kit::Menu::show_frame(ui, crate::ui_kit::Menu::frame(), |ui| {
+@@ -758,7 +785,8 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
+                     FileAction::Shortcuts.run(app);
+                     close = true;
+                 }
+-                if item(ui, app.tr("ui.quit"), "", "close") {
++                // A host has its own way out; this would only end the design's part of it.
++                if !app.host_chrome && item(ui, app.tr("ui.quit"), "", "close") {
+                     FileAction::Quit.run(app);
+                     close = true;
+                 }

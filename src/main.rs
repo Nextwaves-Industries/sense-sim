@@ -10,6 +10,8 @@
 mod agent;
 mod bvh;
 mod context_menu;
+#[cfg(feature = "design")]
+mod design;
 mod gpu;
 mod ime;
 mod library;
@@ -20,6 +22,8 @@ mod remote;
 mod rtls;
 mod samples;
 mod scene;
+#[cfg(feature = "design")]
+mod sim;
 mod theme;
 mod ui;
 mod undo;
@@ -42,6 +46,14 @@ use scene::*;
 
 pub const APP_NAME: &str = "Sense Sim";
 
+/// File > Quit: with a design workspace, through its protection of unsaved work.
+pub fn quit() {
+    #[cfg(feature = "design")]
+    design::request_quit();
+    #[cfg(not(feature = "design"))]
+    std::process::exit(0);
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut root = None;
@@ -63,8 +75,13 @@ fn main() {
     let mut sample: Option<usize> = None;
     let mut plant_test: Option<String> = None;
     let mut probe_ports: Vec<String> = Vec::new();
+    let mut design_test: Option<String> = None;
+    let mut sim_test: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--design-test" => design_test = args.next(),
+            "--sim-test" => sim_test = args.next(),
+            "--sim-test-all" => {}
             "--plant-test" => plant_test = args.next(),
             "--ports" => probe_ports.extend(args.next()),
             "--mcp-port" => mcp_port = args.next().and_then(|p| p.parse().ok()),
@@ -134,7 +151,8 @@ fn main() {
                     resolution: (1600u32, 950u32).into(),
                     present_mode: gpu_prefs.present_mode(),
                     // Scripted tests block for their whole run; no window to look frozen.
-                    visible: rtls_test.is_none() && plant_test.is_none(),
+                    // Nor one in front of whoever is using this desktop, for a long test.
+                    visible: rtls_test.is_none() && plant_test.is_none() && std::env::var_os("SENSESIM_TEST_HIDDEN").is_none(),
                     ..default()
                 }),
                 ..default()
@@ -196,6 +214,22 @@ fn main() {
     // Last in the pass, once every text field has drawn: IME on while one has focus.
     .add_systems(EguiPrimaryContextPass, ime::sync_ime.after(ui::ui_system).after(rtls::ui::rtls_ui));
 
+    #[cfg(feature = "design")]
+    {
+        app.add_plugins((design::DesignPlugin, sim::SimPlugin));
+        if let Some(out) = &sim_test {
+            design::use_test_autosave();
+            app.insert_resource(sim::autotest::SimTest::new(out.clone())).add_systems(Update, (sim::autotest::run.before(sim::persist::peek_actions), sim::autotest::tools_step));
+            app.world_mut().resource_mut::<ui::UiState>().skip_start(None);
+        }
+        if let Some(out) = &design_test {
+            design::use_test_autosave();
+            app.insert_resource(design::autotest::DesignTest::new(out.clone())).add_systems(Update, design::autotest::run);
+            app.world_mut().resource_mut::<ui::UiState>().skip_start(None);
+        }
+    }
+    #[cfg(not(feature = "design"))]
+    let _ = (&design_test, &sim_test);
     app.world_mut().resource_mut::<Library>().search = search;
     if let Some(out) = shot {
         app.insert_resource(AutoShot { out: out.into(), frames_ready: 0, taken: false, export: export.map(Into::into), pose, preview })

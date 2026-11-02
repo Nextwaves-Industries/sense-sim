@@ -364,6 +364,8 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
     }
     v.extend(crate::rtls::tools::defs());
     v.extend(crate::plant::tools::defs());
+    #[cfg(feature = "design")]
+    v.extend(crate::sim::tools::defs());
     v
 }
 
@@ -960,6 +962,8 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             Some(out) => out,
             None => ToolOutput::err(format!("unknown tool '{other}'")),
         },
+        #[cfg(feature = "design")]
+        other if other.starts_with("design_") || other.starts_with("sim_") => crate::sim::tools::start(world, other, i),
         other => ToolOutput::err(format!("unknown tool '{other}'")),
     };
     Some(out)

@@ -1,0 +1,1798 @@
+diff --git a/assets/icons/ui/design/requested_icons.txt b/assets/icons/ui/design/requested_icons.txt
+index 1789b237..891178d2 100644
+--- a/assets/icons/ui/design/requested_icons.txt
++++ b/assets/icons/ui/design/requested_icons.txt
+@@ -318,6 +318,8 @@ web	false
+ ws_animate	false
+ ws_design	false
+ ws_drawing	false
++ws_manufacture	false
+ ws_render	false
++ws_simulation	false
+ zebra	false
+ zoom	false
+diff --git a/assets/icons/ui/design/svg/workspace/ws_manufacture.svg b/assets/icons/ui/design/svg/workspace/ws_manufacture.svg
+new file mode 100644
+index 00000000..d0a77c2d
+--- /dev/null
++++ b/assets/icons/ui/design/svg/workspace/ws_manufacture.svg
+@@ -0,0 +1,13 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
++  <title>Ws manufacture</title>
++  <path d="M12.95 21L32 32L32 54L12.95 43Z" fill="#b8c3cf"/>
++  <path d="M51.05 21L32 32L32 54L51.05 43Z" fill="#8e9faf"/>
++  <path d="M32 10L51.05 21L32 32L12.95 21Z" fill="#e2e8ef"/>
++  <path d="M32 10L51.05 21L51.05 43L32 54L12.95 43L12.95 21Z" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M12.95 21L32 32L51.05 21" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M32 32L32 54" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M28.4 6.33L28.4 21A3.6 2.08 0 0 0 35.6 21L35.6 6.33Z" fill="#236ead"/>
++  <path d="M33.26 6.33L33.26 22.95A3.6 2.08 0 0 0 35.6 21L35.6 6.33Z" fill="#236ead"/>
++  <path d="M28.4 6.33L28.4 21A3.6 2.08 0 0 0 35.6 21L35.6 6.33Z" fill="none" stroke="#34465b" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M28.4 6.33A3.6 2.08 0 1 0 35.6 6.33A3.6 2.08 0 1 0 28.4 6.33Z" fill="#b9ddf8" stroke="#34465b" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
++</svg>
+diff --git a/assets/icons/ui/design/svg/workspace/ws_simulation.svg b/assets/icons/ui/design/svg/workspace/ws_simulation.svg
+new file mode 100644
+index 00000000..35314431
+--- /dev/null
++++ b/assets/icons/ui/design/svg/workspace/ws_simulation.svg
+@@ -0,0 +1,12 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
++  <title>Simulation workspace</title>
++  <circle cx="33.11" cy="32" r="11.5" fill="#b8c3cf" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M22.3 28.09A11.5 11.5 0 0 1 43.92 28.09Z" fill="#e2e8ef"/>
++  <circle cx="33.11" cy="32" r="11.5" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M5.11 21C17.11 21 20.11 12 33.11 12C44.11 12 46.11 21 53.11 21" fill="none" stroke="#ffffff" stroke-width="6.45" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M5.11 21C17.11 21 20.11 12 33.11 12C44.11 12 46.11 21 53.11 21" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M62.11 21L53.11 25.5L53.11 16.5Z" fill="#236ead"/>
++  <path d="M5.11 43C17.11 43 20.11 52 33.11 52C44.11 52 46.11 43 53.11 43" fill="none" stroke="#ffffff" stroke-width="6.45" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M5.11 43C17.11 43 20.11 52 33.11 52C44.11 52 46.11 43 53.11 43" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
++  <path d="M62.11 43L53.11 47.5L53.11 38.5Z" fill="#236ead"/>
++</svg>
+diff --git a/assets/locales/en.json b/assets/locales/en.json
+index 9a76f031..43994805 100644
+--- a/assets/locales/en.json
++++ b/assets/locales/en.json
+@@ -5150,7 +5150,7 @@
+   "ui.workspace_design_description": "Sketch, model, assemble and inspect",
+   "ui.workspace_design_tabs": "Model · Surface · Assemble · Insert · Inspect · Manage · View",
+   "ui.workspace_drawing_description": "2D drawings with views, dimensions and title blocks",
+-  "ui.workspace_footer": "Every workspace works on the same design, history and selection; only the ribbon tabs change. The switcher is locked while a sketch or feature is being edited.",
++  "ui.workspace_footer": "Every workspace works on the same design. The switcher is locked while a sketch or feature is being edited.",
+   "ui.workspace_layout": "Workspace layout",
+   "ui.workspace_manufacture_description": "Slicing, toolpaths and setup",
+   "ui.workspace_planned": "Planned",
+diff --git a/assets/locales/pending/sense-sim-workspaces.json b/assets/locales/pending/sense-sim-workspaces.json
+new file mode 100644
+index 00000000..99b22d8c
+--- /dev/null
++++ b/assets/locales/pending/sense-sim-workspaces.json
+@@ -0,0 +1,182 @@
++{
++  "en": {
++    "ANIMATE": "ANIMATE",
++    "A storyboard plays motion studies and exploded views, so the design needs one of them first.": "A storyboard plays motion studies and exploded views, so the design needs one of them first.",
++    "Add Clip": "Add Clip",
++    "EDIT STORYBOARD": "EDIT STORYBOARD",
++    "EXPLODE": "EXPLODE",
++    "Frame": "Frame",
++    "New storyboard": "New storyboard",
++    "PRINT": "PRINT",
++    "Print": "Print",
++    "Remove this clip": "Remove this clip",
++    "SEQUENCE": "SEQUENCE",
++    "STORYBOARD": "STORYBOARD",
++    "Save the storyboard as an animated GIF, seen as the viewport shows it": "Save the storyboard as an animated GIF, seen as the viewport shows it",
++    "Slicer": "Slicer",
++    "Storyboard": "Storyboard",
++    "cmd.storyboard_create": "Storyboard",
++    "cmd.storyboard_delete": "Delete Storyboard",
++    "cmd.storyboard_list": "List Storyboards",
++    "help.storyboard.create": "Plays motion studies and exploded views one after another, as one animation. Use it to show how an assembly moves and comes apart, then export the whole sequence as a GIF.",
++    "storyboard.clip_name": "Clip {number}",
++    "storyboard.clip_study": "{name}: play",
++    "storyboard.clip_view": "{name}: come apart",
++    "storyboard.clip_view_back": "{name}: apart and back",
++    "ui.workspace_animation_tabs": "Animate",
++    "ui.workspace_finish_first": "finish the current modeling operation before changing workspace",
++    "ui.workspace_manufacture_slicing_description": "Send parts to a slicer for 3D printing",
++    "ui.workspace_manufacture_tabs": "Print",
++    "ui.workspace_simulation_tabs": "Opens the Simulation workbench with this design's bodies"
++  },
++  "vi": {
++    "ANIMATE": "HOẠT ẢNH",
++    "A storyboard plays motion studies and exploded views, so the design needs one of them first.": "Bảng phân cảnh phát các nghiên cứu chuyển động và hình chiếu tách rời, nên thiết kế cần có ít nhất một trong số đó trước.",
++    "Add Clip": "Thêm đoạn",
++    "EDIT STORYBOARD": "SỬA BẢNG PHÂN CẢNH",
++    "EXPLODE": "TÁCH RỜI",
++    "Frame": "Khung hình",
++    "New storyboard": "Bảng phân cảnh mới",
++    "PRINT": "IN",
++    "Print": "In",
++    "Remove this clip": "Xóa đoạn này",
++    "SEQUENCE": "TRÌNH TỰ",
++    "STORYBOARD": "BẢNG PHÂN CẢNH",
++    "Save the storyboard as an animated GIF, seen as the viewport shows it": "Lưu bảng phân cảnh thành ảnh GIF động, nhìn như trong khung xem",
++    "Slicer": "Phần mềm slicer",
++    "Storyboard": "Bảng phân cảnh",
++    "cmd.storyboard_create": "Bảng phân cảnh",
++    "cmd.storyboard_delete": "Xóa bảng phân cảnh",
++    "cmd.storyboard_list": "Danh sách bảng phân cảnh",
++    "help.storyboard.create": "Phát lần lượt các nghiên cứu chuyển động và hình chiếu tách rời thành một hoạt ảnh. Dùng để cho thấy cụm lắp chuyển động và tách ra thế nào, rồi xuất cả chuỗi thành GIF.",
++    "storyboard.clip_name": "Đoạn {number}",
++    "storyboard.clip_study": "{name}: phát",
++    "storyboard.clip_view": "{name}: tách ra",
++    "storyboard.clip_view_back": "{name}: tách ra rồi ghép lại",
++    "ui.workspace_animation_tabs": "Hoạt ảnh",
++    "ui.workspace_finish_first": "hãy hoàn tất thao tác mô hình hiện tại trước khi đổi không gian làm việc",
++    "ui.workspace_manufacture_slicing_description": "Gửi chi tiết sang phần mềm slicer để in 3D",
++    "ui.workspace_manufacture_tabs": "In",
++    "ui.workspace_simulation_tabs": "Mở bàn làm việc Mô phỏng với các khối của thiết kế này"
++  },
++  "ja": {
++    "ANIMATE": "アニメーション",
++    "A storyboard plays motion studies and exploded views, so the design needs one of them first.": "ストーリーボードはモーションスタディと分解ビューを再生します。先にどちらかを作成してください。",
++    "Add Clip": "クリップを追加",
++    "EDIT STORYBOARD": "ストーリーボードを編集",
++    "EXPLODE": "分解",
++    "Frame": "フレーム",
++    "New storyboard": "新しいストーリーボード",
++    "PRINT": "3Dプリント",
++    "Print": "3Dプリント",
++    "Remove this clip": "このクリップを削除",
++    "SEQUENCE": "シーケンス",
++    "STORYBOARD": "ストーリーボード",
++    "Save the storyboard as an animated GIF, seen as the viewport shows it": "ストーリーボードをビューポートの表示どおりにアニメーションGIFとして保存します",
++    "Slicer": "スライサー",
++    "Storyboard": "ストーリーボード",
++    "cmd.storyboard_create": "ストーリーボード",
++    "cmd.storyboard_delete": "ストーリーボードを削除",
++    "cmd.storyboard_list": "ストーリーボードの一覧",
++    "help.storyboard.create": "モーションスタディと分解ビューを順に再生し、1つのアニメーションにします。アセンブリの動きや分解の様子を見せ、全体をGIFとして書き出すときに使います。",
++    "storyboard.clip_name": "クリップ {number}",
++    "storyboard.clip_study": "{name}: 再生",
++    "storyboard.clip_view": "{name}: 分解",
++    "storyboard.clip_view_back": "{name}: 分解して戻す",
++    "ui.workspace_animation_tabs": "アニメーション",
++    "ui.workspace_finish_first": "ワークスペースを変更する前に、現在のモデリング操作を完了してください",
++    "ui.workspace_manufacture_slicing_description": "パーツをスライサーに送って3Dプリントします",
++    "ui.workspace_manufacture_tabs": "3Dプリント",
++    "ui.workspace_simulation_tabs": "このデザインのボディでシミュレーションのワークベンチを開きます"
++  },
++  "zh": {
++    "ANIMATE": "动画",
++    "A storyboard plays motion studies and exploded views, so the design needs one of them first.": "故事板播放运动研究和爆炸视图,因此设计中需要先有其中之一。",
++    "Add Clip": "添加片段",
++    "EDIT STORYBOARD": "编辑故事板",
++    "EXPLODE": "爆炸",
++    "Frame": "帧",
++    "New storyboard": "新建故事板",
++    "PRINT": "打印",
++    "Print": "打印",
++    "Remove this clip": "移除此片段",
++    "SEQUENCE": "序列",
++    "STORYBOARD": "故事板",
++    "Save the storyboard as an animated GIF, seen as the viewport shows it": "将故事板保存为动画 GIF,视角与视口一致",
++    "Slicer": "切片软件",
++    "Storyboard": "故事板",
++    "cmd.storyboard_create": "故事板",
++    "cmd.storyboard_delete": "删除故事板",
++    "cmd.storyboard_list": "列出故事板",
++    "help.storyboard.create": "将运动研究和爆炸视图依次播放为一段动画。用于展示装配体如何运动和拆开,然后将整个序列导出为 GIF。",
++    "storyboard.clip_name": "片段 {number}",
++    "storyboard.clip_study": "{name}:播放",
++    "storyboard.clip_view": "{name}:拆开",
++    "storyboard.clip_view_back": "{name}:拆开再复原",
++    "ui.workspace_animation_tabs": "动画",
++    "ui.workspace_finish_first": "请先完成当前建模操作,再切换工作区",
++    "ui.workspace_manufacture_slicing_description": "将零件发送到切片软件进行 3D 打印",
++    "ui.workspace_manufacture_tabs": "打印",
++    "ui.workspace_simulation_tabs": "用此设计的实体打开仿真工作台"
++  },
++  "ar": {
++    "ANIMATE": "رسوم متحركة",
++    "A storyboard plays motion studies and exploded views, so the design needs one of them first.": "تعرض لوحة القصة دراسات الحركة والمناظر المفككة، لذا يحتاج التصميم إلى أحدها أولًا.",
++    "Add Clip": "إضافة مقطع",
++    "EDIT STORYBOARD": "تحرير لوحة القصة",
++    "EXPLODE": "تفكيك",
++    "Frame": "إطار",
++    "New storyboard": "لوحة قصة جديدة",
++    "PRINT": "طباعة",
++    "Print": "طباعة",
++    "Remove this clip": "إزالة هذا المقطع",
++    "SEQUENCE": "تسلسل",
++    "STORYBOARD": "لوحة القصة",
++    "Save the storyboard as an animated GIF, seen as the viewport shows it": "حفظ لوحة القصة كصورة GIF متحركة كما تظهر في نافذة العرض",
++    "Slicer": "برنامج التقطيع",
++    "Storyboard": "لوحة القصة",
++    "cmd.storyboard_create": "لوحة القصة",
++    "cmd.storyboard_delete": "حذف لوحة القصة",
++    "cmd.storyboard_list": "عرض لوحات القصة",
++    "help.storyboard.create": "تعرض دراسات الحركة والمناظر المفككة واحدة تلو الأخرى كرسم متحرك واحد. استخدمها لإظهار كيفية تحرك التجميع وتفككه، ثم صدّر التسلسل كاملًا كملف GIF.",
++    "storyboard.clip_name": "المقطع {number}",
++    "storyboard.clip_study": "{name}: تشغيل",
++    "storyboard.clip_view": "{name}: تفكيك",
++    "storyboard.clip_view_back": "{name}: تفكيك وإعادة",
++    "ui.workspace_animation_tabs": "رسوم متحركة",
++    "ui.workspace_finish_first": "أنهِ عملية النمذجة الحالية قبل تغيير مساحة العمل",
++    "ui.workspace_manufacture_slicing_description": "إرسال الأجزاء إلى برنامج التقطيع للطباعة ثلاثية الأبعاد",
++    "ui.workspace_manufacture_tabs": "طباعة",
++    "ui.workspace_simulation_tabs": "يفتح منضدة عمل المحاكاة بأجسام هذا التصميم"
++  },
++  "he": {
++    "ANIMATE": "הנפשה",
++    "A storyboard plays motion studies and exploded views, so the design needs one of them first.": "לוח סיפור מנגן ניתוחי תנועה ותצוגות מפוצצות, ולכן התכן צריך אחד מהם קודם.",
++    "Add Clip": "הוספת קטע",
++    "EDIT STORYBOARD": "עריכת לוח סיפור",
++    "EXPLODE": "פיצוץ",
++    "Frame": "פריים",
++    "New storyboard": "לוח סיפור חדש",
++    "PRINT": "הדפסה",
++    "Print": "הדפסה",
++    "Remove this clip": "הסרת הקטע הזה",
++    "SEQUENCE": "רצף",
++    "STORYBOARD": "לוח סיפור",
++    "Save the storyboard as an animated GIF, seen as the viewport shows it": "שמירת לוח הסיפור כ-GIF מונפש, כפי שהוא נראה באזור התצוגה",
++    "Slicer": "תוכנת פריסה",
++    "Storyboard": "לוח סיפור",
++    "cmd.storyboard_create": "לוח סיפור",
++    "cmd.storyboard_delete": "מחיקת לוח סיפור",
++    "cmd.storyboard_list": "רשימת לוחות סיפור",
++    "help.storyboard.create": "מנגן ניתוחי תנועה ותצוגות מפוצצות בזה אחר זה כהנפשה אחת. השתמשו בו כדי להראות איך מכלול זז ומתפרק, ואז ייצאו את הרצף כולו כ-GIF.",
++    "storyboard.clip_name": "קטע {number}",
++    "storyboard.clip_study": "{name}: ניגון",
++    "storyboard.clip_view": "{name}: פירוק",
++    "storyboard.clip_view_back": "{name}: פירוק והרכבה",
++    "ui.workspace_animation_tabs": "הנפשה",
++    "ui.workspace_finish_first": "סיימו את פעולת המידול הנוכחית לפני החלפת סביבת העבודה",
++    "ui.workspace_manufacture_slicing_description": "שליחת חלקים לתוכנת פריסה להדפסה בתלת-ממד",
++    "ui.workspace_manufacture_tabs": "הדפסה",
++    "ui.workspace_simulation_tabs": "פתיחת שולחן העבודה של הסימולציה עם הגופים של תכן זה"
++  }
++}
+diff --git a/crates/doc/src/motion.rs b/crates/doc/src/motion.rs
+index 8d5dd830..4a317c2e 100644
+--- a/crates/doc/src/motion.rs
++++ b/crates/doc/src/motion.rs
+@@ -83,6 +83,32 @@ pub struct ExplodedView {
+     pub moves: Vec<(u64, Vec3)>,
+ }
+ 
++/// Where storyboards live: a key of the host application's in the design's metadata. A design with
++/// one is an ordinary file of its format, and any SolidCraft opens it and keeps the key.
++pub const STORYBOARDS_KEY: &str = "com.sensesim.storyboards";
++
++/// One clip of a storyboard, by the stable id of the study or view it plays.
++#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum StoryboardClip {
++    /// A motion study, played from start to end.
++    Study { study: u64 },
++    /// An exploded view coming apart, and back together when `back`.
++    View { view: u64, back: bool },
++}
++
++/// Clips in the order they are shown.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++pub struct Storyboard {
++    pub name: String,
++    pub clips: Vec<StoryboardClip>,
++}
++
++/// The design's storyboards. Anything else under the key (a hostile or foreign file) reads as none.
++pub fn storyboards(metadata: &crate::Metadata) -> Vec<Storyboard> {
++    metadata.0.get(STORYBOARDS_KEY).and_then(|v| v.get("boards")).and_then(|b| serde_json::from_value(b.clone()).ok()).unwrap_or_default()
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/engine/src/cmd/motion.rs b/crates/engine/src/cmd/motion.rs
+index f1c5b744..7c4a41a2 100644
+--- a/crates/engine/src/cmd/motion.rs
++++ b/crates/engine/src/cmd/motion.rs
+@@ -22,6 +22,8 @@ mod animation;
+ pub(crate) mod associative;
+ #[path = "contact_sweep.rs"]
+ pub(crate) mod contact_sweep;
++#[path = "motion_storyboard.rs"]
++mod storyboard;
+ #[path = "motion_sweep.rs"]
+ mod sweep;
+ 
+@@ -71,9 +73,9 @@ pub static COMMANDS: &[CommandSpec] = &[
+     CommandSpec::new("motion.export_animation", "Export Motion Animation", animation::export).icon("export").noundo().params(
+         "study: id|name, or joint: id|name with from and to (degrees for angles, mm for distances, or expressions) and index?, or \
+          view: id|name (an exploded view, coming apart from the assembled placement) with back? (default false; true: back together \
+-         too, exploded at the middle frame of an odd count); path: a .gif file, or a folder for PNG frames (frame-0001.png, \
+-         frame-0002.png, …); samples? (frames, 2…1000; default the study's steps + 1, 100 for a joint, 41 for a view or 81 with \
+-         back); width?, height? (16…4096 pixels, default 800 × 500); camera?: {target, yaw, pitch, roll?, distance, fov?, up?} \
++         too, exploded at the middle frame of an odd count), or storyboard: name (its clips one after another); path: a .gif file, \
++         or a folder for PNG frames (frame-0001.png, frame-0002.png, …); samples? (frames, 2…1000; default the study's steps + 1, \
++         100 for a joint, 41 for a view or 81 with back; a storyboard's clips share them); width?, height? (16…4096 pixels, default 800 × 500); camera?: {target, yaw, pitch, roll?, distance, fov?, up?} \
+          (ui.camera's reply; fields left out keep the default view: view.apply's camera, or the home view framing the model, for a \
+          view both assembled and exploded); fps? (1…50, default 20); grid?, axes? (default true: the ground grid and the origin's \
+          axes) - draws the study as it plays, the joint as it is driven or the view as it explodes, with the headless renderer → \
+@@ -110,9 +112,19 @@ pub static COMMANDS: &[CommandSpec] = &[
+     CommandSpec::new("explode.show", "Show Exploded View", explode_show)
+         .icon("explode")
+         .noundo()
+-        .params("view: id|name (or none: back to the assembled placement) — shown only; the design keeps its placements"),
++        .params("view: id|name (or none: back to the assembled placement); amount? (0…1, default 1: how far apart) — shown only; the design keeps its placements"),
+     CommandSpec::new("explode.list", "List Exploded Views", explode_list).icon("list").noundo(),
+     CommandSpec::new("explode.delete", "Delete Exploded View", explode_delete).icon("delete").params("view"),
++    CommandSpec::new("storyboard.create", "Storyboard", storyboard::create).icon("timeline_play").enabled(storyboard::has_something_to_play).params(
++        "clips: [{study: id|name} or {view: id|name, back?: bool}] (1…64, in the order they are shown; a study plays from start to \
++         end, a view comes apart, and back together with back); name? (default StoryboardN); storyboard?: name (edit that one). \
++         Kept in the design's metadata; motion.export_animation draws it → storyboard, clips",
++    ),
++    CommandSpec::new("storyboard.delete", "Delete Storyboard", storyboard::delete).icon("delete").params("storyboard: name"),
++    CommandSpec::new("storyboard.list", "List Storyboards", storyboard::list)
++        .icon("list")
++        .noundo()
++        .params("→ storyboards: [{name, clips: [{study or view, back, name, missing}]}] (missing: its study or view was deleted)"),
+ ];
+ 
+ const MAX_ITEMS: usize = 10_000;
+@@ -1111,7 +1123,11 @@ fn explode_show(s: &mut Session, p: &Value) -> Result<Value> {
+     }
+     let i = view_index(s, p, cmd)?;
+     let v = s.doc.assembly.exploded.get(i).cloned().ok_or_else(|| bad(cmd, "view"))?;
+-    s.pending_moves = exploded_at(&explode_moves(s, &v), 1.0);
++    let amount = match p.get("amount") {
++        None => 1.0,
++        Some(a) => a.as_f64().filter(|a| (0.0..=1.0).contains(a)).ok_or_else(|| bad(cmd, "`amount` must be 0…1"))?,
++    };
++    s.pending_moves = exploded_at(&explode_moves(s, &v), amount);
+     s.revision += 1;
+     Ok(json!({"view": v.id, "name": v.name}))
+ }
+diff --git a/crates/engine/src/cmd/motion_animation.rs b/crates/engine/src/cmd/motion_animation.rs
+index 4c820a43..a633b621 100644
+--- a/crates/engine/src/cmd/motion_animation.rs
++++ b/crates/engine/src/cmd/motion_animation.rs
+@@ -6,10 +6,9 @@
+ use std::collections::BTreeSet;
+ 
+ use serde_json::{Value, json};
+-use solidcraft_doc::Mat;
+-use solidcraft_geom::Vec3;
++use solidcraft_doc::motion::ExplodedView;
+ 
+-use super::{Plan, drive_with_contact, explode_moves, exploded_at, motion_plan, sample_count, view_index};
++use super::{Plan, drive_with_contact, explode_moves, exploded_at, motion_plan, sample_count, storyboard, view_index};
+ use crate::capture::{self, Renderer};
+ use crate::params::{bad, str_};
+ use crate::render::Camera;
+@@ -19,8 +18,56 @@ use crate::{Result, Session};
+ enum Motion {
+     /// A study played or a joint driven: the values driven, and what they are at each frame.
+     Drive(BTreeSet<(u64, usize)>, Plan),
+-    /// An exploded view's moves coming apart, and back together when true.
+-    Explode(Vec<(u64, Mat, Vec3)>, bool),
++    /// An exploded view coming apart, and back together when true.
++    Explode(ExplodedView, bool),
++}
++
++/// What the parameters of one clip show, and how many frames it takes unless told.
++fn clip(s: &Session, p: &Value, cmd: &str) -> Result<(usize, Motion)> {
++    Ok(match (p.get("view"), p.get("study").or(p.get("joint"))) {
++        (Some(_), Some(_)) => return Err(bad(cmd, "give an exploded `view`, a `study` or a `joint`: one of them")),
++        (Some(_), None) => {
++            let back = match p.get("back") {
++                None => false,
++                Some(Value::Bool(b)) => *b,
++                Some(_) => return Err(bad(cmd, "`back` must be true or false")),
++            };
++            let v = s.doc.assembly.exploded.get(view_index(s, p, cmd)?).ok_or_else(|| bad(cmd, "view"))?;
++            (if back { 81 } else { 41 }, Motion::Explode(v.clone(), back))
++        }
++        (None, driven) => {
++            if driven.is_none() {
++                return Err(bad(cmd, "give a `study`, a `joint` with `from` and `to`, an exploded `view` or a `storyboard`"));
++            }
++            if p.get("back").is_some() {
++                return Err(bad(cmd, "`back` goes with an exploded `view`"));
++            }
++            let (default, given, plan) = motion_plan(s, p, cmd)?;
++            (default, Motion::Drive(given, plan))
++        }
++    })
++}
++
++/// `total` frames shared between clips in proportion to what each would take, at least 2 each.
++pub(super) fn share(defaults: &[usize], total: usize) -> Vec<usize> {
++    let wanted: usize = defaults.iter().sum::<usize>().max(1);
++    let mut counts: Vec<usize> = defaults.iter().map(|d| (d * total / wanted).max(2)).collect();
++    // Rounding down leaves frames over, and the floors can overshoot: the longest clips even it out.
++    let mut sum: usize = counts.iter().sum();
++    while sum != total {
++        match counts.iter_mut().max() {
++            Some(longest) if sum < total => {
++                *longest += 1;
++                sum += 1;
++            }
++            Some(longest) if *longest > 2 => {
++                *longest -= 1;
++                sum -= 1;
++            }
++            _ => break,
++        }
++    }
++    counts
+ }
+ 
+ /// Most frames of one animation.
+@@ -75,41 +122,46 @@ pub(super) fn export_with(s: &Session, p: &Value, renderer: Option<&Renderer>) -
+         Some(_) => Err(bad(cmd, format!("`{key}` must be true or false"))),
+     };
+     let guides = crate::view::Guides { grid: flag("grid", true)?, axes: flag("axes", true)? };
+-    let (default, motion) = match (p.get("view"), p.get("study").or(p.get("joint"))) {
+-        (Some(_), Some(_)) => return Err(bad(cmd, "give an exploded `view`, a `study` or a `joint`: one of them")),
+-        (Some(_), None) => {
+-            let back = flag("back", false)?;
+-            let v = s.doc.assembly.exploded.get(view_index(s, p, cmd)?).ok_or_else(|| bad(cmd, "view"))?;
+-            (if back { 81 } else { 41 }, Motion::Explode(explode_moves(s, v), back))
+-        }
+-        (None, driven) => {
+-            if driven.is_none() {
+-                return Err(bad(cmd, "give a `study`, a `joint` with `from` and `to`, or an exploded `view`"));
+-            }
+-            if p.get("back").is_some() {
+-                return Err(bad(cmd, "`back` goes with an exploded `view`"));
+-            }
+-            let (default, given, plan) = motion_plan(s, p, cmd)?;
+-            (default, Motion::Drive(given, plan))
++    let clips = match p.get("storyboard") {
++        Some(_) if p.get("view").or(p.get("study")).or(p.get("joint")).is_some() => {
++            return Err(bad(cmd, "give a `storyboard`, an exploded `view`, a `study` or a `joint`: one of them"));
+         }
++        Some(_) => storyboard::clips(s, p, cmd)?.iter().map(|c| clip(s, c, cmd)).collect::<Result<Vec<_>>>()?,
++        None => vec![clip(s, p, cmd)?],
+     };
+-    let home = || match &motion {
++    let home = || {
++        let views: Vec<&ExplodedView> = clips
++            .iter()
++            .filter_map(|(_, m)| match m {
++                Motion::Explode(v, _) => Some(v),
++                Motion::Drive(..) => None,
++            })
++            .collect();
++        if views.is_empty() {
++            return crate::view::home_camera(s);
++        }
+         // Framing both ends: every frame lies between the parts assembled and exploded.
+-        Motion::Explode(moves, _) => {
+-            let mut t = s.scratch();
+-            t.pending_moves.clear();
+-            let assembled = crate::view::bounds(&t);
+-            t.pending_moves = exploded_at(moves, 1.0);
+-            let mut c = crate::view::home_camera(&t);
+-            c.fit(&assembled.union(&crate::view::bounds(&t)));
+-            c
++        let mut t = s.scratch();
++        t.pending_moves.clear();
++        let mut whole = crate::view::bounds(&t);
++        for v in views {
++            t.pending_moves = exploded_at(&explode_moves(s, v), 1.0);
++            whole = whole.union(&crate::view::bounds(&t));
+         }
+-        Motion::Drive(..) => crate::view::home_camera(s),
++        let mut c = crate::view::home_camera(&t);
++        c.fit(&whole);
++        c
+     };
+     let cam = camera(s, home, p.get("camera"), cmd)?;
+     // At least 4 frames fit even at the largest size.
+     let max = MAX_FRAMES.min(if gif { MAX_GIF_PIXELS } else { MAX_PNG_PIXELS } / (width as usize * height as usize));
+-    let n = sample_count(p, default.min(max), max, cmd).map_err(|_| bad(cmd, format!("`samples` must be 2…{max} for {width} × {height} frames")))?;
++    let defaults: Vec<usize> = clips.iter().map(|(d, _)| *d).collect();
++    let total = sample_count(p, defaults.iter().sum::<usize>().min(max), max, cmd)
++        .map_err(|_| bad(cmd, format!("`samples` must be 2…{max} for {width} × {height} frames")))?;
++    if clips.len() * 2 > total {
++        return Err(bad(cmd, format!("{} clips need at least {} frames, and {total} fit at {width} × {height}", clips.len(), clips.len() * 2)));
++    }
++    let counts = share(&defaults, total);
+     let renderer = renderer.ok_or_else(|| bad(cmd, "no renderer is installed to draw pictures in this process"))?;
+     // A destination outside an agent's folders is refused before anything is drawn.
+     let io = |e: std::io::Error| bad(cmd, format!("{path}: {e}"));
+@@ -129,34 +181,44 @@ pub(super) fn export_with(s: &Session, p: &Value, renderer: Option<&Renderer>) -
+     t.pending_moves.clear();
+     let (mut frames, mut bytes, mut drawn_by) = (Vec::new(), 0, "");
+     let mut stop = (Value::Null, Value::Null, Value::Null);
+-    for k in 0..n {
+-        match &motion {
+-            Motion::Drive(given, plan) => {
+-                let want = plan(&t, k, n);
+-                let (r, _) = drive_with_contact(&mut t, &want, given)?;
+-                if stop.0.is_null() && (r["stopped_by_loop"].is_object() || r["stopped_by_contact"].is_object()) {
+-                    stop = (json!(k), r["stopped_by_loop"].clone(), r["stopped_by_contact"].clone());
++    let mut drawn = 0;
++    for ((_, motion), &n) in clips.iter().zip(&counts) {
++        // A clip follows on from the last: a view comes apart from where the joints were left.
++        let opening = match motion {
++            Motion::Explode(v, _) => explode_moves(&t, v),
++            Motion::Drive(..) => Vec::new(),
++        };
++        for k in 0..n {
++            match motion {
++                Motion::Drive(given, plan) => {
++                    t.pending_moves.clear();
++                    let want = plan(&t, k, n);
++                    let (r, _) = drive_with_contact(&mut t, &want, given)?;
++                    if stop.0.is_null() && (r["stopped_by_loop"].is_object() || r["stopped_by_contact"].is_object()) {
++                        stop = (json!(drawn), r["stopped_by_loop"].clone(), r["stopped_by_contact"].clone());
++                    }
++                }
++                // Shown as explode.show shows it, the way out at a steady pace (and back).
++                Motion::Explode(_, back) => {
++                    let u = k as f64 / (n - 1) as f64;
++                    t.pending_moves = exploded_at(&opening, if *back { 1.0 - (2.0 * u - 1.0).abs() } else { u });
+                 }
+             }
+-            // Shown as explode.show shows it, the way out at a steady pace (and back).
+-            Motion::Explode(moves, back) => {
+-                let u = k as f64 / (n - 1) as f64;
+-                t.pending_moves = exploded_at(moves, if *back { 1.0 - (2.0 * u - 1.0).abs() } else { u });
++            let scene = crate::view::scene_with_guides(&t, &cam, s.section, guides);
++            let picture = capture::rgba_with(Some(renderer), &scene, &cam, width, height).map_err(|e| bad(cmd, e))?;
++            drawn_by = picture.renderer;
++            drawn += 1;
++            if gif {
++                frames.push(picture.rgba);
++            } else {
++                let png = crate::render::png(width as usize, height as usize, picture.rgba).ok_or_else(|| bad(cmd, "PNG encoding failed"))?;
++                let file = frame_path(drawn);
++                solidcraft_io::vfs::write(&file, &png).map_err(|e| bad(cmd, format!("{file}: {e}")))?;
++                bytes += png.len();
+             }
+         }
+-        let scene = crate::view::scene_with_guides(&t, &cam, s.section, guides);
+-        let picture = capture::rgba_with(Some(renderer), &scene, &cam, width, height).map_err(|e| bad(cmd, e))?;
+-        drawn_by = picture.renderer;
+-        if gif {
+-            frames.push(picture.rgba);
+-        } else {
+-            let png = crate::render::png(width as usize, height as usize, picture.rgba).ok_or_else(|| bad(cmd, "PNG encoding failed"))?;
+-            let file = frame_path(k + 1);
+-            solidcraft_io::vfs::write(&file, &png).map_err(|e| bad(cmd, format!("{file}: {e}")))?;
+-            bytes += png.len();
+-        }
+     }
+-    let mut out = json!({"path": path, "format": if gif { "gif" } else { "png" }, "frames": n, "width": width, "height": height});
++    let mut out = json!({"path": path, "format": if gif { "gif" } else { "png" }, "frames": drawn, "width": width, "height": height});
+     if gif {
+         // GIF counts in hundredths of a second, and viewers slow anything under 2 down.
+         let delay = (100.0 / fps).round().clamp(2.0, 100.0) as u16;
+diff --git a/crates/engine/src/cmd/motion_storyboard.rs b/crates/engine/src/cmd/motion_storyboard.rs
+new file mode 100644
+index 00000000..d8338965
+--- /dev/null
++++ b/crates/engine/src/cmd/motion_storyboard.rs
+@@ -0,0 +1,130 @@
++//! Storyboards: motion studies and exploded views in the order they are shown, for
++//! `motion.export_animation` to draw one after another. See `solidcraft_doc::motion` for where
++//! they are kept.
++
++use serde_json::{Value, json};
++use solidcraft_doc::metadata::{Owner, check_text};
++use solidcraft_doc::motion::{STORYBOARDS_KEY, Storyboard, StoryboardClip, storyboards};
++
++use super::{study_index, view_index};
++use crate::params::{bad, str_};
++use crate::{Result, Session};
++
++/// Most storyboards in a design, and clips in one.
++const MAX_BOARDS: usize = 64;
++const MAX_CLIPS: usize = 64;
++
++pub(super) fn has_something_to_play(s: &Session) -> std::result::Result<(), String> {
++    let a = &s.doc.assembly;
++    if a.studies.is_empty() && a.exploded.is_empty() {
++        Err("A storyboard plays motion studies and exploded views, so the design needs one of them first.".into())
++    } else {
++        Ok(())
++    }
++}
++
++fn store(s: &mut Session, boards: &[Storyboard], cmd: &str) -> Result<()> {
++    let value = if boards.is_empty() { Value::Null } else { json!({ "boards": boards }) };
++    let mut next = s.doc.metadata.clone();
++    next.set(Owner::Design, STORYBOARDS_KEY, value).map_err(|e| bad(cmd, e.to_string()))?;
++    s.doc_mut().metadata = next;
++    Ok(())
++}
++
++/// The clip `c` names, by the stable id of what it plays.
++fn clip(s: &Session, c: &Value, cmd: &str) -> Result<StoryboardClip> {
++    let a = &s.doc.assembly;
++    match (c.get("study"), c.get("view")) {
++        (Some(_), None) => {
++            let study = a.studies.get(study_index(s, c, cmd)?).ok_or_else(|| bad(cmd, "study"))?.id;
++            Ok(StoryboardClip::Study { study })
++        }
++        (None, Some(_)) => {
++            let view = a.exploded.get(view_index(s, c, cmd)?).ok_or_else(|| bad(cmd, "view"))?.id;
++            let back = match c.get("back") {
++                None => false,
++                Some(Value::Bool(b)) => *b,
++                Some(_) => return Err(bad(cmd, "`back` must be true or false")),
++            };
++            Ok(StoryboardClip::View { view, back })
++        }
++        _ => Err(bad(cmd, "each clip is {study} or {view, back?}")),
++    }
++}
++
++pub(super) fn create(s: &mut Session, p: &Value) -> Result<Value> {
++    let cmd = "storyboard.create";
++    let given = p.get("clips").and_then(Value::as_array).ok_or_else(|| bad(cmd, "`clips` must be a list of {study} or {view, back?}"))?;
++    if given.is_empty() || given.len() > MAX_CLIPS {
++        return Err(bad(cmd, format!("a storyboard has 1…{MAX_CLIPS} clips")));
++    }
++    let clips = given.iter().map(|c| clip(s, c, cmd)).collect::<Result<Vec<_>>>()?;
++    let mut boards = storyboards(&s.doc.metadata);
++    let editing = match str_(p, "storyboard") {
++        Some(name) => Some(boards.iter().position(|b| b.name == name).ok_or_else(|| bad(cmd, format!("no storyboard `{name}`")))?),
++        None => None,
++    };
++    let name = match str_(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
++        Some(name) => name.to_string(),
++        None => match editing.and_then(|i| boards.get(i)) {
++            Some(b) => b.name.clone(),
++            None => (1..).map(|k| format!("Storyboard{k}")).find(|n| !boards.iter().any(|b| b.name == *n)).unwrap_or_default(),
++        },
++    };
++    check_text("the name", &name).map_err(|e| bad(cmd, e.to_string()))?;
++    if boards.iter().enumerate().any(|(i, b)| b.name == name && Some(i) != editing) {
++        return Err(bad(cmd, format!("there is already a storyboard `{name}`")));
++    }
++    let count = clips.len();
++    if editing.is_none() && boards.len() >= MAX_BOARDS {
++        return Err(bad(cmd, format!("a design has at most {MAX_BOARDS} storyboards")));
++    }
++    let board = Storyboard { name: name.clone(), clips };
++    match editing.and_then(|i| boards.get_mut(i)) {
++        Some(b) => *b = board,
++        None => boards.push(board),
++    }
++    store(s, &boards, cmd)?;
++    Ok(json!({"storyboard": name, "clips": count}))
++}
++
++pub(super) fn delete(s: &mut Session, p: &Value) -> Result<Value> {
++    let cmd = "storyboard.delete";
++    let name = str_(p, "storyboard").ok_or_else(|| bad(cmd, "`storyboard` must be a name"))?;
++    let mut boards = storyboards(&s.doc.metadata);
++    let before = boards.len();
++    boards.retain(|b| b.name != name);
++    if boards.len() == before {
++        return Err(bad(cmd, format!("no storyboard `{name}`")));
++    }
++    store(s, &boards, cmd)?;
++    Ok(json!({"deleted": name}))
++}
++
++pub(super) fn list(s: &mut Session, _: &Value) -> Result<Value> {
++    let a = &s.doc.assembly;
++    let row = |c: &StoryboardClip| match c {
++        StoryboardClip::Study { study } => {
++            let name = a.studies.iter().find(|m| m.id == *study).map(|m| m.name.as_str());
++            json!({"study": study, "name": name, "missing": name.is_none()})
++        }
++        StoryboardClip::View { view, back } => {
++            let name = a.exploded.iter().find(|v| v.id == *view).map(|v| v.name.as_str());
++            json!({"view": view, "back": back, "name": name, "missing": name.is_none()})
++        }
++    };
++    let boards = storyboards(&s.doc.metadata);
++    let rows: Vec<Value> = boards.iter().map(|b| json!({"name": b.name, "clips": b.clips.iter().map(row).collect::<Vec<_>>()})).collect();
++    Ok(json!({"storyboards": rows}))
++}
++
++/// The parameters of each clip of the storyboard `p` names, as the exporter takes one clip's.
++pub(super) fn clips(s: &Session, p: &Value, cmd: &str) -> Result<Vec<Value>> {
++    let name = str_(p, "storyboard").ok_or_else(|| bad(cmd, "`storyboard` must be a name"))?;
++    let boards = storyboards(&s.doc.metadata);
++    let board = boards.iter().find(|b| b.name == name).ok_or_else(|| bad(cmd, format!("no storyboard `{name}`")))?;
++    if board.clips.is_empty() {
++        return Err(bad(cmd, format!("storyboard `{name}` has no clips")));
++    }
++    Ok(board.clips.iter().map(|c| json!(c)).collect())
++}
+diff --git a/crates/engine/src/cmd/motion_tests.rs b/crates/engine/src/cmd/motion_tests.rs
+index 2b60116d..cbce8121 100644
+--- a/crates/engine/src/cmd/motion_tests.rs
++++ b/crates/engine/src/cmd/motion_tests.rs
+@@ -851,6 +851,141 @@ fn an_animation_has_the_frames_and_the_size_asked_for() {
+     let _ = std::fs::remove_dir_all(&dir);
+ }
+ 
++/// `rail()` with something to play: the study Push and the exploded view Apart.
++fn rail_with_clips() -> Session {
++    let mut s = rail();
++    run(&mut s, "motion.study", json!({"name": "Push", "steps": 10, "keys": [{"joint": "Rail", "points": [[0, 10], [10, 0]]}]}));
++    run(&mut s, "explode.create", json!({"name": "Apart", "scale": 1}));
++    run(&mut s, "explode.show", json!({"view": null}));
++    s
++}
++
++#[test]
++fn a_storyboard_is_drawn_clip_after_clip() {
++    let mut s = rail_with_clips();
++    let r = run(&mut s, "storyboard.create", json!({"name": "Show", "clips": [{"study": "Push"}, {"view": "Apart", "back": true}]}));
++    assert_eq!((r["storyboard"].as_str(), r["clips"].as_u64()), (Some("Show"), Some(2)), "{r}");
++    let before = s.doc.clone();
++    let dir = out_dir("storyboard");
++    let gif = dir.join("show.gif");
++    // Each clip's own frames, one after another: 11 for the study, 81 for the view there and back.
++    let p = json!({"storyboard": "Show", "path": gif.to_string_lossy(), "width": 32, "height": 32});
++    let r = super::animation::export_with(&s, &p, Some(&cpu)).unwrap();
++    assert_eq!(r["frames"], 92, "{r}");
++    assert_eq!(gif_frames(&std::fs::read(&gif).unwrap()), (32, 32, 92));
++    // Asked for fewer, the clips share them.
++    let p = json!({"storyboard": "Show", "path": gif.to_string_lossy(), "samples": 20, "width": 32, "height": 32});
++    let r = super::animation::export_with(&s, &p, Some(&cpu)).unwrap();
++    assert_eq!(r["frames"], 20, "{r}");
++    assert_eq!(*s.doc, *before, "drawing it changes nothing");
++
++    // In a folder, the frames tell the order: the study pushes, and the view opens from where the
++    // study left the parts rather than from where they were placed.
++    let frames = dir.join("frames");
++    let p = json!({"storyboard": "Show", "path": frames.to_string_lossy(), "samples": 12, "width": 96, "height": 64});
++    super::animation::export_with(&s, &p, Some(&cpu)).unwrap();
++    let frame = |k: usize| std::fs::read(frames.join(format!("frame-{k:04}.png"))).unwrap();
++    assert_eq!((1..=12).filter(|k| frames.join(format!("frame-{k:04}.png")).exists()).count(), 12);
++    assert_ne!(frame(1), frame(2), "the study moves from its first frame");
++    assert_eq!(frame(2), frame(3), "the view starts where the study ended");
++    assert_ne!(frame(4), frame(8), "the view has opened by the middle of its clip");
++    assert_eq!(frame(3), frame(12), "there and back, it ends where the study left it");
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
++#[test]
++fn storyboard_frames_are_shared_fairly() {
++    use super::animation::share;
++    assert_eq!(share(&[7], 7), [7]);
++    assert_eq!(share(&[11, 81], 92), [11, 81]);
++    let shared = share(&[11, 81], 20);
++    assert_eq!(shared.iter().sum::<usize>(), 20);
++    assert!(shared[0] >= 2 && shared[1] > shared[0], "{shared:?}");
++    // The floor of two frames each gives way last.
++    assert_eq!(share(&[1, 1, 100], 6).iter().sum::<usize>(), 6);
++}
++
++#[test]
++fn storyboards_are_edited_named_and_refused_like_the_rest() {
++    let mut s = rail_with_clips();
++    let bad = |s: &mut Session, p: Value| s.execute("storyboard.create", &p).unwrap_err().to_string();
++    assert!(bad(&mut s, json!({"clips": []})).contains("1…64"));
++    assert!(bad(&mut s, json!({"clips": [{"study": "Nope"}]})).contains("Nope"));
++    assert!(bad(&mut s, json!({"clips": [{"study": "Push", "view": "Apart"}]})).contains("{study}"));
++    assert!(bad(&mut s, json!({"clips": [{"view": "Apart", "back": "yes"}]})).contains("back"));
++
++    // A default name, and no second one by that name.
++    assert_eq!(run(&mut s, "storyboard.create", json!({"clips": [{"study": "Push"}]}))["storyboard"], "Storyboard1");
++    assert_eq!(run(&mut s, "storyboard.create", json!({"clips": [{"study": "Push"}]}))["storyboard"], "Storyboard2");
++    assert!(bad(&mut s, json!({"name": "Storyboard1", "clips": [{"study": "Push"}]})).contains("already"));
++
++    // Editing keeps the name unless given another, and may take its own.
++    assert_eq!(run(&mut s, "storyboard.create", json!({"storyboard": "Storyboard1", "clips": [{"view": "Apart"}]}))["storyboard"], "Storyboard1");
++    assert_eq!(run(&mut s, "storyboard.create", json!({"storyboard": "Storyboard1", "name": "Storyboard1", "clips": [{"view": "Apart"}]}))["clips"], 1);
++    assert_eq!(run(&mut s, "storyboard.create", json!({"storyboard": "Storyboard1", "name": "Open", "clips": [{"view": "Apart"}]}))["storyboard"], "Open");
++    assert!(bad(&mut s, json!({"storyboard": "Gone", "clips": [{"view": "Apart"}]})).contains("Gone"));
++
++    // A study deleted later shows as missing, and the export says what it can't find.
++    run(&mut s, "motion.delete", json!({"study": "Push"}));
++    let list = run(&mut s, "storyboard.list", json!({}));
++    assert_eq!(list["storyboards"][1]["name"], "Storyboard2", "{list}");
++    assert_eq!(list["storyboards"][1]["clips"][0]["missing"], true, "{list}");
++    assert_eq!(list["storyboards"][0]["clips"][0]["missing"], false, "{list}");
++    let dir = out_dir("storyboard_gone");
++    let p = json!({"storyboard": "Storyboard2", "path": dir.join("x.gif").to_string_lossy()});
++    let Err(e) = super::animation::export_with(&s, &p, Some(&cpu)) else { panic!("a missing clip draws nothing") };
++    assert!(e.to_string().contains("motion study"), "{e}");
++    let _ = std::fs::remove_dir_all(&dir);
++
++    // Exactly one thing to draw.
++    let p = json!({"storyboard": "Open", "view": "Apart", "path": "x.gif"});
++    let Err(e) = super::animation::export_with(&s, &p, Some(&cpu)) else { panic!("two things to draw") };
++    assert!(e.to_string().contains("one of them"), "{e}");
++}
++
++/// In the metadata: undone like any change, saved in the design, and gone from it with the last one.
++#[test]
++fn storyboards_live_in_the_design_without_changing_its_format() {
++    use solidcraft_doc::motion::{STORYBOARDS_KEY, storyboards};
++    let mut s = rail_with_clips();
++    let format = s.doc.format.clone();
++    run(&mut s, "storyboard.create", json!({"name": "Show", "clips": [{"study": "Push"}]}));
++    assert_eq!(s.doc.format, format);
++    assert_eq!(storyboards(&s.doc.metadata).len(), 1);
++
++    // Saved and read back whole.
++    let saved = serde_json::to_string(&*s.doc).unwrap();
++    let read = solidcraft_doc::format::read(&saved).unwrap();
++    assert_eq!(storyboards(&read.metadata), storyboards(&s.doc.metadata));
++
++    run(&mut s, "edit.undo", json!({}));
++    assert!(storyboards(&s.doc.metadata).is_empty(), "one undo step");
++    run(&mut s, "edit.redo", json!({}));
++    assert_eq!(storyboards(&s.doc.metadata).len(), 1);
++
++    assert_eq!(run(&mut s, "storyboard.delete", json!({"storyboard": "Show"}))["deleted"], "Show");
++    assert!(!s.doc.metadata.0.contains_key(STORYBOARDS_KEY), "no empty key is left behind");
++    assert!(s.execute("storyboard.delete", &json!({"storyboard": "Show"})).is_err());
++
++    // What another tool left under the key reads as none, and isn't a crash.
++    let mut foreign = s.doc.metadata.clone();
++    foreign.0.insert(STORYBOARDS_KEY.into(), json!({"boards": "not a list"}));
++    assert!(storyboards(&foreign).is_empty());
++}
++
++#[test]
++fn a_view_opens_part_way_when_asked() {
++    let mut s = rail_with_clips();
++    run(&mut s, "explode.show", json!({"view": "Apart", "amount": 0}));
++    let closed = s.pending_moves.clone();
++    run(&mut s, "explode.show", json!({"view": "Apart", "amount": 1}));
++    let open = s.pending_moves.clone();
++    run(&mut s, "explode.show", json!({"view": "Apart"}));
++    assert_eq!(s.pending_moves, open, "all the way unless told");
++    assert_ne!(closed, open);
++    assert!(s.execute("explode.show", &json!({"view": "Apart", "amount": 2})).is_err());
++}
++
+ #[test]
+ fn a_two_frame_drive_gives_two_different_frames() {
+     let s = rail();
+diff --git a/crates/ui-egui/src/command_help.rs b/crates/ui-egui/src/command_help.rs
+index 3b20b346..25eff79e 100644
+--- a/crates/ui-egui/src/command_help.rs
++++ b/crates/ui-egui/src/command_help.rs
+@@ -263,6 +263,7 @@ pub const DOCUMENTED: &[&str] = &[
+     "solid.thread",
+     "solid.torus",
+     "solid.web",
++    "storyboard.create",
+     "surface.blend",
+     "surface.boundary",
+     "surface.extend",
+diff --git a/crates/ui-egui/src/context_menu.rs b/crates/ui-egui/src/context_menu.rs
+index 71b80c3d..67e205a7 100644
+--- a/crates/ui-egui/src/context_menu.rs
++++ b/crates/ui-egui/src/context_menu.rs
+@@ -408,18 +408,25 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
+         Target::Toolbar => crate::toolbar_custom::toolbar_items(app),
+         Target::HistoryControls => crate::timeline::transport_items(app),
+         Target::Workspace => {
+-            let rendering = crate::render_workspace::active(app);
+-            let mut v = vec![
+-                act("ui.workspace.design", "Design", "ws_design").with(json!({"workspace":"design"})).key(if rendering { "" } else { "current" }),
+-                act("ui.workspace.render", "Render", "ws_render")
+-                    .with(json!({"workspace":"render"}))
+-                    .key(if rendering { "current" } else { "" })
+-                    .on(app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()),
+-            ];
+-            for (w, icon) in [("Animation", "ws_animate"), ("Simulation", ""), ("Manufacture", ""), ("Drawing", "ws_drawing")] {
+-                v.push(act("ui.workspace", w, icon).key("coming later").on(false));
+-            }
+-            v
++            let now = crate::workspace::current(app);
++            let free = crate::workspace::can_switch(app);
++            let row = |id: &str, label: &str, icon: &str, slug: &str| {
++                act(id, label, icon).with(json!({"workspace": slug})).key(if now == slug { "current" } else { "" })
++            };
++            let planned = |label: &str, icon: &str| act("ui.workspace", label, icon).key("coming later").on(false);
++            vec![
++                // The way back from Render, whatever Render has open.
++                row("ui.workspace.design", "Design", "ws_design", "design").on(free || matches!(now, "design" | "render")),
++                row("ui.workspace.render", "Render", "ws_render", "render").on(free),
++                row("ui.workspace.animation", "Animation", "ws_animate", "animation").on(free || now == "animation"),
++                if app.host_simulation {
++                    row("ui.workspace.simulation", "Simulation", "ws_simulation", "simulation").on(free)
++                } else {
++                    planned("Simulation", "ws_simulation")
++                },
++                row("ui.workspace.manufacture", "Manufacture", "ws_manufacture", "manufacture").on(free || now == "manufacture"),
++                planned("Drawing", "ws_drawing"),
++            ]
+         }
+         Target::Units => crate::prefs::UNITS
+             .iter()
+@@ -1699,9 +1706,14 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
+             }
+         }
+         "ui.historyShowHidden" => app.tree.history_show_hidden = p["show"].as_bool().unwrap_or(false),
+-        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" => {
++        "ui.workspace"
++        | "ui.workspace.design"
++        | "ui.workspace.render"
++        | "ui.workspace.animation"
++        | "ui.workspace.simulation"
++        | "ui.workspace.manufacture" => {
+             if let Some(workspace) = p.get("workspace").and_then(Value::as_str)
+-                && let Err(e) = crate::render_workspace::enter(app, workspace == "render")
++                && let Err(e) = crate::workspace::enter(app, workspace)
+             {
+                 app.set_status(e, true);
+             }
+@@ -3115,9 +3127,10 @@ mod workspace_menu_tests {
+         assert!(rows.windows(2).all(|pair| pair[0].bottom() <= pair[1].top()));
+         assert!(rows[0].top() > opener.bottom());
+         assert_eq!(rows[0].width(), 450.0);
+-        assert!(items(&h.app, &Target::Workspace).iter().skip(2).all(|item| !item.enabled));
+-        h.step(&json!({"click":{"handle":"workspace:menu:animation"}})).unwrap();
+-        assert!(!crate::render_workspace::active(&h.app));
++        // What isn't built stays inert: a click changes nothing and leaves the menu open.
++        assert!(!items(&h.app, &Target::Workspace).iter().find(|i| i.label == "Drawing").unwrap().enabled);
++        h.step(&json!({"click":{"handle":"workspace:menu:drawing"}})).unwrap();
++        assert_eq!(crate::workspace::current(&h.app), "design");
+         assert!(h.app.viewport.context_menu.is_some());
+         h.step(&json!({"click":{"handle":"workspace:menu:render"}})).unwrap();
+         assert!(crate::render_workspace::active(&h.app));
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index d2e9994b..448cd01c 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -594,15 +594,12 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
+         }
+         "ui.status_fixture" => wrap(crate::viewport_status_fixture::control(app, p)),
+         "ui.workspace" => {
+-            if let Some(workspace) = s("workspace") {
+-                if !matches!(workspace, "design" | "render") {
+-                    return err("workspace must be design or render");
+-                }
+-                if let Err(e) = crate::render_workspace::enter(app, workspace == "render") {
+-                    return err(e);
+-                }
++            if let Some(workspace) = s("workspace")
++                && let Err(e) = crate::workspace::enter(app, workspace)
++            {
++                return err(e);
+             }
+-            ok(json!({"workspace":if crate::render_workspace::active(app) {"render"} else {"design"}}))
++            ok(json!({"workspace": crate::workspace::current(app)}))
+         }
+         "engine.execute" | "command" => {
+             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
+diff --git a/crates/ui-egui/src/dialogs_dense.rs b/crates/ui-egui/src/dialogs_dense.rs
+index 9ec672b8..9cd6c937 100644
+--- a/crates/ui-egui/src/dialogs_dense.rs
++++ b/crates/ui-egui/src/dialogs_dense.rs
+@@ -11,6 +11,7 @@ pub(super) fn command(kind: &Kind) -> Option<&'static str> {
+             crate::dialogs_motion::Mo::ContactSet { .. } => "contact.create",
+             crate::dialogs_motion::Mo::MotionStudy { .. } => "motion.study",
+             crate::dialogs_motion::Mo::Explode { .. } => "explode.create",
++            crate::dialogs_motion::Mo::Storyboard { .. } => "storyboard.create",
+             crate::dialogs_motion::Mo::Configurations { .. } => "config.table",
+         }),
+         Kind::Part(_) => Some("parts.insert"),
+diff --git a/crates/ui-egui/src/dialogs_motion.rs b/crates/ui-egui/src/dialogs_motion.rs
+index 9cde6e0b..a10e8e16 100644
+--- a/crates/ui-egui/src/dialogs_motion.rs
++++ b/crates/ui-egui/src/dialogs_motion.rs
+@@ -11,6 +11,7 @@ use serde_json::{Value, json};
+ use solidcraft_engine::Session;
+ use solidcraft_engine::doc::Mat;
+ use solidcraft_engine::doc::joints::JointKind;
++use solidcraft_engine::doc::motion::{StoryboardClip, storyboards};
+ 
+ use crate::SolveApp;
+ use crate::dialogs::{Dialog, Kind, combo, form_row};
+@@ -69,6 +70,19 @@ pub enum Mo {
+         saved: Option<BTreeMap<u64, Mat>>,
+         error: Option<String>,
+     },
++    Storyboard {
++        name: String,
++        /// Editing this storyboard (its name).
++        board: Option<String>,
++        clips: Vec<StoryboardClip>,
++        /// How far through the clips, in frames.
++        at: f64,
++        playing: bool,
++        /// The frame the shown pose is for, and the clips it was worked out from.
++        shown: Option<(u64, u64)>,
++        saved: Option<BTreeMap<u64, Mat>>,
++        error: Option<String>,
++    },
+     Configurations {
+         new_row: String,
+         error: Option<String>,
+@@ -83,6 +97,8 @@ impl Mo {
+             Mo::MotionStudy { study: Some(_), .. } => "EDIT MOTION STUDY",
+             Mo::MotionStudy { .. } => "MOTION STUDY",
+             Mo::Explode { .. } => "EXPLODED VIEW",
++            Mo::Storyboard { board: Some(_), .. } => "EDIT STORYBOARD",
++            Mo::Storyboard { .. } => "STORYBOARD",
+             Mo::Configurations { .. } => "CONFIGURATIONS",
+         }
+     }
+@@ -133,6 +149,20 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
+             ],
+         ),
+         "explode.create" => (Mo::Explode { name: n("Exploded View", "explode.list"), scale: 1.0, shown: None, saved: None, error: None }, vec![]),
++        "storyboard.create" => (
++            Mo::Storyboard {
++                name: n("Storyboard", "storyboard.list"),
++                board: None,
++                // Everything there is, in the order it was made: the usual start.
++                clips: clip_options(&app.session).into_iter().map(|(c, _)| c).filter(|c| !matches!(c, StoryboardClip::View { back: true, .. })).collect(),
++                at: 0.0,
++                playing: false,
++                shown: None,
++                saved: None,
++                error: None,
++            },
++            Vec::new(),
++        ),
+         "config.table" | "config.configure" => (Mo::Configurations { new_row: String::new(), error: None, rule_editor: Default::default() }, vec![]),
+         _ => return None,
+     };
+@@ -374,6 +404,7 @@ pub fn closed(app: &mut SolveApp, d: &mut Dialog, applied: bool) {
+         Mo::MotionStudy { saved, .. } => restore(app, saved),
+         // OK shows the new view itself (explode.show).
+         Mo::Explode { saved, .. } if !applied => restore(app, saved),
++        Mo::Storyboard { saved, .. } => restore(app, saved),
+         _ => {}
+     }
+ }
+@@ -398,12 +429,13 @@ fn study_pose(app: &SolveApp, params: &Value, step: u32) -> Result<BTreeMap<u64,
+     Ok(moved(&app.session, &sc))
+ }
+ 
+-/// Save the study being edited as an animated GIF, seen from the viewport's camera. Drawn on a
+-/// scratch copy, so the dialog's keys need not be saved first and the design is not changed.
+-fn export_animation(app: &mut SolveApp, params: Value, name: &str) {
++/// Save what the dialog is editing as an animated GIF, seen from the viewport's camera: `make` makes
++/// it on a scratch copy and replies with its name for the exporter under `what`. So the dialog's
++/// work need not be saved first, and the design is not changed.
++fn export_animation(app: &mut SolveApp, make: &'static str, what: &'static str, params: Value, name: &str, untitled: &str) {
+     // The view as the viewport shows it: its camera, and its grid and axes on or off.
+     let (camera, guides) = (app.cam, crate::control::window_guides(app));
+-    let file = format!("{}.gif", Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or("Motion Study"));
++    let file = format!("{}.gif", Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or(untitled));
+     app.pick_save(&file, &["gif"], move |app, path| {
+         let Some(mut path) = path else { return };
+         // A name typed without the extension is still a GIF (not a folder of frames).
+@@ -413,11 +445,10 @@ fn export_animation(app: &mut SolveApp, params: Value, name: &str) {
+         let mut sc = app.session.scratch();
+         // Cut as the viewport is (a copy leaves the section out).
+         sc.section = app.session.section;
+-        let made = sc.execute("motion.study", &params).and_then(|r| {
+-            sc.execute(
+-                "motion.export_animation",
+-                &json!({"study": r["study"], "path": path, "camera": camera, "grid": guides.grid, "axes": guides.axes}),
+-            )
++        let made = sc.execute(make, &params).and_then(|r| {
++            let mut export = json!({"path": path, "camera": camera, "grid": guides.grid, "axes": guides.axes});
++            export[what] = r[what].clone();
++            sc.execute("motion.export_animation", &export)
+         });
+         match made {
+             Ok(_) => app.set_status(crate::i18n::format("ui.saved_to", &[("path", &path)]), false),
+@@ -440,6 +471,198 @@ fn explode_pose(app: &SolveApp, scale: f64) -> Result<BTreeMap<u64, Mat>, String
+     Ok(sc.pending_moves.clone())
+ }
+ 
++// ---- storyboards ----
++
++/// What a storyboard can play, with what the dialog calls it.
++fn clip_options(s: &Session) -> Vec<(StoryboardClip, String)> {
++    let a = &s.doc.assembly;
++    let label = |id: &str, name: &str| crate::i18n::format(id, &[("name", name)]);
++    let studies = a.studies.iter().map(|m| (StoryboardClip::Study { study: m.id }, label("storyboard.clip_study", &m.name)));
++    let views = a.exploded.iter().flat_map(|v| {
++        [
++            (StoryboardClip::View { view: v.id, back: false }, label("storyboard.clip_view", &v.name)),
++            (StoryboardClip::View { view: v.id, back: true }, label("storyboard.clip_view_back", &v.name)),
++        ]
++    });
++    studies.chain(views).collect()
++}
++
++/// The frames a clip takes, as `motion.export_animation` counts them.
++fn clip_frames(s: &Session, c: &StoryboardClip) -> usize {
++    match c {
++        StoryboardClip::Study { study } => s.doc.assembly.studies.iter().find(|m| m.id == *study).map_or(2, |m| m.steps as usize + 1),
++        StoryboardClip::View { back: true, .. } => 81,
++        StoryboardClip::View { .. } => 41,
++    }
++}
++
++/// The pose `at` frames in, on a scratch copy. The clips before leave the joints where they ended,
++/// as they do in the export.
++fn storyboard_pose(app: &SolveApp, clips: &[StoryboardClip], at: usize) -> Result<BTreeMap<u64, Mat>, String> {
++    let mut sc = app.session.scratch();
++    sc.pending_moves.clear();
++    let mut left = at;
++    for c in clips {
++        let frames = clip_frames(&sc, c).max(2);
++        let u = left.min(frames - 1) as f64 / (frames - 1) as f64;
++        match c {
++            StoryboardClip::Study { study } => {
++                let steps = sc.doc.assembly.studies.iter().find(|m| m.id == *study).map_or(0, |m| m.steps);
++                sc.pending_moves.clear();
++                sc.execute("motion.play", &json!({"study": study, "step": u * f64::from(steps)})).map_err(|e| e.to_string())?;
++            }
++            StoryboardClip::View { view, back } => {
++                let amount = if *back { 1.0 - (2.0 * u - 1.0).abs() } else { u };
++                sc.execute("explode.show", &json!({"view": view, "amount": amount})).map_err(|e| e.to_string())?;
++            }
++        }
++        if left < frames {
++            break;
++        }
++        left -= frames;
++    }
++    let mut out = sc.pending_moves.clone();
++    for o in &sc.doc.occurrences {
++        let was = app.session.doc.occurrences.iter().find(|b| b.id == o.id).map(|b| b.transform);
++        if was != Some(o.transform) {
++            out.entry(o.id).or_insert(o.transform);
++        }
++    }
++    Ok(out)
++}
++
++fn storyboard_params(name: &str, board: Option<&str>, clips: &[StoryboardClip]) -> Value {
++    let mut p = json!({"name": name, "clips": clips});
++    if let Some(board) = board {
++        p["storyboard"] = json!(board);
++    }
++    p
++}
++
++fn storyboard_rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, t: Tokens) {
++    let Mo::Storyboard { name, board, clips, at, playing, shown, saved, error } = k else { return };
++    let boards = storyboards(&app.session.doc.metadata);
++    if !boards.is_empty() {
++        let labels: Vec<&str> = std::iter::once("New storyboard").chain(boards.iter().map(|b| b.name.as_str())).collect();
++        let was = board.as_ref().and_then(|n| boards.iter().position(|b| &b.name == n)).map_or(0, |i| i + 1);
++        let mut pick = was;
++        choice_row(ui, "Storyboard", "sb_board", &mut pick, &labels);
++        if pick != was {
++            *board = pick.checked_sub(1).and_then(|i| boards.get(i)).map(|b| {
++                (*name, *clips, *at, *playing) = (b.name.clone(), b.clips.clone(), 0.0, false);
++                b.name.clone()
++            });
++        }
++    }
++    text_row(ui, "Name", name, "");
++    let options = clip_options(&app.session);
++    let labels: Vec<&str> = options.iter().map(|(_, l)| l.as_str()).collect();
++    let (mut remove, mut swap) = (None, None);
++    let count = clips.len();
++    for (i, clip) in clips.iter_mut().enumerate() {
++        let mut pos = options.iter().position(|(c, _)| c == clip).unwrap_or(0);
++        form_row(ui, &crate::i18n::format("storyboard.clip_name", &[("number", &(i + 1).to_string())]), |ui| {
++            ui.horizontal(|ui| {
++                let width = (ui.available_width() - 3.0 * (t.control_height + t.space_4)).max(0.0);
++                ui.allocate_ui(vec2(width, t.control_height), |ui| combo(ui, &format!("sb_clip{i}"), &labels, &mut pos));
++                let small = |ui: &mut egui::Ui, text: &str, tip: &str| {
++                    crate::ui_kit::button(ui, crate::i18n::tr_label(text), crate::ui_kit::Button::Small).on_hover_text(crate::i18n::tr_label(tip)).clicked()
++                };
++                if small(ui, "↑", "Move up") && i > 0 {
++                    swap = Some((i - 1, i));
++                }
++                if small(ui, "↓", "Move down") && i + 1 < count {
++                    swap = Some((i, i + 1));
++                }
++                if small(ui, "×", "Remove this clip") {
++                    remove = Some(i);
++                }
++            });
++        });
++        if let Some((c, _)) = options.get(pos) {
++            *clip = c.clone();
++        }
++    }
++    if let Some((a, b)) = swap {
++        clips.swap(a, b);
++    }
++    if let Some(i) = remove {
++        clips.remove(i);
++    }
++    let last = clips.iter().map(|c| clip_frames(&app.session, c)).sum::<usize>().saturating_sub(1) as u32;
++    *at = at.min(f64::from(last));
++    crate::ui_kit::section(ui, "storyboard_playback", "Playback", true, |ui| {
++        ui.horizontal_wrapped(|ui| {
++            if transport(ui, Transport::Start, "To the start").clicked() {
++                (*at, *playing) = (0.0, false);
++            }
++            let (what, tip) = if *playing { (Transport::Stop, "Stop") } else { (Transport::Play, "Play") };
++            if transport(ui, what, tip).clicked() {
++                // Play from the start again when at the end.
++                if !*playing && at.round() >= f64::from(last) {
++                    *at = 0.0;
++                }
++                *playing = !*playing;
++            }
++            if transport(ui, Transport::End, "To the end").clicked() {
++                (*at, *playing) = (f64::from(last), false);
++            }
++        });
++    });
++    form_row(ui, "Frame", |ui| {
++        let style = crate::ui_kit::Slider { show_value: false, integer: true, ..Default::default() };
++        if crate::ui_kit::slider(ui, at, 0.0..=f64::from(last), style).dragged() {
++            *playing = false;
++        }
++    });
++    crate::ui_kit::caption(ui, "Frame", &format!("{} / {last}", at.round() as u32));
++    if *playing {
++        let dt = f64::from(ui.input(|i| i.stable_dt).min(0.1));
++        (*at, *playing) = advance(*at, dt * STEPS_PER_S, last, false);
++        ui.ctx().request_repaint();
++    }
++    let mut export = false;
++    ui.vertical(|ui| {
++        ui.horizontal(|ui| {
++            if crate::ui_kit::button(ui, crate::i18n::tr_label("Add Clip"), crate::ui_kit::Button::Normal).clicked()
++                && let Some((c, _)) = options.first()
++            {
++                clips.push(c.clone());
++            }
++            export = crate::ui_kit::button(ui, crate::i18n::tr_label("Export Animation…"), crate::ui_kit::Button::Normal)
++                .on_hover_text(crate::i18n::tr_label("Save the storyboard as an animated GIF, seen as the viewport shows it"))
++                .clicked();
++        });
++    });
++    if export {
++        let params = storyboard_params(name, board.as_deref(), clips);
++        export_animation(app, "storyboard.create", "storyboard", params, name, "Storyboard");
++    }
++    // Show the pose at this frame (again when the frame or the clips change).
++    let key = {
++        use std::hash::{Hash, Hasher};
++        let mut h = std::collections::hash_map::DefaultHasher::new();
++        clips.hash(&mut h);
++        h.finish()
++    };
++    let now = at.round() as u64;
++    if *shown != Some((now, key)) {
++        match storyboard_pose(app, clips, now as usize) {
++            Ok(m) => {
++                display(app, saved, m);
++                *error = None;
++            }
++            Err(e) => *error = Some(e),
++        }
++        *shown = Some((now, key));
++    }
++    if let Some(e) = error {
++        ui.vertical(|ui| {
++            ui.label(RichText::new(crate::i18n::tr_label(e)).color(t.error));
++        });
++    }
++}
++
+ // ---- rows ----
+ 
+ fn joints_moving(app: &SolveApp) -> Vec<(usize, String, JointKind)> {
+@@ -534,6 +757,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, inputs: &mut [Sel
+                 });
+             }
+         }
++        Mo::Storyboard { .. } => storyboard_rows(app, ui, k, t),
+         Mo::Configurations { new_row, error, rule_editor } => configurations_rows(app, ui, new_row, error, rule_editor),
+     }
+     let _ = inputs;
+@@ -715,7 +939,7 @@ fn motion_study_rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, inputs:
+     let params = study_params(&app.session, name, study.as_deref(), steps, tracks);
+     if export {
+         match &params {
+-            Ok(p) => export_animation(app, p.clone(), name),
++            Ok(p) => export_animation(app, "motion.study", "study", p.clone(), name, "Motion Study"),
+             Err(e) => *error = Some(e.clone()),
+         }
+     }
+@@ -799,6 +1023,7 @@ pub fn commands(app: &SolveApp, k: &Mo, inputs: &[SelInput]) -> Result<Vec<(Stri
+         Mo::Explode { name, scale, .. } => {
+             vec![("explode.create".into(), json!({"name": name, "scale": scale})), ("explode.show".into(), json!({ "view": name }))]
+         }
++        Mo::Storyboard { name, board, clips, .. } => vec![("storyboard.create".into(), storyboard_params(name, board.as_deref(), clips))],
+         Mo::Configurations { .. } => Vec::new(),
+     })
+ }
+@@ -1240,6 +1465,117 @@ mod tests {
+         assert!(h.app.session.doc.assembly.studies.is_empty(), "exporting saves no study");
+     }
+ 
++    /// Two components on a revolute joint, with a study and an exploded view to play.
++    fn storyboard_harness() -> crate::scenario::Harness {
++        let mut h = crate::scenario::Harness::new();
++        for (name, x) in [("A", 0), ("B", 30)] {
++            h.app.run("component.activate", json!({"component": "root"})).unwrap();
++            h.app.run("component.create", json!({ "name": name })).unwrap();
++            h.app.run("solid.box", json!({"length": 20, "width": 20, "height": 10, "corner": [x, 0, 0]})).unwrap();
++        }
++        let a = json!({"occurrence": "A:1", "face": [10, 10, 10]});
++        h.app.run("joint.create", json!({"type": "revolute", "a": a, "b": {"occurrence": "B:1", "face": [40, 10, 0]}})).unwrap();
++        let joint = h.app.session.doc.assembly.joints[0].id;
++        h.app.run("motion.study", json!({"name": "Swing", "steps": 4, "keys": [{"joint": joint, "points": [[0, 0], [4, 90]]}]})).unwrap();
++        h.app.run("explode.create", json!({"name": "Apart", "scale": 1.0})).unwrap();
++        h.app.run("explode.show", json!({"view": null})).unwrap();
++        h
++    }
++
++    /// A new storyboard starts with all there is to play. OK saves it, and it opens again to edit.
++    #[test]
++    fn the_storyboard_dialog_makes_one_and_opens_it_again() {
++        let mut h = storyboard_harness();
++        h.app.start("storyboard.create");
++        h.frames(3);
++        let Some(Kind::Motion(Mo::Storyboard { name, clips, .. })) = h.app.dialog.as_ref().map(|d| &d.kind) else {
++            panic!("no Storyboard dialog");
++        };
++        assert_eq!(name, "Storyboard1");
++        assert_eq!(clips.len(), 2, "the study and the view: {clips:?}");
++        h.step(&json!({"click": {"handle": "dialog:OK"}})).unwrap();
++        h.frames(3);
++        assert!(h.app.dialog.is_none(), "{:?}", h.app.status);
++        let boards = storyboards(&h.app.session.doc.metadata);
++        assert_eq!(boards.len(), 1);
++        assert_eq!(boards[0].name, "Storyboard1");
++        assert_eq!(boards[0].clips.len(), 2);
++        assert!(h.app.session.pending_moves.is_empty(), "OK leaves no pose on show");
++
++        // It opens again to edit, under its own name, and saving keeps there being one.
++        h.app.start("storyboard.create");
++        h.frames(2);
++        let Some(Kind::Motion(Mo::Storyboard { name, board, clips, .. })) = h.app.dialog.as_mut().map(|d| &mut d.kind) else {
++            panic!("no Storyboard dialog");
++        };
++        assert_eq!(name, "Storyboard2", "a new one, until one is picked");
++        (*name, *board) = ("Storyboard1".into(), Some("Storyboard1".into()));
++        clips.truncate(1);
++        h.frames(2);
++        h.step(&json!({"click": {"handle": "dialog:OK"}})).unwrap();
++        h.frames(3);
++        let boards = storyboards(&h.app.session.doc.metadata);
++        assert_eq!((boards.len(), boards[0].clips.len()), (1, 1), "{boards:?}");
++    }
++
++    /// Export Animation draws the storyboard the dialog shows: it needn't be saved first, and isn't.
++    #[test]
++    fn export_animation_saves_the_dialogs_storyboard_as_a_gif() {
++        #[cfg(not(target_arch = "wasm32"))]
++        if solidcraft_engine::capture::installed().is_none() {
++            solidcraft_engine::capture::install(std::sync::Arc::new(|scene, cam, w, h| {
++                let (rgba, renderer) = solidcraft_gpu::capture::headless_rgba(scene, cam, w, h)?;
++                Ok(solidcraft_engine::capture::Picture { rgba, renderer })
++            }));
++        }
++        let mut h = storyboard_harness();
++        h.app.start("storyboard.create");
++        h.frames(3);
++        let dir = h.dir.clone();
++        h.app.services.pick_save = Some(Box::new(move |name, extensions| {
++            assert_eq!((name, extensions), ("Storyboard1.gif", &["gif"][..]));
++            Box::pin(std::future::ready(Some(dir.join("show").to_string_lossy().into_owned())))
++        }));
++        h.step(&json!({"widget": "Export Animation…"})).unwrap();
++        h.frames(3);
++        let gif = std::fs::read(h.dir.join("show.gif")).unwrap();
++        assert!(gif.starts_with(b"GIF89a"), "{:?}", h.app.status);
++        assert!(h.app.status.as_ref().is_some_and(|s| !s.2), "{:?}", h.app.status);
++        assert!(storyboards(&h.app.session.doc.metadata).is_empty(), "exporting saves no storyboard");
++    }
++
++    /// Showing a storyboard changes what's shown and not the design, and closing puts it back.
++    #[test]
++    fn the_storyboard_dialog_only_shows_its_poses() {
++        let mut h = storyboard_harness();
++        let placed: Vec<_> = h.app.session.doc.occurrences.iter().map(|o| o.transform).collect();
++        h.app.start("storyboard.create");
++        h.frames(2);
++        // The last frame of the view: the study has run and the parts are apart.
++        if let Some(Kind::Motion(Mo::Storyboard { at, .. })) = h.app.dialog.as_mut().map(|d| &mut d.kind) {
++            *at = 45.0;
++        }
++        h.frames(3);
++        assert!(!h.app.session.pending_moves.is_empty(), "the pose is on show");
++        let after: Vec<_> = h.app.session.doc.occurrences.iter().map(|o| o.transform).collect();
++        assert_eq!(placed, after, "the design keeps its placements");
++        crate::dialogs::cancel(&mut h.app);
++        h.frames(2);
++        assert!(h.app.session.pending_moves.is_empty(), "closing takes the pose away");
++    }
++
++    /// The frames the dialog counts for a clip are the exporter's, so its slider covers the export.
++    #[test]
++    fn storyboard_frames_match_the_exporter() {
++        let h = storyboard_harness();
++        let s = &h.app.session;
++        let study = s.doc.assembly.studies[0].id;
++        let view = s.doc.assembly.exploded[0].id;
++        assert_eq!(clip_frames(s, &StoryboardClip::Study { study }), 5);
++        assert_eq!(clip_frames(s, &StoryboardClip::View { view, back: false }), 41);
++        assert_eq!(clip_frames(s, &StoryboardClip::View { view, back: true }), 81);
++    }
++
+     #[test]
+     fn study_keys_by_joint_id() {
+         let mut s = Session::default();
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 2a3ca830..b27148f1 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -343,6 +343,9 @@ pub struct UiState {
+     /// Not saved: it only lives while a sketch is open.
+     #[serde(skip)]
+     pub sketch_return_tab: Option<String>,
++    /// The Design tab a task workspace was opened from (see [`workspace::enter`]).
++    #[serde(skip)]
++    pub workspace_return_tab: Option<String>,
+     /// Last contextual body/sketch, only used to select on entry.
+     #[serde(skip)]
+     pub ribbon_context: Option<String>,
+@@ -405,6 +408,7 @@ impl Default for UiState {
+             tab: "MODEL".into(),
+             ribbon_context: None,
+             sketch_return_tab: None,
++            workspace_return_tab: None,
+             show_browser: true,
+             show_timeline: true,
+             show_grid: true,
+@@ -516,6 +520,10 @@ pub struct SolveApp {
+     /// A host application draws the bars above this UI: no application bar here. The modelling
+     /// ribbon stays, and the host opens the File menu with [`toolbar::toggle_file_menu`].
+     pub host_chrome: bool,
++    /// The host has simulation of its own, so the workspace menu offers it.
++    pub host_simulation: bool,
++    /// A workspace the host was asked to show, for it to take.
++    pub host_workspace_request: Option<&'static str>,
+     pub session: Session,
+     pub ui: UiState,
+     pub(crate) shell: shell::State,
+@@ -902,6 +910,8 @@ impl SolveApp {
+             flat_view: Default::default(),
+             embedded: false,
+             host_chrome: false,
++            host_simulation: false,
++            host_workspace_request: None,
+             home: home::HomeState::default(),
+             space_mouse: Default::default(),
+             file_load: file_load::FileLoad::default(),
+diff --git a/crates/ui-egui/src/menu_tests.rs b/crates/ui-egui/src/menu_tests.rs
+index 46882891..eaeeeae6 100644
+--- a/crates/ui-egui/src/menu_tests.rs
++++ b/crates/ui-egui/src/menu_tests.rs
+@@ -1235,13 +1235,120 @@ fn toolbar_pins_removes_reorders_and_keeps_its_layout() {
+ }
+ 
+ #[test]
+-fn the_workspace_menu_lists_design_and_render_and_greys_future_workspaces() {
+-    let app = sample_app();
++fn the_workspace_menu_offers_what_is_built_and_greys_the_rest() {
++    let mut app = sample_app();
+     let items = context_menu::items(&app, &Target::Workspace);
+-    assert!(find(&items, "Design").enabled);
+-    assert!(find(&items, "Render").enabled);
+-    assert!(!find(&items, "Animation").enabled);
++    for built in ["Design", "Render", "Animation", "Manufacture"] {
++        assert!(find(&items, built).enabled, "{built}");
++    }
++    for planned in ["Simulation", "Drawing"] {
++        assert!(!find(&items, planned).enabled, "{planned}");
++        assert_eq!(find(&items, planned).shortcut, "coming later", "{planned}");
++    }
+     assert!(!items.iter().any(|i| i.label.contains("Generative")));
++
++    // Simulation is the host's to offer.
++    app.host_simulation = true;
++    let items = context_menu::items(&app, &Target::Workspace);
++    assert!(find(&items, "Simulation").enabled);
++    assert_eq!(find(&items, "Simulation").shortcut, "");
++}
++
++/// The menu's footer: nothing switches while a sketch is being edited, by the menu or by automation.
++#[test]
++fn a_sketch_locks_the_switcher() {
++    let mut h = crate::scenario::Harness::new();
++    h.app.host_simulation = true;
++    h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
++    h.frames(2);
++    let items = context_menu::items(&h.app, &Target::Workspace);
++    for locked in ["Render", "Animation", "Simulation", "Manufacture"] {
++        let row = find(&items, locked);
++        assert!(!row.enabled, "{locked}");
++        assert_ne!(row.shortcut, "coming later", "{locked} is only locked: it still reads as available");
++    }
++    for workspace in ["render", "animation", "simulation", "manufacture"] {
++        assert!(crate::workspace::enter(&mut h.app, workspace).is_err(), "{workspace}");
++    }
++    assert_eq!(h.app.host_workspace_request, None);
++    assert_eq!(crate::workspace::current(&h.app), "design");
++}
++
++/// Real clicks on the menu's rows: into each task workspace, across, and home to the tab it left.
++#[test]
++fn task_workspaces_change_the_ribbon_and_come_home_to_the_tab_they_left() {
++    let mut h = crate::scenario::Harness::new();
++    h.call("ui.resize", json!({"width": 1200, "height": 1000}));
++    h.app.ui.tab = "INSPECT".into();
++    let go = |h: &mut crate::scenario::Harness, slug: &str| {
++        h.step(&json!({"click": {"handle": "ribbon:workspace"}})).unwrap();
++        h.step(&json!({"click": {"handle": format!("workspace:menu:{slug}")}})).unwrap();
++        h.frames(2);
++    };
++
++    go(&mut h, "animation");
++    assert_eq!(crate::workspace::current(&h.app), "animation");
++    assert_eq!(crate::workspace::visible_tabs(&h.app), crate::workspace::ANIMATION_TABS);
++    assert!(crate::toolbar_custom::panel_lists(&h.app.ui.tab).iter().any(|(_, cmds, _)| cmds.iter().any(|c| c.id == "motion.study")));
++
++    go(&mut h, "manufacture");
++    assert_eq!(crate::workspace::current(&h.app), "manufacture");
++    assert_eq!(crate::workspace::visible_tabs(&h.app), crate::workspace::MANUFACTURE_TABS);
++    assert!(crate::toolbar_custom::panel_lists(&h.app.ui.tab).iter().any(|(_, cmds, _)| cmds.iter().any(|c| c.id == "file.send_to_slicer")));
++
++    go(&mut h, "design");
++    assert_eq!(crate::workspace::current(&h.app), "design");
++    assert_eq!(h.app.ui.tab, "INSPECT", "back on the tab it was opened from, after going across");
++
++    // Through Render and out the other side.
++    go(&mut h, "render");
++    assert_eq!(crate::workspace::current(&h.app), "render");
++    go(&mut h, "animation");
++    assert_eq!(crate::workspace::current(&h.app), "animation");
++    assert!(!crate::render_workspace::active(&h.app));
++    go(&mut h, "render");
++    assert_eq!(crate::workspace::current(&h.app), "render");
++    go(&mut h, "design");
++    assert_eq!(crate::workspace::current(&h.app), "design");
++}
++
++/// A sketch opened from a task workspace has the ribbon while it lasts, and gives it back.
++#[test]
++fn finishing_a_sketch_returns_to_the_task_workspace() {
++    let mut h = crate::scenario::Harness::new();
++    crate::workspace::enter(&mut h.app, "animation").unwrap();
++    h.frames(2);
++    h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
++    h.frames(2);
++    assert_eq!(h.app.ui.tab, "SKETCH");
++    h.app.run("sketch.finish", json!({})).unwrap();
++    h.frames(2);
++    assert_eq!(crate::workspace::current(&h.app), "animation");
++}
++
++/// Simulation hands over: nothing changes here but the request, which the host takes.
++#[test]
++fn the_simulation_row_asks_the_host() {
++    let mut h = crate::scenario::Harness::new();
++    h.call("ui.resize", json!({"width": 1200, "height": 1000}));
++    assert!(crate::workspace::enter(&mut h.app, "simulation").is_err(), "no host, no simulation");
++
++    h.app.host_simulation = true;
++    h.frames(1);
++    h.step(&json!({"click": {"handle": "ribbon:workspace"}})).unwrap();
++    h.step(&json!({"click": {"handle": "workspace:menu:simulation"}})).unwrap();
++    h.frames(1);
++    assert_eq!(h.app.host_workspace_request.take(), Some("simulation"));
++    assert_eq!(crate::workspace::current(&h.app), "design");
++}
++
++/// Automation reaches the same switch, and hears where it landed.
++#[test]
++fn the_control_channel_switches_task_workspaces() {
++    let mut h = crate::scenario::Harness::new();
++    assert_eq!(h.call("ui.workspace", json!({"workspace": "manufacture"}))["result"]["workspace"], "manufacture");
++    assert_eq!(h.call("ui.workspace", json!({}))["result"]["workspace"], "manufacture");
++    assert_eq!(h.call("ui.workspace", json!({"workspace": "design"}))["result"]["workspace"], "design");
+ }
+ 
+ /// A right-click on a construction plane's browser row opens its menu, like a body's or a
+diff --git a/crates/ui-egui/src/toolbar.rs b/crates/ui-egui/src/toolbar.rs
+index b7da4e4b..d093d1f7 100644
+--- a/crates/ui-egui/src/toolbar.rs
++++ b/crates/ui-egui/src/toolbar.rs
+@@ -1441,7 +1441,11 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
+         if render {
+             crate::ui_kit::StageBar::workspace(ui, ws, "ws_render", app.tr("ui.render"), app.tr("ui.ribbon_workspace"));
+         } else {
+-            let workspace_icon = if render { "ws_render" } else { "ws_design" };
++            let (workspace_icon, workspace_name) = match crate::workspace::current(app) {
++                "animation" => ("ws_animate", app.tr_label("Animation")),
++                "manufacture" => ("ws_manufacture", app.tr_label("Manufacture")),
++                _ => ("ws_design", app.tr("ui.design")),
++            };
+             icons::paint_icon(
+                 &painter,
+                 Rect::from_center_size(pos2(ws.center().x, ws.top() + if labels { 39.0 } else { 25.0 }), vec2(30.0, 30.0)),
+@@ -1451,7 +1455,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
+             ribbon_text(
+                 ui,
+                 pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }),
+-                app.tr(if render { "ui.render" } else { "ui.design" }),
++                workspace_name,
+                 t.font_button,
+                 t.text,
+                 true,
+diff --git a/crates/ui-egui/src/ui_kit/menu.rs b/crates/ui-egui/src/ui_kit/menu.rs
+index c512bf26..1126a4a8 100644
+--- a/crates/ui-egui/src/ui_kit/menu.rs
++++ b/crates/ui-egui/src/ui_kit/menu.rs
+@@ -365,13 +365,14 @@ pub(crate) fn workspace_menu(ui: &mut egui::Ui, items: &[Item], key_row: Option<
+                 let (slug, description, tabs) = match item.label.as_str() {
+                     "Design" => ("design", "ui.workspace_design_description", Some("ui.workspace_design_tabs")),
+                     "Render" => ("render", "ui.workspace_render_description", Some("ui.workspace_render_tabs")),
+-                    "Animation" => ("animation", "ui.workspace_animation_description", None),
+-                    "Simulation" => ("simulation", "ui.workspace_simulation_description", None),
+-                    "Manufacture" => ("manufacture", "ui.workspace_manufacture_description", None),
++                    "Animation" => ("animation", "ui.workspace_animation_description", Some("ui.workspace_animation_tabs")),
++                    "Simulation" => ("simulation", "ui.workspace_simulation_description", Some("ui.workspace_simulation_tabs")),
++                    "Manufacture" => ("manufacture", "ui.workspace_manufacture_slicing_description", Some("ui.workspace_manufacture_tabs")),
+                     "Drawing" => ("drawing", "ui.workspace_drawing_description", None),
+                     _ => continue,
+                 };
+-                let planned = tabs.is_none();
++                // A row that's only locked for now still looks available.
++                let planned = item.shortcut == "coming later";
+                 let current = item.shortcut == "current";
+                 let (accent, soft) = if !planned && slug == "render" {
+                     (t.render_fill, t.render_soft)
+@@ -438,7 +439,7 @@ pub(crate) fn workspace_menu(ui: &mut egui::Ui, items: &[Item], key_row: Option<
+                     ui.painter().galley(pos2(x, y), galley, text);
+                 };
+                 line(crate::i18n::tr(description).to_string(), r.top() + 29.0);
+-                if let Some(tabs) = tabs {
++                if let Some(tabs) = tabs.filter(|_| !planned) {
+                     // Translate each tab even when this composed message falls back to English.
+                     let labels = crate::i18n::tr(tabs).split('·').map(|label| crate::i18n::tr_label(label.trim())).collect::<Vec<_>>().join(" · ");
+                     line(labels, r.top() + 47.0);
+diff --git a/crates/ui-egui/src/workspace.rs b/crates/ui-egui/src/workspace.rs
+index 2ed4a389..95904477 100644
+--- a/crates/ui-egui/src/workspace.rs
++++ b/crates/ui-egui/src/workspace.rs
+@@ -9,10 +9,86 @@ pub const RENDER_TABS: &[&str] = &["RENDER"];
+ pub fn render_tab(tab: &str) -> bool {
+     RENDER_TABS.contains(&tab)
+ }
++/// Animation's tabs.
++pub const ANIMATION_TABS: &[&str] = &["ANIMATE"];
++/// Manufacture's tabs: the way out to a slicer. There are no toolpaths to offer yet.
++pub const MANUFACTURE_TABS: &[&str] = &["PRINT"];
++
++/// The tab belongs to a workspace that only changes the ribbon.
++fn task_tab(tab: &str) -> bool {
++    ANIMATION_TABS.contains(&tab) || MANUFACTURE_TABS.contains(&tab)
++}
++
+ pub fn tab_label(tab: &str) -> &str {
+     tab.strip_prefix("RENDER ").unwrap_or(tab)
+ }
+ 
++/// The workspace in front: `design`, `render`, `animation` or `manufacture`. A sketch opened from
++/// a task workspace counts as Design until it is finished, when the ribbon goes back. A host's
++/// workspace is never in front here, since it takes the window away from this UI.
++pub fn current(app: &crate::SolveApp) -> &'static str {
++    let tab = app.ui.tab.as_str();
++    if crate::render_workspace::active(app) {
++        "render"
++    } else if ANIMATION_TABS.contains(&tab) {
++        "animation"
++    } else if MANUFACTURE_TABS.contains(&tab) {
++        "manufacture"
++    } else {
++        "design"
++    }
++}
++
++/// The switcher is locked while a sketch or feature is being edited.
++pub fn can_switch(app: &crate::SolveApp) -> bool {
++    app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()
++}
++
++fn check_can_switch(app: &crate::SolveApp) -> Result<(), String> {
++    if can_switch(app) { Ok(()) } else { Err(crate::i18n::tr("ui.workspace_finish_first").into()) }
++}
++
++/// Back from a task workspace to the Design tab it was opened from.
++fn leave_task(app: &mut crate::SolveApp) -> Result<(), String> {
++    if task_tab(&app.ui.tab) {
++        check_can_switch(app)?;
++        app.ui.tab = app.ui.workspace_return_tab.take().unwrap_or_else(|| "MODEL".into());
++    }
++    Ok(())
++}
++
++/// Workspace switching has one lifecycle for menus and automation.
++pub fn enter(app: &mut crate::SolveApp, workspace: &str) -> Result<(), String> {
++    let first_tab = match workspace {
++        "design" if task_tab(&app.ui.tab) => return leave_task(app),
++        "design" | "render" => {
++            leave_task(app)?;
++            return crate::render_workspace::enter(app, workspace == "render");
++        }
++        "simulation" if app.host_simulation => {
++            check_can_switch(app)?;
++            app.host_workspace_request = Some("simulation");
++            return Ok(());
++        }
++        "animation" => "ANIMATE",
++        "manufacture" => "PRINT",
++        _ => return Err("workspace must be design, render, animation or manufacture".into()),
++    };
++    if current(app) == workspace {
++        return Ok(());
++    }
++    check_can_switch(app)?;
++    if crate::render_workspace::active(app) {
++        crate::render_workspace::enter(app, false)?;
++    }
++    if !task_tab(&app.ui.tab) {
++        app.ui.workspace_return_tab = Some(app.ui.tab.clone());
++    }
++    app.ui.tab = first_tab.into();
++    app.viewport.hover = None;
++    Ok(())
++}
++
+ /// A tab's registry name in normal word casing: "SHEET METAL" → "Sheet Metal".
+ pub fn word_cased(name: &str) -> String {
+     name.split_whitespace()
+@@ -324,6 +400,12 @@ pub const SECTIONS: &[Section] = &[
+     Section { tab: "WELDMENTS", panel: "SKETCH", promoted: 1, ids: &["sketch.create"] },
+     Section { tab: "WELDMENTS", panel: "CREATE", promoted: 1, ids: &["frame.member"] },
+     Section { tab: "WELDMENTS", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
++    // The task workspaces, last: a command's home is the first section listing it, and these only
++    // show tools that already live on a Design tab.
++    Section { tab: "ANIMATE", panel: "MOTION", promoted: 4, ids: &["joint.drive", "joint.motion_link", "motion.study", "motion.trace"] },
++    Section { tab: "ANIMATE", panel: "EXPLODE", promoted: 1, ids: &["explode.create"] },
++    Section { tab: "ANIMATE", panel: "SEQUENCE", promoted: 1, ids: &["storyboard.create"] },
++    Section { tab: "PRINT", panel: "OUTPUT", promoted: 2, ids: &["file.send_to_slicer", "file.save_mesh"] },
+ ];
+ 
+ // Migration data only: Render commands remain registered, but have no live ribbon sections.
+@@ -383,6 +465,9 @@ const LEGACY_RENDER_SECTIONS: &[Section] = &[
+ /// Compact source labels for painted big buttons only. Menus, search and tooltips
+ /// retain the engine label. Route these through `tr_label`, like other UI labels.
+ pub const RIBBON_LABELS: &[(&str, &str)] = &[
++    ("explode.create", "Explode"),
++    ("file.send_to_slicer", "Slicer"),
++    ("storyboard.create", "Storyboard"),
+     ("render.batch", "All Shots"),
+     ("render.cancel", "Cancel"),
+     ("render.export", "Export Image"),
+@@ -669,6 +754,12 @@ pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
+     if crate::render_workspace::active(app) {
+         return Vec::new();
+     }
++    if ANIMATION_TABS.contains(&app.ui.tab.as_str()) {
++        return ANIMATION_TABS.to_vec();
++    }
++    if MANUFACTURE_TABS.contains(&app.ui.tab.as_str()) {
++        return MANUFACTURE_TABS.to_vec();
++    }
+     let mut tabs: Vec<_> = TABS.iter().copied().filter(|tab| tab_turned_on(app, tab)).collect();
+     if app.preferences.sketch_tab_always {
+         // Right after MODEL, whether a sketch is open or not (#7904).
+@@ -706,6 +797,11 @@ pub fn sync_context(app: &mut crate::SolveApp) {
+     if crate::render_workspace::active(app) {
+         return;
+     }
++    // Picking a sheet metal body doesn't take a task workspace's ribbon away. Opening a sketch
++    // does, and finishing it comes back.
++    if task_tab(&app.ui.tab) && app.session.active_sketch.is_none() {
++        return;
++    }
+     let context = app
+         .session
+         .active_sketch
+@@ -727,9 +823,10 @@ pub fn sync_context(app: &mut crate::SolveApp) {
+         };
+         app.ui.tab = if app.session.active_sketch.is_some() {
+             "SKETCH"
+-        } else if let Some(back) = back.as_deref().filter(|t| *t != "SKETCH" && visible_tabs(app).contains(t)) {
++        } else if let Some(back) = back.as_deref().filter(|t| *t != "SKETCH" && (visible_tabs(app).contains(t) || task_tab(t))) {
+             // Finishing a sketch goes back to the tab it came from (#3250).
+-            visible_tabs(app).into_iter().find(|t| t == &back).unwrap_or_else(|| home_tab(app))
++            let task_tabs = ANIMATION_TABS.iter().chain(MANUFACTURE_TABS).copied();
++            visible_tabs(app).into_iter().chain(task_tabs).find(|t| t == &back).unwrap_or_else(|| home_tab(app))
+         } else if context.as_deref().is_some_and(|c| c.starts_with("frame:")) {
+             "WELDMENTS"
+         } else if context.is_some() {

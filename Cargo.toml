@@ -8,7 +8,27 @@ description = "Sense Sim - SimReady USD asset viewer and scene builder"
 name = "SenseSim"
 path = "src/main.rs"
 
+[[example]]
+name = "design_host"
+required-features = ["design"]
+
+[[example]]
+name = "s4_corpus"
+required-features = ["design"]
+
+[features]
+default = ["design"]
+# The embedded SolidCraft CAD workspace. Off = faster dev builds, no CAD.
+design = ["dep:solidcraft-ui-egui", "dep:solidcraft-engine", "dep:solidcraft-gpu", "dep:egui", "dep:egui-wgpu", "dep:pollster"]
+
 [dependencies]
+sim-core = { path = "crates/sim-core" }
+solidcraft-engine = { path = "third_party/solidcraft/crates/engine", optional = true }
+solidcraft-gpu = { path = "third_party/solidcraft/crates/gpu", optional = true }
+solidcraft-ui-egui = { path = "third_party/solidcraft/crates/ui-egui", optional = true }
+egui = { version = "0.36", default-features = false, optional = true }
+egui-wgpu = { version = "0.36", optional = true }
+pollster = { version = "0.4", optional = true }
 bevy = "0.20"
 bevy_egui = "0.43"
 openusd = { version = "0.8", features = ["mmap"] }
@@ -47,9 +67,67 @@ debug = "line-tables-only"
 opt-level = 3
 debug = false
 
+# truck's debug-only checks reject valid geometry (seam edges, closed edges), so the kernel stack
+# never builds with them. Listed one by one: `"*"` would also drop wgpu's validation in dev builds.
+[profile.dev.package.matext4cgmath]
+debug-assertions = false
+[profile.dev.package.solidcraft-derive]
+debug-assertions = false
+[profile.dev.package.solidcraft-doc]
+debug-assertions = false
+[profile.dev.package.solidcraft-engine]
+debug-assertions = false
+[profile.dev.package.solidcraft-geom]
+debug-assertions = false
+[profile.dev.package.solidcraft-gpu]
+debug-assertions = false
+[profile.dev.package.solidcraft-io]
+debug-assertions = false
+[profile.dev.package.solidcraft-kernel]
+debug-assertions = false
+[profile.dev.package.solidcraft-render]
+debug-assertions = false
+[profile.dev.package.solidcraft-sketch]
+debug-assertions = false
+[profile.dev.package.solidcraft-space-mouse]
+debug-assertions = false
+[profile.dev.package.solidcraft-ui-egui]
+debug-assertions = false
+[profile.dev.package.truck-base]
+debug-assertions = false
+[profile.dev.package.truck-derivers]
+debug-assertions = false
+[profile.dev.package.truck-geometry]
+debug-assertions = false
+[profile.dev.package.truck-geotrait]
+debug-assertions = false
+[profile.dev.package.truck-meshalgo]
+debug-assertions = false
+[profile.dev.package.truck-modeling]
+debug-assertions = false
+[profile.dev.package.truck-polymesh]
+debug-assertions = false
+[profile.dev.package.truck-shapeops]
+debug-assertions = false
+[profile.dev.package.truck-stepio]
+debug-assertions = false
+[profile.dev.package.truck-topology]
+debug-assertions = false
+
 [profile.release]
 debug = false
 strip = true
+
+# SolidCraft's local fixes to third-party crates. Patches are not inherited from a dependency's
+# workspace, so they are repeated here. winit and accesskit_macos are left out on purpose: they
+# only serve eframe on Wayland and macOS, and patching winit would also change Bevy's.
+[patch.crates-io]
+truck-geometry = { path = "third_party/solidcraft/vendor/truck-geometry" }
+truck-shapeops = { path = "third_party/solidcraft/vendor/truck-shapeops" }
+truck-stepio = { path = "third_party/solidcraft/vendor/truck-stepio" }
+truck-meshalgo = { path = "third_party/solidcraft/vendor/truck-meshalgo" }
+matext4cgmath = { path = "third_party/solidcraft/vendor/matext4cgmath" }
+egui-wgpu = { path = "third_party/solidcraft/vendor/egui-wgpu" }
 
 # Ties the managed OpenEMS process to Sense Sim (Job Object: killed when we exit).
 [target.'cfg(windows)'.dependencies]
