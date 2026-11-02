@@ -103,6 +103,10 @@ pub mod icon {
     pub const CARET_UP: &str = "\u{e13c}";
     pub const CARET_LEFT: &str = "\u{e138}";
     pub const ROBOT: &str = "\u{e762}";
+    pub const FACTORY: &str = "\u{e760}";
+    pub const CPU: &str = "\u{e610}";
+    pub const MONITOR: &str = "\u{e32e}";
+    pub const DESKTOP: &str = "\u{e560}";
     pub const WRENCH: &str = "\u{e5d4}";
     pub const CURSOR: &str = "\u{e1dc}";
     pub const CURSOR_CLICK: &str = "\u{e7c8}";
@@ -712,6 +716,8 @@ pub enum Dot {
     Optional,
     /// Amber ring: working.
     Busy,
+    /// Grey ring: its state isn't known.
+    Unknown,
 }
 
 /// Paints a status marker centred on `c`.
@@ -733,6 +739,9 @@ pub fn paint_dot(p: &egui::Painter, c: Pos2, dot: Dot) {
         }
         Dot::Busy => {
             p.circle_stroke(c, r - 0.3, Stroke::new(2.4, WARNING));
+        }
+        Dot::Unknown => {
+            p.circle_stroke(c, r - 0.3, Stroke::new(2.4, FAINT));
         }
     }
 }

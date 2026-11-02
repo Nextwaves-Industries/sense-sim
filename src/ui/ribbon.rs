@@ -62,6 +62,7 @@ pub fn show(
                 let dot = match bench {
                     Workbench::Simulation if slot.rtls_alerts > 0 => Some(theme::DANGER),
                     Workbench::Plant if slot.plant == Some(true) => Some(theme::SUCCESS),
+                    Workbench::Factory if slot.twin.down > 0 => Some(theme::DANGER),
                     _ => None,
                 };
                 let showing = current && state.ribbon_tab == RibbonTab::Tools;
@@ -85,6 +86,7 @@ pub fn show(
                 Workbench::Antenna => antenna_tools(ui, slot),
                 Workbench::Simulation => simulation_tools(ui, slot, rtls),
                 Workbench::Plant => plant_tools(ui, state, slot),
+                Workbench::Factory => factory_tools(ui, slot),
             },
         });
     });
@@ -300,6 +302,39 @@ fn plant_tools(ui: &mut egui::Ui, state: &mut UiState, slot: &mut LeftPanelSlot)
     if theme::ribbon_button(ui, glyph, text, slot.plant.is_some(), running, tip).clicked() {
         slot.plant_toggle = true;
     }
+}
+
+fn factory_tools(ui: &mut egui::Ui, slot: &mut LeftPanelSlot) {
+    use crate::twin::{DEMO_SIZES, TwinPage, TwinRequest};
+    let twin = &mut slot.twin;
+
+    theme::ribbon_caption(ui, "Plant");
+    if theme::ribbon_button(ui, icon::LIST_BULLETS, "Devices", true, twin.open && twin.page == TwinPage::Devices, "How many machines, PLCs and sensors are on the network, and how they are doing").clicked() {
+        twin.toggle_page(TwinPage::Devices);
+    }
+    if theme::ribbon_button(ui, icon::PULSE, "Events", true, twin.open && twin.page == TwinPage::Events, "What went down, recovered or changed").clicked() {
+        twin.toggle_page(TwinPage::Events);
+    }
+    ui.add_space(GROUP_GAP);
+
+    theme::ribbon_caption(ui, "View");
+    if theme::ribbon_button(ui, icon::FRAME_CORNERS, "Frame", twin.total > 0, false, "Move the camera to the devices").clicked() {
+        twin.requests.push(TwinRequest::FrameDevices);
+    }
+    if theme::ribbon_button(ui, icon::INFO, "Labels", true, twin.labels, "Name the devices nearest the camera. Failing ones are always named").clicked() {
+        twin.labels = !twin.labels;
+    }
+    ui.add_space(GROUP_GAP);
+
+    theme::ribbon_caption(ui, "Connect");
+    if theme::ribbon_button(ui, icon::PLUG, "Connection", true, twin.open && twin.page == TwinPage::Connection, "The Sense Twin service, and what a scan can and can't tell").clicked() {
+        twin.toggle_page(TwinPage::Connection);
+    }
+    let demo = twin.is_demo();
+    if theme::ribbon_button(ui, icon::PLAY_CIRCLE, "Demo", true, demo, "Try this workbench with invented devices").clicked() {
+        twin.requests.push(TwinRequest::Demo(if demo { None } else { Some(DEMO_SIZES[0]) }));
+    }
+    theme::ribbon_button(ui, icon::MAGNIFYING_GLASS, "Scan", false, false, "Network scanning arrives in a later version, through the operator console");
 }
 
 fn view_tools(ui: &mut egui::Ui, state: &mut UiState, actions: &mut Actions, settings: &mut ViewSettings, assistant_open: &mut bool, has_library: bool, scene: bool) {

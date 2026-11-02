@@ -94,6 +94,8 @@ per_scene! {
     tag_history: crate::rtls::tag_card::TagHistory,
     rf_history: crate::rtls::rf::RfHistory,
     fdtd: crate::rtls::fdtd::Fdtd,
+    twin: crate::twin::TwinScene,
+    twin_selection: crate::twin::TwinSelection,
 }
 
 #[derive(Clone, Copy)]

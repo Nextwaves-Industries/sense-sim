@@ -22,11 +22,13 @@ struct ObjSnap {
     locked: bool,
 }
 
-/// Objects and the plant links between them (a re-routed pipe changes both).
+/// Objects, the plant links between them (a re-routed pipe changes both), and where real
+/// devices were placed. A device's live status isn't an edit, so it stays out.
 #[derive(Clone, PartialEq)]
 struct Snapshot {
     objs: Vec<ObjSnap>,
     links: Vec<crate::plant::connect::Link>,
+    twin: std::collections::BTreeMap<twin_proto::model::DeviceId, crate::twin::Placement>,
 }
 
 #[derive(Resource, Default)]
@@ -73,13 +75,13 @@ pub struct UndoRequest {
     pub redo: bool,
 }
 
-fn snapshot(objects: &Query<(Entity, &PlacedObject, &Transform)>, links: Option<&crate::plant::Links>) -> Snapshot {
+fn snapshot(objects: &Query<(Entity, &PlacedObject, &Transform)>, links: Option<&crate::plant::Links>, twin: Option<&crate::twin::TwinScene>) -> Snapshot {
     let mut s: Vec<ObjSnap> = objects
         .iter()
         .map(|(_, o, t)| ObjSnap { name: o.name.clone(), asset: o.asset.clone(), transform: *t, joints: o.joints.clone(), locked: o.locked })
         .collect();
     s.sort_by(|a, b| a.name.cmp(&b.name));
-    Snapshot { objs: s, links: links.map(|l| l.0.clone()).unwrap_or_default() }
+    Snapshot { objs: s, links: links.map(|l| l.0.clone()).unwrap_or_default(), twin: twin.map(|t| t.placed.clone()).unwrap_or_default() }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,15 +101,16 @@ pub fn undo_system(
     plant: Option<Res<crate::plant::Plant>>,
     mut links: Option<ResMut<crate::plant::Links>>,
     rerouting: Option<Res<crate::plant::reroute::Rerouting>>,
-    (edited, mut removed, downloads, mut stale): (
+    (edited, mut removed, downloads, mut stale, mut twin): (
         Query<(), (With<PlacedObject>, Or<(Changed<PlacedObject>, Changed<Transform>)>)>,
         RemovedComponents<PlacedObject>,
         Res<crate::scene::PendingDownloads>,
         Local<bool>,
+        Option<ResMut<crate::twin::TwinScene>>,
     ),
 ) {
     // Comparing means copying the whole scene, so it only happens after a change.
-    *stale |= !edited.is_empty() || removed.read().next().is_some() || links.as_ref().is_some_and(|l| l.is_changed());
+    *stale |= !edited.is_empty() || removed.read().next().is_some() || links.as_ref().is_some_and(|l| l.is_changed()) || twin.as_ref().is_some_and(|t| t.is_changed());
     if let Some(n) = stack.rebase.as_mut() {
         *n = n.saturating_sub(1);
     }
@@ -122,7 +125,7 @@ pub fn undo_system(
         stack.rebase = None;
         stack.undo.clear();
         stack.redo.clear();
-        stack.last = Some(snapshot(&objects, links.as_deref()));
+        stack.last = Some(snapshot(&objects, links.as_deref(), twin.as_deref()));
         stack.saved = stack.revision;
         *stale = false;
         return;
@@ -139,7 +142,7 @@ pub fn undo_system(
         return;
     }
     *stale = false;
-    let current = snapshot(&objects, links.as_deref());
+    let current = snapshot(&objects, links.as_deref(), twin.as_deref());
     // The running plant (spinning joints, items on conveyors) is not an
     // edit: fold its changes into the baseline so they never become steps.
     if let Some(plant) = &plant
@@ -195,6 +198,9 @@ pub fn undo_system(
     selection.set(None);
     if let Some(links) = links.as_mut() {
         links.0 = target.links.clone();
+    }
+    if let Some(twin) = twin.as_mut() {
+        twin.placed = target.twin.clone();
     }
     for o in &target.objs {
         pending.0.push(PendingSpawn {

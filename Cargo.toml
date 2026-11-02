@@ -31,6 +31,8 @@ antenna-studio = []
 antenna_core = { path = "crates/antenna_core" }
 ifc = { path = "crates/ifc" }
 proof = { path = "crates/proof" }
+# Read-only device data. Never add twin_control_proto here: see crates/twin_proto/tests/control_boundary.rs.
+twin_proto = { path = "crates/twin_proto" }
 bevy = "0.20"
 bevy_egui = "0.43"
 openusd = { version = "0.8", features = ["mmap"] }

@@ -103,10 +103,12 @@ impl DemoFactory {
         let id = &ids[(self.step as usize).wrapping_mul(7919) % ids.len()];
         let Some(device) = self.inventory.get(id) else { return };
         match device.liveness {
-            Liveness::Up if self.step % 3 == 0 => self.set_liveness(id, Liveness::Suspect, now_ms),
+            Liveness::Up if self.step.is_multiple_of(3) => self.set_liveness(id, Liveness::Suspect, now_ms),
             Liveness::Suspect => self.set_liveness(id, Liveness::Down, now_ms),
             Liveness::Down | Liveness::Stale => self.set_liveness(id, Liveness::Up, now_ms),
-            _ => self.flip_a_plc(now_ms),
+            // Now and then, so mode changes don't crowd out everything else.
+            _ if self.step.is_multiple_of(11) => self.flip_a_plc(now_ms),
+            _ => {}
         }
     }
 

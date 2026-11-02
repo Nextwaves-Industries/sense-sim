@@ -44,11 +44,16 @@ pub fn left_card(
                     if bench == Workbench::Simulation && slot.rtls_alerts > 0 {
                         theme::pill(ui, &format!("{} alarms", slot.rtls_alerts), theme::DANGER);
                     }
+                    if bench == Workbench::Factory && slot.twin.down > 0 {
+                        theme::pill(ui, &format!("{} down", slot.twin.down), theme::DANGER);
+                    }
                 });
                 state.sections.bench = open;
                 if open {
                     if bench == Workbench::Plant {
                         plant_row(ui, rect.width(), slot);
+                    } else if bench == Workbench::Factory {
+                        factory_rows(ui, rect.width(), slot);
                     } else {
                         page_rows(ui, rect.width(), bench, slot, rtls);
                     }
@@ -195,6 +200,41 @@ fn page_rows(ui: &mut egui::Ui, w: f32, bench: Workbench, slot: &mut LeftPanelSl
                 rtls.local.set_page(p);
             }
         }
+    }
+}
+
+/// The Factory card's pages, with how the plant is doing at a glance.
+fn factory_rows(ui: &mut egui::Ui, w: f32, slot: &mut LeftPanelSlot) {
+    use crate::twin::{LinkStatus, TwinPage};
+    let twin = &slot.twin;
+    let health = match (twin.total, twin.down, twin.suspect) {
+        (0, ..) => Dot::Optional,
+        (_, 1.., _) => Dot::Todo,
+        (_, _, 1..) => Dot::Busy,
+        _ => Dot::Done,
+    };
+    let link = match twin.status {
+        LinkStatus::Connected => Dot::Done,
+        LinkStatus::Demo | LinkStatus::Starting => Dot::Busy,
+        LinkStatus::Lost(_) => Dot::Todo,
+        LinkStatus::NoService => Dot::Optional,
+    };
+    let (devices, events) = (twin.total.to_string(), twin.events.to_string());
+    let rows = [
+        (TwinPage::Devices, "Devices", icon::LIST_BULLETS, health, devices.as_str()),
+        (TwinPage::Events, "Events", icon::PULSE, Dot::Optional, events.as_str()),
+        (TwinPage::Connection, "Connection", icon::PLUG, link, twin.status.label()),
+    ];
+    let mut clicked = None;
+    for (page, text, glyph, dot, note) in rows {
+        let selected = twin.open && twin.page == page;
+        let (c, _) = theme::tree_row(ui, w, &TreeRow { depth: 0, text, glyph, dot, selected, expander: None, guide: false, last: false, note, dim: false });
+        if c.row {
+            clicked = Some(page);
+        }
+    }
+    if let Some(page) = clicked {
+        slot.twin.toggle_page(page);
     }
 }
 
