@@ -18,12 +18,12 @@ use super::{Event, photocheck, prompt, worker};
 use crate::mcp::client::McpHub;
 
 fn say(t: &str) -> Message {
-    Message { role: Role::Assistant, content: vec![Block::Text(t.into())], raw: None }
+    Message { role: Role::Assistant, content: vec![Block::Text(t.into())], raw: None, usage: None }
 }
 
 fn calls(uses: &[(&str, Value)]) -> Message {
     let content = uses.iter().enumerate().map(|(i, (name, input))| Block::ToolUse { id: format!("t{i}"), name: (*name).into(), input: input.clone() }).collect();
-    Message { role: Role::Assistant, content, raw: None }
+    Message { role: Role::Assistant, content, raw: None, usage: None }
 }
 
 fn render_block(b: &Block) -> String {
@@ -132,7 +132,7 @@ fn run(case: Case) -> String {
     let (ev_tx, ev_rx) = unbounded();
     let cancel = Arc::new(AtomicBool::new(case.cancelled));
     let history = vec![Message::user(vec![Block::Text("the user's request".into())])];
-    worker(script.clone(), case.max_steps, history, test_tools(), tx, Arc::new(McpHub::default()), ev_tx, cancel);
+    worker(script.clone(), case.max_steps, history, test_tools(), tx, Arc::new(McpHub::default()), ev_tx, cancel, Default::default());
 
     let mut out = vec![format!("=== {}", case.name)];
     out.push(" model calls:".into());
@@ -153,6 +153,8 @@ fn run(case: Case) -> String {
             Event::Info(t) => format!("  info {t:?}"),
             // Ids come from a process-wide counter.
             Event::Image(_) => "  image".to_string(),
+            // Only sent when a reply carries usage, or a budget runs out. These cases do neither.
+            Event::Usage { .. } | Event::Question(_) => unreachable!("not in these cases"),
             Event::Finished { history, error } => {
                 let mut s = format!("  finished error={error:?}");
                 for m in &history {
@@ -197,10 +199,10 @@ fn cases() -> Vec<Case> {
             vec![
                 calls(&[("perceive_photo", json!({ "image_id": "img1" })), ("place_objects", json!({}))]),
                 say("rebuilt"),
-                Message { role: Role::Assistant, content: vec![Block::Text(bad_review)], raw: None },
+                say(&bad_review),
                 place(),
                 say("fixed"),
-                Message { role: Role::Assistant, content: vec![Block::Text(good_review)], raw: None },
+                say(&good_review),
             ],
         )
         .answers(vec![
@@ -239,12 +241,12 @@ fn the_harness_behaves_exactly_as_recorded() {
 /// the checks only saw the macro's own name.
 #[test]
 fn checks_see_what_a_macro_did() {
-    use super::harness::{OnStop, TurnLog, Turn, StopChecks, Who, LogEntry};
+    use super::harness::{LogEntry, OnStop, StopChecks, Turn, Who};
     use super::checks::SelfChecks;
 
     let (tx, _rx) = unbounded();
     let (ev, _events) = unbounded();
-    let turn = Turn { history: Vec::new(), log: TurnLog::default(), cancel: Arc::default(), tx, mcp: Arc::new(McpHub::default()), ev };
+    let turn = Turn::new(Vec::new(), Arc::default(), tx, Arc::new(McpHub::default()), ev);
     let provider = Script { replies: Mutex::default(), log: Mutex::default() };
     let leaf = |name: &str, is_error: bool| LogEntry { who: Who::Macro, name: name.into(), input: json!({}), output: "{}".into(), is_error };
 
@@ -262,14 +264,14 @@ fn checks_see_what_a_macro_did() {
 /// A nested scene change has to trigger the same self-check a direct one does.
 #[test]
 fn a_macro_changing_the_scene_gets_verified() {
-    use super::harness::{LogEntry, OnStop, StopChecks, Turn, TurnLog, Who};
+    use super::harness::{LogEntry, OnStop, StopChecks, Turn, Who};
     use super::checks::SelfChecks;
 
     let log = Arc::new(Mutex::new(Vec::new()));
     let issues = json!({ "issue_count": 1 }).to_string();
     let tx = bridge(vec![("verify_scene", vec![fail(issues)])], log.clone());
     let (ev, _events) = unbounded();
-    let turn = Turn { history: Vec::new(), log: TurnLog::default(), cancel: Arc::default(), tx, mcp: Arc::new(McpHub::default()), ev };
+    let turn = Turn::new(Vec::new(), Arc::default(), tx, Arc::new(McpHub::default()), ev);
     let provider = Script { replies: Mutex::default(), log: Mutex::default() };
     let mut checks = SelfChecks::default();
     checks.observe(&LogEntry { who: Who::Macro, name: "place_objects".into(), input: json!({}), output: "{}".into(), is_error: false });

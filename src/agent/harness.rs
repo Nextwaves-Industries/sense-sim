@@ -8,10 +8,13 @@ use std::time::Duration;
 use crossbeam_channel::{RecvTimeoutError, Sender};
 use serde_json::Value;
 
+use super::budget::Budget;
+use super::context::{self, Needed};
 use super::gate::{CallCtx, Origin};
 use super::llm::{Block, Message, Provider, ToolDef};
+use super::session::SessionWriter;
 use super::tools::{self, ToolJob, ToolOutput};
-use super::{Event, images, toolmaker};
+use super::{Event, Question, images, toolmaker};
 use crate::mcp::client::McpHub;
 
 /// Who made a tool call.
@@ -88,7 +91,82 @@ pub(super) struct Turn {
     pub tx: Sender<ToolJob>,
     pub mcp: Arc<McpHub>,
     pub ev: Sender<Event>,
+    pub budget: Arc<Budget>,
+    pub session: Option<SessionWriter>,
+    /// How full the provider last said the context was.
+    pub context_used: Option<u64>,
+    /// What the conversation has to fit in. 0: never compact.
+    pub context_limit: u64,
+    save_warned: bool,
 }
+
+impl Turn {
+    pub fn new(history: Vec<Message>, cancel: Arc<AtomicBool>, tx: Sender<ToolJob>, mcp: Arc<McpHub>, ev: Sender<Event>) -> Self {
+        Self { history, log: TurnLog::default(), cancel, tx, mcp, ev, budget: Arc::default(), session: None, context_used: None, context_limit: 0, save_warned: false }
+    }
+
+    /// Writes what's final. Called between rounds, so no unanswered tool call reaches the disk.
+    /// A chat that can't be saved shouldn't stop the work, but the user should know.
+    pub fn save(&mut self) {
+        let Some(session) = &mut self.session else { return };
+        if let Err(e) = session.sync(&self.history)
+            && !self.save_warned
+        {
+            self.save_warned = true;
+            let _ = self.ev.send(Event::Info(format!("This chat can't be saved, so it won't survive a restart: {e:#}")));
+        }
+    }
+}
+
+/// Keeps the conversation within what the model can hold.
+fn compact(provider: &Arc<dyn Provider>, turn: &mut Turn) {
+    if turn.context_limit == 0 {
+        return;
+    }
+    let used = turn.context_used.unwrap_or_else(|| context::estimate(&turn.history));
+    match context::trim(&mut turn.history, used, turn.context_limit) {
+        Needed::Nothing | Needed::Trimmed { images: 0, results: 0 } => return,
+        Needed::Trimmed { images, results } => {
+            let _ = turn.ev.send(Event::Info(format!("Freed space for the model: removed {images} old images and shortened {results} old tool results.")));
+        }
+        Needed::Summarize { cut, .. } => {
+            let _ = turn.ev.send(Event::Info("The conversation is getting long for this model, so its earlier part is being condensed into notes.".into()));
+            let ask = Message::user(vec![Block::Text(context::as_text(&turn.history[..cut]))]);
+            let notes = match complete_cancellable(provider, context::SUMMARY_SYSTEM, &[ask], &[], &turn.cancel) {
+                Ok(Some(m)) => Some(m.text()).filter(|t| !t.trim().is_empty()),
+                _ => None,
+            };
+            if notes.is_none() {
+                let _ = turn.ev.send(Event::Info("Notes on the earlier work couldn't be written, so it may need rechecking. Evidence labels and the plan were kept.".into()));
+            }
+            context::replace_with_summary(&mut turn.history, cut, notes.as_deref());
+        }
+    }
+    // Until the next reply says otherwise, the old figure is wrong.
+    turn.context_used = None;
+    if let Some(session) = &mut turn.session {
+        let _ = session.rewrite(&turn.history);
+    }
+}
+
+/// The budget ran out: whether to keep going is the user's decision, and their money.
+fn may_continue(turn: &Turn, why: &str) -> bool {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let question = Question { text: format!("{why} Keep going?"), options: vec![KEEP_GOING.to_string(), "Stop here".to_string()], candidates: Vec::new(), allow_text: false, input: String::new(), answer: None, reply: Some(tx), approval: true };
+    if turn.ev.send(Event::Question(question)).is_err() {
+        return false;
+    }
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(answer) => return answer.summary() == format!("User answered: {KEEP_GOING}"),
+            Err(RecvTimeoutError::Disconnected) => return false,
+            Err(RecvTimeoutError::Timeout) if turn.cancel.load(Ordering::Relaxed) => return false,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+const KEEP_GOING: &str = "Keep going";
 
 /// What happens when the model wants to stop.
 pub(super) enum OnStop {
@@ -134,11 +212,26 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
         if step >= spec.max_steps {
             return Some(format!("stopped after {} steps (raise max_steps in agent.json)", spec.max_steps));
         }
+        if let Some(why) = turn.budget.exceeded() {
+            if !may_continue(turn, &why) {
+                return Some(format!("{why} Stopped there."));
+            }
+            turn.budget.extend();
+        }
+        compact(provider, turn);
+        // Better to stop and say so than send something the provider rejects with a riddle.
+        if let Err(e) = context::validate(&turn.history) {
+            return Some(format!("The conversation got into a state no provider would accept, so the assistant stopped: {e}"));
+        }
+        turn.save();
         let msg = match complete_cancellable(provider, &spec.system, &turn.history, &spec.tools, &turn.cancel) {
             Ok(Some(m)) => m,
             Ok(None) => return Some("stopped".to_string()),
             Err(e) => return Some(format!("{e:#}")),
         };
+        if let Some(u) = msg.usage {
+            turn.context_used = Some(u.input);
+        }
         let text = msg.text();
         if !text.trim().is_empty() {
             let _ = turn.ev.send(Event::Assistant(text));
@@ -214,9 +307,136 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
 
 #[cfg(test)]
 mod tests {
+    use crossbeam_channel::unbounded;
     use serde_json::json;
 
     use super::*;
+    use crate::agent::budget::{Limits, Metered};
+    use crate::agent::llm::{Role, Usage};
+
+    /// Replies from a list, each charged the same, and remembers what it was sent.
+    struct Script {
+        replies: Mutex<Vec<Message>>,
+        usage: Usage,
+        seen: Mutex<Vec<(String, Vec<Message>)>>,
+    }
+
+    impl Provider for Script {
+        fn complete(&self, system: &str, messages: &[Message], _: &[ToolDef]) -> anyhow::Result<Message> {
+            self.seen.lock().unwrap().push((system.to_string(), messages.to_vec()));
+            let mut replies = self.replies.lock().unwrap();
+            let mut reply = if replies.is_empty() { text("the end") } else { replies.remove(0) };
+            reply.usage = Some(self.usage);
+            Ok(reply)
+        }
+    }
+
+    fn text(t: &str) -> Message {
+        Message { role: Role::Assistant, content: vec![Block::Text(t.into())], raw: None, usage: None }
+    }
+    fn tool(id: &str) -> Message {
+        Message { role: Role::Assistant, content: vec![Block::ToolUse { id: id.into(), name: "get_scene".into(), input: json!({}) }], raw: None, usage: None }
+    }
+
+    #[derive(Default)]
+    struct NoChecks;
+    impl StopChecks for NoChecks {
+        fn before_tools(&mut self, _: &[&str]) {}
+        fn observe(&mut self, _: &LogEntry) {}
+        fn on_stop(&mut self, _: &dyn Provider, _: &Turn) -> OnStop {
+            OnStop::Finish
+        }
+    }
+
+    /// Runs the real loop on a script. A thread answers tools, and returns the turn and events.
+    fn run(script: Arc<Script>, budget: Limits, context_limit: u64, answer: Option<&'static str>) -> (Turn, Option<String>, Vec<Event>) {
+        let (tx, jobs) = unbounded::<ToolJob>();
+        std::thread::spawn(move || {
+            for job in jobs {
+                let _ = job.reply.send(ToolOutput::text("x".repeat(4000)));
+            }
+        });
+        let (ev, events) = unbounded();
+        let budget = Arc::new(Budget::new(budget));
+        let provider: Arc<dyn Provider> = Arc::new(Metered { inner: script, budget: budget.clone(), ev: ev.clone() });
+        let history = vec![Message::user(vec![Block::Text("the user's request".into())])];
+        let mut turn = Turn::new(history, Arc::default(), tx, Arc::new(McpHub::default()), ev);
+        turn.budget = budget;
+        turn.context_limit = context_limit;
+        let mut spec = AgentSpec { system: "main".into(), max_steps: 50, tools: Vec::new() };
+        // Stands in for the user at the question card.
+        let (seen_tx, seen_rx) = unbounded();
+        std::thread::spawn(move || {
+            for e in events {
+                if let Event::Question(mut q) = e {
+                    if let Some(a) = answer {
+                        q.answer(a.to_string());
+                    }
+                    let _ = seen_tx.send(Event::Question(q));
+                } else {
+                    let _ = seen_tx.send(e);
+                }
+            }
+        });
+        let error = run_loop(&provider, &mut spec, &mut turn, &mut NoChecks);
+        let mut seen: Vec<Event> = Vec::new();
+        while let Ok(e) = seen_rx.recv_timeout(Duration::from_millis(50)) {
+            seen.push(e);
+        }
+        (turn, error, seen)
+    }
+
+    fn script(replies: Vec<Message>, usage: Usage) -> Arc<Script> {
+        Arc::new(Script { replies: Mutex::new(replies), usage, seen: Mutex::default() })
+    }
+
+    #[test]
+    fn the_budget_stops_a_run_and_says_why() {
+        let s = script(vec![tool("a"), tool("b"), tool("c"), text("done")], Usage { input: 600, cached: 0, output: 0 });
+        let (_, error, events) = run(s.clone(), Limits { tokens: 1000, ..Default::default() }, 0, Some("Stop here"));
+        let why = error.expect("it stopped");
+        assert!(why.contains("tokens") && why.contains("Stopped there"), "{why}");
+        assert_eq!(s.seen.lock().unwrap().len(), 2, "no more calls once it was over");
+        assert!(events.iter().any(|e| matches!(e, Event::Question(q) if q.text.contains("Keep going?"))));
+        assert_eq!(events.iter().filter(|e| matches!(e, Event::Usage { .. })).count(), 2);
+    }
+
+    #[test]
+    fn keep_going_really_keeps_going() {
+        let s = script(vec![tool("a"), tool("b"), tool("c"), text("done")], Usage { input: 600, cached: 0, output: 0 });
+        let (turn, error, _) = run(s.clone(), Limits { tokens: 1000, ..Default::default() }, 0, Some("Keep going"));
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(s.seen.lock().unwrap().len(), 4);
+        assert!(matches!(&turn.history.last().unwrap().content[0], Block::Text(t) if t == "done"));
+    }
+
+    #[test]
+    fn a_long_run_compacts_and_stays_valid() {
+        let mut replies: Vec<Message> = (0..30).map(|i| tool(&format!("t{i}"))).collect();
+        replies.push(text("done"));
+        // Reports a context near the limit, as a long task would.
+        let s = script(replies, Usage { input: 9000, cached: 0, output: 10 });
+        let (turn, error, events) = run(s.clone(), Limits::default(), 10_000, None);
+        assert!(error.is_none(), "{error:?}");
+        assert!(context::validate(&turn.history).is_ok());
+        assert!(turn.history.len() < 62, "it got shorter: {}", turn.history.len());
+        assert!(events.iter().any(|e| matches!(e, Event::Info(t) if t.contains("condensed"))), "the user is told");
+        let seen = s.seen.lock().unwrap();
+        assert!(seen.iter().any(|(system, _)| system == context::SUMMARY_SYSTEM), "a model wrote the notes");
+        for (system, messages) in seen.iter().filter(|(system, _)| system == "main") {
+            assert!(context::validate(messages).is_ok(), "{system}: every request sent was valid");
+        }
+        // The request survives however often it's compacted.
+        assert!(matches!(&turn.history[0].content[0], Block::Text(t) if t.contains("the user's request")));
+    }
+
+    #[test]
+    fn no_limit_means_no_compaction_and_no_extra_calls() {
+        let s = script(vec![tool("a"), text("done")], Usage { input: 900_000, cached: 0, output: 1 });
+        let (turn, _, _) = run(s.clone(), Limits::default(), 0, None);
+        assert_eq!(turn.history.len(), 4);
+        assert_eq!(s.seen.lock().unwrap().len(), 2);
+    }
 
     #[test]
     fn the_log_hands_out_each_call_once() {

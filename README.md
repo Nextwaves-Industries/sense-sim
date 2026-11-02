@@ -144,6 +144,15 @@ OpenEMS), or records a real measurement (`outcomes_check`, `site_survey_fit`, `s
 `site_acceptance_score`, drift tools, `design_fit_measured`), asks in every mode. MCP clients can't
 be asked, so those calls are refused for them.
 
+**Long tasks.** A request stops and asks once it passes its budget (2M charged tokens, 600 model
+calls or 3 hours by default; set in gent.json). The panel shows tokens used, and a cost for models
+you give a price to under "prices" in gent.json. When a conversation nears the model's limit, old
+images and tool results are trimmed, then its earlier part is condensed into notes; evidence labels
+and the plan are kept word for word. Set "context_tokens" on a provider if its model holds more or
+less than the default guess (200k for cloud, 32k for local servers). Chats are saved under
+%LOCALAPPDATA%/SenseSim/agent, and the last one can be picked up again after a restart. Changing
+model mid-chat hands the new one its earlier tool calls as plain text.
+
 Local models must support tool calling and vision, for example `qwen2.5vl`. **Test connection**
 checks the key and model. Settings are stored in `%APPDATA%/SenseSim/agent.json`; a copy next
 to the exe takes precedence. Transient API errors (429/5xx) are retried with backoff.

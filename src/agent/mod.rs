@@ -4,9 +4,11 @@
 //! tools are served over MCP, and external MCP servers can add more.
 
 pub mod assetgen;
+pub mod budget;
 pub mod catalog;
 mod checks;
 pub mod config;
+pub mod context;
 pub mod gate;
 pub mod harness;
 pub mod knowledge;
@@ -17,6 +19,7 @@ pub mod photocheck;
 pub mod placer;
 pub mod prompt;
 pub mod screen;
+pub mod session;
 pub mod structures;
 pub mod toolmaker;
 pub mod tools;
@@ -79,6 +82,10 @@ enum Event {
     Finished { history: Vec<Message>, error: Option<String> },
     Info(String),
     Image(String),
+    /// What one model call used.
+    Usage { model: String, usage: llm::Usage },
+    /// The harness needs an answer from the user to go on.
+    Question(Question),
 }
 
 #[derive(Resource)]
@@ -117,6 +124,14 @@ pub struct Agent {
     /// What is on screen, mirrored from the UI.
     screen: screen::Screen,
     activity: screen::Activity,
+    /// This chat's folder, once it has one.
+    chat_id: Option<String>,
+    /// The model that wrote this chat's history.
+    chat_model: Option<(config::ProviderKind, String)>,
+    /// Tokens used in this chat, by model.
+    pub usage: std::collections::BTreeMap<String, llm::Usage>,
+    /// The last chat, if the app was closed on one.
+    pub resumable: Option<session::SavedChat>,
 }
 
 impl Agent {
@@ -149,6 +164,42 @@ impl Agent {
             project_dir: None,
             screen: Default::default(),
             activity: Default::default(),
+            chat_id: None,
+            chat_model: None,
+            usage: Default::default(),
+            resumable: session::latest(),
+        }
+    }
+
+    /// Tokens used so far, in a few words, with the cost where a price is known.
+    pub fn usage_line(&self) -> Option<String> {
+        if self.usage.is_empty() {
+            return None;
+        }
+        let sum = |f: fn(&llm::Usage) -> u64| self.usage.values().map(f).sum::<u64>();
+        let mut line = format!("{} in, {} out", budget::thousands(sum(|u| u.input)), budget::thousands(sum(|u| u.output)));
+        let priced: f64 = self.usage.iter().filter_map(|(model, u)| self.config.prices.get(model).map(|[i, o]| (u.input.saturating_sub(u.cached) as f64 * i + u.output as f64 * o) / 1e6)).sum();
+        if priced > 0.0 {
+            line.push_str(&format!(", about ${priced:.2}"));
+        }
+        Some(line)
+    }
+
+    /// Reopens the last chat. The scene isn't part of it, and nothing that was running survives.
+    pub fn resume(&mut self) {
+        let Some(chat) = self.resumable.take() else { return };
+        if self.running {
+            return;
+        }
+        match session::load(&chat.id) {
+            Ok((history, model)) => {
+                self.transcript = session::transcript_of(&history);
+                self.transcript.push(ChatItem::Info("Picked up where this chat left off. Solver runs and photo measurements from before the restart are gone, and this doesn't reopen the scene, so check the scene is the one you want.".into()));
+                self.history = history;
+                self.chat_model = model;
+                self.chat_id = Some(chat.id);
+            }
+            Err(e) => self.transcript.push(ChatItem::Error(format!("That chat couldn't be read: {e:#}"))),
         }
     }
 
@@ -280,7 +331,29 @@ impl Agent {
             self.transcript.push(ChatItem::Info(format!("Knowledge attached: {}", c.headings.join("; "))));
         }
 
+        // Another model can't replay this one's reasoning, and some reject a history without their own.
+        let (kind, model) = (self.config.active, self.config.provider().effective_model());
+        if self.chat_model.as_ref().is_some_and(|(k, m)| *k != kind || *m != model) && !self.history.is_empty() {
+            self.history = context::flatten(&self.history);
+            self.transcript.push(ChatItem::Info(format!("The model changed to {model}, so it gets this chat's earlier tool calls as plain text.")));
+        }
+        self.chat_model = Some((kind, model.clone()));
+        let chat_id = self.chat_id.get_or_insert_with(session::new_chat_id).clone();
         let before = self.history.clone();
+        // Written out whole each time, so the file always matches what the model will see.
+        let session = session::SessionWriter::open(&chat_id, kind, &model, 0).and_then(|mut s| s.rewrite(&before).map(|_| s));
+        let session = match session {
+            Ok(s) => Some(s),
+            Err(e) => {
+                self.transcript.push(ChatItem::Info(format!("This chat can't be saved, so it won't survive a restart: {e:#}")));
+                None
+            }
+        };
+        let options = RunOptions {
+            budget: Arc::new(budget::Budget::new(budget::Limits { tokens: self.config.budget_tokens, calls: self.config.budget_calls, minutes: self.config.budget_minutes })),
+            session,
+            context_limit: self.config.provider().context_limit(),
+        };
         let mut history = before.clone();
         history.push(Message::user(content));
         let mut tool_defs = tools::tool_defs(false);
@@ -292,7 +365,7 @@ impl Agent {
         let (tx, mcp, cancel, steps) = (bridge.tx.clone(), self.mcp.clone(), self.cancel.clone(), self.config.max_steps);
         std::thread::spawn(move || {
             let done = ev_tx.clone();
-            let run = std::panic::AssertUnwindSafe(move || worker(provider, steps, history, tool_defs, tx, mcp, ev_tx, cancel));
+            let run = std::panic::AssertUnwindSafe(move || worker(provider, steps, history, tool_defs, tx, mcp, ev_tx, cancel, options));
             // Without this the panel would say "Working" for ever, with Send disabled.
             if let Err(panic) = std::panic::catch_unwind(run) {
                 let why = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_else(|| "no message".into());
@@ -320,6 +393,10 @@ impl Agent {
         self.questions.clear();
         self.plan.clear();
         self.approved.clear();
+        self.chat_id = None;
+        self.chat_model = None;
+        self.usage.clear();
+        self.resumable = None;
     }
 }
 
@@ -333,11 +410,25 @@ fn worker(
     mcp: Arc<McpHub>,
     ev: Sender<Event>,
     cancel: Arc<AtomicBool>,
+    options: RunOptions,
 ) {
+    let provider: Arc<dyn llm::Provider> = Arc::new(budget::Metered { inner: provider, budget: options.budget.clone(), ev: ev.clone() });
     let mut spec = harness::AgentSpec { system: prompt::SYSTEM.to_string(), max_steps, tools: tool_defs };
-    let mut turn = harness::Turn { history, log: Default::default(), cancel, tx, mcp, ev };
+    let mut turn = harness::Turn::new(history, cancel, tx, mcp, ev);
+    turn.budget = options.budget;
+    turn.session = options.session;
+    turn.context_limit = options.context_limit;
     let error = harness::run_loop(&provider, &mut spec, &mut turn, &mut checks::SelfChecks::default());
+    turn.save();
     let _ = turn.ev.send(Event::Finished { history: turn.history, error });
+}
+
+/// What a run is held to and saved by. By default: no limits, nothing saved.
+#[derive(Default)]
+struct RunOptions {
+    budget: Arc<budget::Budget>,
+    session: Option<session::SessionWriter>,
+    context_limit: u64,
 }
 
 fn pump_events(mut agent: ResMut<Agent>) {
@@ -368,6 +459,18 @@ fn pump_events(mut agent: ResMut<Agent>) {
             }
             Event::Info(t) => agent.transcript.push(ChatItem::Info(t)),
             Event::Image(id) => agent.transcript.push(ChatItem::Image(id)),
+            Event::Usage { model, usage } => {
+                let total = agent.usage.entry(model).or_default();
+                total.input += usage.input;
+                total.cached += usage.cached;
+                total.output += usage.output;
+            }
+            Event::Question(q) => {
+                agent.questions.push(q);
+                let idx = agent.questions.len() - 1;
+                agent.transcript.push(ChatItem::Question(idx));
+                agent.open = true;
+            }
             Event::Finished { history, error } => {
                 agent.history = history;
                 agent.running = false;
@@ -446,6 +549,19 @@ pub mod images {
 
     pub fn get(id: &str) -> Option<Entry> {
         STORE.lock().unwrap().get(id).cloned()
+    }
+
+    /// Brings back an image from a saved chat under its old id, and keeps new ids clear of it.
+    pub fn restore(id: &str, data: Arc<Vec<u8>>, mime: &str) {
+        if let Some(n) = id.strip_prefix("img").and_then(|n| n.parse::<usize>().ok()) {
+            NEXT.fetch_max(n + 1, Ordering::Relaxed);
+        }
+        STORE.lock().unwrap().insert(id.to_string(), (data, mime.to_string()));
+    }
+
+    #[cfg(test)]
+    pub fn forget(id: &str) {
+        STORE.lock().unwrap().remove(id);
     }
 
     /// Loads a photo, downsized to at most 1600 px (enough for vision models

@@ -79,7 +79,7 @@ impl ProviderKind {
             Self::LmStudio => ("http://localhost:1234/v1", "local-model"),
             Self::Custom => ("http://localhost:8000/v1", "model"),
         };
-        ProviderCfg { kind: self, base_url: base_url.into(), model: model.into(), api_key: String::new(), anthropic_fallbacks: true }
+        ProviderCfg { kind: self, base_url: base_url.into(), model: model.into(), api_key: String::new(), anthropic_fallbacks: true, context_tokens: 0 }
     }
 }
 
@@ -99,6 +99,9 @@ pub struct ProviderCfg {
     /// Anthropic only: server-side refusal fallbacks (`fallbacks: "default"`).
     #[serde(default = "yes")]
     pub anthropic_fallbacks: bool,
+    /// How many tokens this model can hold. 0: a safe guess for the kind of provider.
+    #[serde(default)]
+    pub context_tokens: u64,
 }
 
 fn yes() -> bool {
@@ -110,6 +113,16 @@ impl ProviderCfg {
     pub fn effective_model(&self) -> String {
         let m = self.model.trim();
         if m.is_empty() { self.kind.default_model() } else { m.to_string() }
+    }
+
+    /// What the conversation has to fit in. Local servers often load far less than the cloud
+    /// offers; compacting early only costs a little detail.
+    pub fn context_limit(&self) -> u64 {
+        match (self.context_tokens, self.kind) {
+            (0, ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Custom) => 32_000,
+            (0, _) => 200_000,
+            (n, _) => n,
+        }
     }
 
     pub fn resolved_key(&self) -> String {
@@ -167,6 +180,16 @@ pub struct AgentConfig {
     /// Tell the model which screen the user is on and what they have selected.
     #[serde(default = "yes")]
     pub share_screen: bool,
+    /// Tokens charged in full per request before it stops and asks. 0: no limit.
+    #[serde(default = "default_budget_tokens")]
+    pub budget_tokens: u64,
+    #[serde(default = "default_budget_calls")]
+    pub budget_calls: u64,
+    #[serde(default = "default_budget_minutes")]
+    pub budget_minutes: u64,
+    /// Model id to dollars per million tokens, [input, output]. Costs show only for these.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prices: BTreeMap<String, [f64; 2]>,
 }
 
 fn default_effort() -> String {
@@ -180,6 +203,15 @@ fn default_port() -> u16 {
 }
 fn default_steps() -> usize {
     150
+}
+fn default_budget_tokens() -> u64 {
+    2_000_000
+}
+fn default_budget_calls() -> u64 {
+    600
+}
+fn default_budget_minutes() -> u64 {
+    180
 }
 
 impl Default for AgentConfig {
@@ -196,6 +228,10 @@ impl Default for AgentConfig {
             approval: Default::default(),
             knowledge_auto: true,
             share_screen: true,
+            budget_tokens: default_budget_tokens(),
+            budget_calls: default_budget_calls(),
+            budget_minutes: default_budget_minutes(),
+            prices: BTreeMap::new(),
         }
     }
 }

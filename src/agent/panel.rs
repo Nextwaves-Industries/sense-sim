@@ -204,6 +204,18 @@ fn transcript(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, library
 
 /// First-run view: what the assistant does and a few prompts to start from.
 fn empty(ui: &mut egui::Ui, agent: &mut Agent) {
+    // The app was closed on a chat: offer it back rather than losing the work.
+    if let Some(chat) = agent.resumable.clone() {
+        theme::card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            theme::caption(ui, "Last chat");
+            ui.add(egui::Label::new(RichText::new(&chat.title).color(theme::TEXT)).wrap());
+            ui.add_space(4.0);
+            if theme::primary_button(ui, "Pick up where it left off").clicked() {
+                agent.resume();
+            }
+        });
+    }
     ui.add_space(28.0);
     ui.vertical_centered(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::hover());
@@ -461,6 +473,11 @@ fn question(ui: &mut egui::Ui, q: &mut super::Question, library: &mut Library) {
 }
 
 fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &ToolBridge, open_settings: &mut bool) {
+    if let Some(line) = agent.usage_line() {
+        let by_model = agent.usage.iter().map(|(m, u)| format!("{m}: {} in ({} from cache), {} out", super::budget::thousands(u.input), super::budget::thousands(u.cached), super::budget::thousands(u.output))).collect::<Vec<_>>().join("\n");
+        ui.label(RichText::new(line).small().color(theme::WEAK)).on_hover_text(by_model);
+        ui.add_space(2.0);
+    }
     if let Some(b) = agent.blocker() {
         egui::Frame::new().fill(theme::DANGER.gamma_multiply(0.14)).corner_radius(8).inner_margin(Margin::same(8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -658,6 +675,9 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
         });
         theme::setting_row(ui, "Max steps", "Model calls per request before it stops", |ui| {
             changed |= ui.add(egui::DragValue::new(&mut cfg.max_steps).range(5..=300)).lost_focus();
+        });
+        theme::setting_row(ui, "Token budget", "Per request, charged tokens before it stops and asks. 0 for no limit", |ui| {
+            changed |= ui.add(egui::DragValue::new(&mut cfg.budget_tokens).speed(10_000.0).range(0..=100_000_000)).lost_focus();
         });
         theme::setting_row(ui, "Share what's on screen", "Workbench, open card, selection and recent actions go with each message", |ui| {
             changed |= theme::toggle_switch(ui, &mut cfg.share_screen).changed();

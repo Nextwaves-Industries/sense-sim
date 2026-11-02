@@ -385,7 +385,7 @@ mod tests {
         fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message> {
             let has_image = messages.iter().flat_map(|m| &m.content).any(|b| matches!(b, Block::Image { .. }));
             self.seen.lock().unwrap().push((system.to_string(), messages.len(), tools.len(), has_image));
-            Ok(Message { role: Role::Assistant, content: vec![Block::Text(self.reply.clone())], raw: None })
+            Ok(Message { role: Role::Assistant, content: vec![Block::Text(self.reply.clone())], raw: None, usage: None })
         }
     }
 

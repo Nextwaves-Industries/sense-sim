@@ -32,11 +32,42 @@ pub struct Message {
     /// Provider-native content of an assistant turn (e.g. Anthropic thinking
     /// blocks), replayed verbatim to the same provider.
     pub raw: Option<(ProviderKind, Value)>,
+    /// What this reply cost, if the provider said.
+    pub usage: Option<Usage>,
+}
+
+/// Tokens one model call used.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// All input, however it was charged: this is also how full the model's context is.
+    pub input: u64,
+    /// The part of input read from the provider's cache.
+    pub cached: u64,
+    pub output: u64,
+}
+
+impl Usage {
+    /// Tokens charged at the full rate.
+    pub fn billable(&self) -> u64 {
+        self.input.saturating_sub(self.cached) + self.output
+    }
+}
+
+fn anthropic_usage(v: &Value) -> Option<Usage> {
+    let u = &v["usage"];
+    let (read, written) = (u["cache_read_input_tokens"].as_u64().unwrap_or(0), u["cache_creation_input_tokens"].as_u64().unwrap_or(0));
+    Some(Usage { input: u["input_tokens"].as_u64()? + read + written, cached: read, output: u["output_tokens"].as_u64().unwrap_or(0) })
+}
+
+fn openai_usage(v: &Value) -> Option<Usage> {
+    let u = &v["usage"];
+    let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().or_else(|| u["prompt_cache_hit_tokens"].as_u64()).unwrap_or(0);
+    Some(Usage { input: u["prompt_tokens"].as_u64()?, cached, output: u["completion_tokens"].as_u64().unwrap_or(0) })
 }
 
 impl Message {
     pub fn user(content: Vec<Block>) -> Self {
-        Self { role: Role::User, content, raw: None }
+        Self { role: Role::User, content, raw: None, usage: None }
     }
 
     pub fn text(&self) -> String {
@@ -67,6 +98,10 @@ pub struct ToolDef {
 
 pub trait Provider: Send + Sync {
     fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message>;
+    /// The model it talks to, for accounting.
+    fn model(&self) -> String {
+        String::new()
+    }
 }
 
 pub fn make_provider(cfg: &ProviderCfg, effort: &str) -> Result<Box<dyn Provider>> {
@@ -322,10 +357,14 @@ pub fn parse_anthropic(v: &Value) -> Result<Message> {
     if stop == "max_tokens" && content.iter().all(|b| !matches!(b, Block::ToolUse { .. })) {
         content.push(Block::Text("(response cut off at max_tokens)".into()));
     }
-    Ok(Message { role: Role::Assistant, content, raw: Some((ProviderKind::Anthropic, raw)) })
+    Ok(Message { role: Role::Assistant, content, raw: Some((ProviderKind::Anthropic, raw)), usage: anthropic_usage(v) })
 }
 
 impl Provider for Anthropic {
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+
     fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message> {
         let body = anthropic_request(&self.model, &self.effort, self.fallbacks, system, messages, tools);
         let mut headers = vec![("x-api-key", self.key.clone()), ("anthropic-version", "2026-10-21".to_string())];
@@ -499,10 +538,14 @@ pub fn parse_openai(kind: ProviderKind, v: &Value) -> Result<Message> {
         let id = c["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("call_{i}"));
         content.push(Block::ToolUse { id, name: c["function"]["name"].as_str().unwrap_or("").to_string(), input });
     }
-    Ok(Message { role: Role::Assistant, content, raw: replay_fields(msg).map(|raw| (kind, raw)) })
+    Ok(Message { role: Role::Assistant, content, raw: replay_fields(msg).map(|raw| (kind, raw)), usage: openai_usage(v) })
 }
 
 impl Provider for OpenAiCompat {
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+
     fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message> {
         let body = openai_request(self.kind, &self.model, &self.effort, system, messages, tools);
         let mut headers = Vec::new();
@@ -536,6 +579,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![Block::ToolUse { id: "t1".into(), name: "search_assets".into(), input: json!({"query": "box"}) }],
                 raw: None,
+                usage: None,
             },
             Message::user(vec![Block::ToolResult {
                 id: "t1".into(),

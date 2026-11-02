@@ -30,6 +30,11 @@ pub const GMSH: Download = Download { url: "https://gmsh.info/bin/Windows/gmsh-4
 pub const CALCULIX: Download = Download { url: "https://www.dhondt.de/calculix_2.23_4win.zip", sha256: "87FC4E1721DF37370EC67D0A244BB14F9BF804B0A95DF49E2AE7369D30EC72E8", size: 61_700_000 };
 pub const UBUNTU_ROOTFS: Download = Download { url: "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz", sha256: "8251E27FFFF381A4AF5F41DCB94D867DE3E0D9774A9241908AB34555D99315EA", size: 356_000_000 };
 
+/// The SHA-256 of some bytes, in hex.
+pub fn sha256_hex(data: &[u8]) -> String {
+    Sha256::digest(data).iter().map(|b| format!("{b:02X}")).collect()
+}
+
 pub fn sha256_of(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hash = Sha256::new();
