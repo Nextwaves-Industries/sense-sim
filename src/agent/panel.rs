@@ -474,8 +474,7 @@ fn question(ui: &mut egui::Ui, q: &mut super::Question, library: &mut Library) {
 
 fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &ToolBridge, open_settings: &mut bool) {
     if let Some(line) = agent.usage_line() {
-        let by_model = agent.usage.iter().map(|(m, u)| format!("{m}: {} in ({} from cache), {} out", super::budget::thousands(u.input), super::budget::thousands(u.cached), super::budget::thousands(u.output))).collect::<Vec<_>>().join("\n");
-        ui.label(RichText::new(line).small().color(theme::WEAK)).on_hover_text(by_model);
+        ui.label(RichText::new(line).small().color(theme::WEAK)).on_hover_text(agent.usage_cached());
         ui.add_space(2.0);
     }
     if let Some(b) = agent.blocker() {
@@ -551,19 +550,10 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
             {
                 agent.plan_mode = !agent.plan_mode;
             }
-            let p = agent.config.provider();
-            let chip = format!("{} · {}", p.kind.label(), p.effective_model());
-            if ui
-                .add(egui::Button::new(RichText::new(clip(&chip, 34)).small().color(theme::WEAK)).fill(theme::RAISED).corner_radius(10))
-                .on_hover_text("Change provider or model")
-                .clicked()
-            {
-                *open_settings = true;
-            }
+            // Which model answers is a setting, not part of the chat: see the gear in the header.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if agent.running {
-                    // The status line sits above the box (see `composer`), so the
-                    // model chip keeps its room here.
+                    // The status line sits above the box (see `composer`).
                     if round_button(ui, icon::STOP, theme::DANGER).on_hover_text("Stop").clicked() {
                         agent.stop();
                     }
@@ -646,6 +636,12 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
         }
         if refresh {
             agent.refresh_models();
+        }
+        if !agent.usage.is_empty() {
+            let by_model = agent.usage_by_model();
+            theme::setting_row(ui, "Used in this chat", "Tokens by model", |ui| {
+                ui.label(RichText::new(by_model).small().color(theme::WEAK));
+            });
         }
     }
     {

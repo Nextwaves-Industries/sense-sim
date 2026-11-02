@@ -227,6 +227,17 @@ impl Agent {
         Some(line)
     }
 
+    /// Extra detail for the chat's usage line. No model names: those stay in Settings.
+    pub fn usage_cached(&self) -> String {
+        format!("{} from cache", budget::thousands(self.usage.values().map(|u| u.cached).sum()))
+    }
+
+    /// Each model's share of this chat, for Settings.
+    pub fn usage_by_model(&self) -> String {
+        let line = |(m, u): (&String, &llm::Usage)| format!("{m}: {} in ({} from cache), {} out", budget::thousands(u.input), budget::thousands(u.cached), budget::thousands(u.output));
+        self.usage.iter().map(line).collect::<Vec<_>>().join("\n")
+    }
+
     /// Reopens the last chat. The scene isn't part of it, and nothing that was running survives.
     pub fn resume(&mut self) {
         let Some(chat) = self.resumable.take() else { return };
@@ -377,7 +388,7 @@ impl Agent {
         let (kind, model) = (self.config.active, self.config.provider().effective_model());
         if self.chat_model.as_ref().is_some_and(|(k, m)| *k != kind || *m != model) && !self.history.is_empty() {
             self.history = context::flatten(&self.history);
-            self.transcript.push(ChatItem::Info(format!("The model changed to {model}, so it gets this chat's earlier tool calls as plain text.")));
+            self.transcript.push(ChatItem::Info("The model changed, so it gets this chat's earlier tool calls as plain text.".to_string()));
         }
         self.chat_model = Some((kind, model.clone()));
         let chat_id = self.chat_id.get_or_insert_with(session::new_chat_id).clone();
@@ -727,6 +738,21 @@ mod lifecycle_tests {
 
         agent.config.share_screen = false;
         assert!(agent.screen_note().is_none());
+    }
+
+    #[test]
+    fn usage_names_the_model_in_settings_and_never_in_the_chat() {
+        let mut agent = Agent::new(AgentConfig::default());
+        agent.usage.insert("some-model-1".into(), llm::Usage { input: 1200, cached: 200, output: 30 });
+        agent.usage.insert("other-model-2".into(), llm::Usage { input: 800, cached: 100, output: 20 });
+
+        for chat in [agent.usage_line().unwrap(), agent.usage_cached()] {
+            assert!(!chat.contains("model"), "{chat}");
+        }
+        assert_eq!(agent.usage_cached(), format!("{} from cache", budget::thousands(300)));
+
+        let settings = agent.usage_by_model();
+        assert!(settings.contains("some-model-1") && settings.contains("other-model-2"), "{settings}");
     }
 
     #[test]
