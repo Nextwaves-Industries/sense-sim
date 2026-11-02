@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Renders the start-screen picture of every sample scene with the real GPU
 # renderer: loads the sample, frames it, hides the UI and saves the 3D view
-# as a 480 x 270 PNG in assets/samples/previews/. Rebuild afterwards (the
+# as a 960 x 540 PNG in assets/samples/previews/. Rebuild afterwards (the
 # pictures are compiled in). Runs one sample at a time: parallel windows
 # come out black.
 #

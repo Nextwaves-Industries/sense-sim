@@ -18,17 +18,20 @@ use crate::theme;
 /// RFID backscatter at the reader.
 pub fn weak_below(tech: Tech) -> f32 {
     match tech {
-        Tech::Uwb => -100.0,
+        // The sensitivity elsewhere is -95 dBm: "weak" has to come before inaudible.
+        Tech::Uwb => -90.0,
         Tech::Ble => -85.0,
         Tech::Rfid => -70.0,
+        Tech::Wifi => -75.0,
     }
 }
 
 fn tech_of(kind: LinkKind) -> Tech {
     match kind {
         LinkKind::Range | LinkKind::Tdoa => Tech::Uwb,
-        LinkKind::Rssi => Tech::Ble,
+        LinkKind::Rssi | LinkKind::Aoa => Tech::Ble,
         LinkKind::Rfid => Tech::Rfid,
+        LinkKind::WifiRtt | LinkKind::WifiRssi => Tech::Wifi,
     }
 }
 
@@ -43,6 +46,7 @@ pub struct AnchorRow {
     pub heard: u32,
     pub used: u32,
     pub success_pct: f32,
+    /// NaN with nothing heard.
     pub avg_dbm: f32,
     pub min_dbm: f32,
     pub nlos_pct: f32,
@@ -59,7 +63,7 @@ impl AnchorRow {
         } else if self.heard == 0 {
             ("no signal", theme::DANGER)
         } else if self.success_pct < 50.0 || self.avg_dbm < weak_below(Tech::parse(&self.tech).unwrap_or_default()) {
-            ("weak", theme::ACCENT)
+            ("weak", theme::WARNING)
         } else {
             ("ok", theme::SUCCESS)
         }
@@ -73,6 +77,7 @@ pub struct RfSnapshot {
     pub links: u32,
     pub heard: u32,
     pub success_pct: f32,
+    /// NaN with nothing heard: there is no signal to average, not 0 dBm of it.
     pub avg_dbm: f32,
     pub min_dbm: f32,
     pub weak_links: u32,
@@ -191,17 +196,15 @@ pub fn analyze(st: &RtlsState, ids: &HashMap<Entity, String>, tech: Option<Tech>
     let mean = |v: &[f32]| if v.is_empty() { 0.0 } else { v.iter().sum::<f32>() / v.len() as f32 };
     let pct = |a: u32, b: u32| if b == 0 { 0.0 } else { a as f32 / b as f32 * 100.0 };
     s.success_pct = pct(s.heard, s.links);
-    s.avg_dbm = mean(&signals);
-    s.min_dbm = signals.iter().copied().fold(f32::INFINITY, f32::min);
-    if !s.min_dbm.is_finite() {
-        s.min_dbm = 0.0;
-    }
+    let mean_dbm = |v: &[f32]| if v.is_empty() { f32::NAN } else { mean(v) };
+    let min_dbm = |v: &[f32]| if v.is_empty() { f32::NAN } else { v.iter().copied().fold(f32::INFINITY, f32::min) };
+    s.avg_dbm = mean_dbm(&signals);
+    s.min_dbm = min_dbm(&signals);
     s.nlos_pct = pct(nlos, s.links);
     s.nlos_bias_cm = mean(&bias) * 100.0;
     let mut rows: Vec<(Entity, AnchorRow)> = per
         .into_iter()
         .map(|(e, a)| {
-            let min = a.dbm.iter().copied().fold(f32::INFINITY, f32::min);
             (
                 e,
                 AnchorRow {
@@ -211,8 +214,8 @@ pub fn analyze(st: &RtlsState, ids: &HashMap<Entity, String>, tech: Option<Tech>
                     heard: a.heard,
                     used: a.used,
                     success_pct: pct(a.heard, a.in_range),
-                    avg_dbm: mean(&a.dbm),
-                    min_dbm: if min.is_finite() { min } else { 0.0 },
+                    avg_dbm: mean_dbm(&a.dbm),
+                    min_dbm: min_dbm(&a.dbm),
                     nlos_pct: pct(a.nlos, a.in_range),
                     outliers: a.outliers,
                     bias_cm: mean(&a.bias) * 100.0,
@@ -241,21 +244,18 @@ pub struct DeadZone {
     pub area_m2: f32,
 }
 
-fn dead(tech: Tech, c: &Cell) -> bool {
-    match tech {
-        Tech::Rfid => c.heard == 0,
-        _ => !c.err.is_finite(),
-    }
+fn dead(c: &Cell) -> bool {
+    !c.err.is_finite()
 }
 
 /// Connected areas of the last coverage scan without a fix (UWB / BLE) or
-/// without any reader (RFID), largest first; and the covered share.
+/// without a good read chance (RFID), largest first; and the covered share.
 pub fn dead_zones(cov: &Coverage) -> (f32, Vec<DeadZone>) {
     if cov.cells.is_empty() || cov.nx == 0 {
         return (0.0, Vec::new());
     }
     let (nx, nz) = (cov.nx, cov.nz);
-    let is_dead: Vec<bool> = cov.cells.iter().map(|c| dead(cov.tech, c)).collect();
+    let is_dead: Vec<bool> = cov.cells.iter().map(dead).collect();
     let covered = is_dead.iter().filter(|d| !**d).count() as f32 / is_dead.len() as f32;
     let mut seen = vec![false; is_dead.len()];
     let mut zones = Vec::new();
@@ -323,7 +323,7 @@ pub struct RfPoint {
 /// Last minutes of the RF summary per technology (UWB, BLE, RFID).
 #[derive(Resource, Default)]
 pub struct RfHistory {
-    pub tech: [VecDeque<RfPoint>; 3],
+    pub tech: [VecDeque<RfPoint>; 4],
     last_t: f64,
 }
 
@@ -332,6 +332,7 @@ fn tech_index(t: Tech) -> usize {
         Tech::Uwb => 0,
         Tech::Ble => 1,
         Tech::Rfid => 2,
+        Tech::Wifi => 3,
     }
 }
 
@@ -359,14 +360,6 @@ pub fn sample(st: Res<RtlsState>, mut hist: ResMut<RfHistory>) {
 
 // ---------------------------------------------------------------------------
 // UI
-
-fn kpi(ui: &mut egui::Ui, value: String, key: &str, col: Color32) {
-    ui.vertical(|ui| {
-        ui.label(RichText::new(value).size(17.0).strong().color(col));
-        ui.label(RichText::new(key).small().color(theme::WEAK));
-    });
-    ui.add_space(10.0);
-}
 
 fn histogram(ui: &mut egui::Ui, title: &str, values: &[f32], lo: f32, hi: f32, unit: &str, mark: Option<f32>, color: Color32) {
     const BINS: usize = 24;
@@ -423,32 +416,34 @@ pub fn rf_tab(
     let a = analyze(state, ids, Some(*tech));
     let s = &a.snap;
     if s.links == 0 {
-        ui.label(RichText::new(format!("No {} links yet: place {} and tags, then run the simulation.", tech.label(), tech.infra().label())).color(theme::ACCENT));
+        ui.label(RichText::new(format!("No {} links yet: place {} and tags, then run the simulation.", tech.label(), tech.infra().label())).color(theme::WARNING));
     }
 
     // ---- Signal strength & link quality
     ui.add_space(4.0);
     ui.label(RichText::new("Signal & link quality").strong());
-    ui.horizontal_wrapped(|ui| {
-        let ok = |v: f32, good: f32, bad: f32| if v >= good { theme::SUCCESS } else if v >= bad { theme::ACCENT } else { theme::DANGER };
-        kpi(ui, format!("{:.0}%", s.success_pct), "links heard", ok(s.success_pct, 90.0, 60.0));
-        kpi(ui, format!("{:.0} dBm", s.avg_dbm), "avg signal", ok(s.avg_dbm, weak_below(*tech) + 10.0, weak_below(*tech)));
-        kpi(ui, format!("{:.0} dBm", s.min_dbm), "weakest", ok(s.min_dbm, weak_below(*tech), weak_below(*tech) - 10.0));
-        kpi(ui, format!("{}", s.weak_links), "weak links", if s.weak_links == 0 { theme::SUCCESS } else { theme::ACCENT });
-        kpi(ui, format!("{:.0}%", s.nlos_pct), "NLOS", ok(100.0 - s.nlos_pct, 70.0, 40.0));
-        kpi(ui, format!("{}", s.blocked_links), "blocked", if s.blocked_links == 0 { theme::SUCCESS } else { theme::DANGER });
-        if *tech == Tech::Uwb {
-            kpi(ui, format!("{:.0} cm", s.nlos_bias_cm), "NLOS range bias", ok(-s.nlos_bias_cm, -15.0, -50.0));
-        }
-        if *tech != Tech::Rfid {
-            kpi(ui, format!("{}", s.tags_under3), "tags < 3 anchors", if s.tags_under3 == 0 { theme::SUCCESS } else { theme::DANGER });
-        }
-    });
+    let ok = |v: f32, good: f32, bad: f32| if !v.is_finite() { theme::WEAK } else if v >= good { theme::SUCCESS } else if v >= bad { theme::WARNING } else { theme::DANGER };
+    let dbm = |v: f32| if v.is_finite() { format!("{v:.0} dBm") } else { "–".to_string() };
+    let mut tiles = vec![
+        (format!("{:.0}%", s.success_pct), "links heard", ok(s.success_pct, 90.0, 60.0)),
+        (dbm(s.avg_dbm), "avg signal", ok(s.avg_dbm, weak_below(*tech) + 10.0, weak_below(*tech))),
+        (dbm(s.min_dbm), "weakest", ok(s.min_dbm, weak_below(*tech), weak_below(*tech) - 10.0)),
+        (format!("{}", s.weak_links), "weak links", if s.weak_links == 0 { theme::SUCCESS } else { theme::WARNING }),
+        (format!("{:.0}%", s.nlos_pct), "NLOS", ok(100.0 - s.nlos_pct, 70.0, 40.0)),
+        (format!("{}", s.blocked_links), "blocked", if s.blocked_links == 0 { theme::SUCCESS } else { theme::DANGER }),
+    ];
+    if *tech == Tech::Uwb {
+        tiles.push((format!("{:.0} cm", s.nlos_bias_cm), "NLOS range bias", ok(-s.nlos_bias_cm, -15.0, -50.0)));
+    }
+    if *tech != Tech::Rfid {
+        tiles.push((format!("{}", s.tags_under3), "tags < 3 anchors", if s.tags_under3 == 0 { theme::SUCCESS } else { theme::DANGER }));
+    }
+    super::fdtd::ui::tiles(ui, &tiles);
     ui.label(RichText::new(format!("weak = below {:.0} dBm · NLOS = path crosses objects or walls", weak_below(*tech))).small().color(theme::WEAK));
 
     let h = &hist.tech[tech_index(*tech)];
-    let series = |f: fn(&RfPoint) -> f32| h.iter().map(|p| (p.t, f(p))).collect::<Vec<_>>();
-    super::tag_card::lines_chart(ui, "Avg signal (dBm)", " dBm", &[("avg".into(), Color32::from_rgb(94, 172, 255), series(|p| p.avg_dbm))], 70.0);
+    let series = |f: fn(&RfPoint) -> f32| h.iter().map(|p| (p.t, f(p))).filter(|x| x.1.is_finite()).collect::<Vec<_>>();
+    super::tag_card::lines_chart(ui, "Avg signal (dBm)", " dBm", &[("avg".into(), Color32::from_rgb(38, 110, 228), series(|p| p.avg_dbm))], 70.0);
     ui.add_space(3.0);
     super::tag_card::lines_chart(
         ui,
@@ -458,15 +453,15 @@ pub fn rf_tab(
         70.0,
     );
     ui.add_space(3.0);
-    super::tag_card::lines_chart(ui, "Weak links", "", &[("weak".into(), theme::ACCENT, series(|p| p.weak))], 50.0);
+    super::tag_card::lines_chart(ui, "Weak links", "", &[("weak".into(), theme::WARNING, series(|p| p.weak))], 50.0);
     ui.add_space(3.0);
     let (lo, hi) = super::planning::signal_scale(*tech);
-    histogram(ui, "Signal strength distribution", &a.signals, lo - 10.0, hi + 5.0, " dBm", Some(weak_below(*tech)), Color32::from_rgb(94, 172, 255));
+    histogram(ui, "Signal strength distribution", &a.signals, lo - 10.0, hi + 5.0, " dBm", Some(weak_below(*tech)), Color32::from_rgb(38, 110, 228));
     if *tech != Tech::Rfid {
         ui.add_space(3.0);
         let errs: Vec<f32> = state.errors.iter().filter(|(_, _, t)| *t == tech.label().to_lowercase()).map(|(_, e, _)| e * 100.0).collect();
         let max = errs.iter().copied().fold(50.0f32, f32::max).min(500.0);
-        histogram(ui, "Position error distribution", &errs, 0.0, max, " cm", None, theme::ACCENT);
+        histogram(ui, "Position error distribution, last 30 s", &errs, 0.0, max, " cm", None, theme::WARNING);
     }
 
     // ---- Anchor health
@@ -487,8 +482,9 @@ pub fn rf_tab(
                 }
                 ui.label(format!("{}/{}", row.heard, row.in_range));
                 ui.label(format!("{:.0}", row.success_pct));
-                ui.label(RichText::new(format!("{:.0}", row.avg_dbm)).monospace());
-                ui.label(RichText::new(format!("{:.0}", row.min_dbm)).monospace());
+                let num = |v: f32| if v.is_finite() { format!("{v:.0}") } else { "–".to_string() };
+                ui.label(RichText::new(num(row.avg_dbm)).monospace());
+                ui.label(RichText::new(num(row.min_dbm)).monospace());
                 ui.label(format!("{:.0}", row.nlos_pct));
                 ui.label(if *tech == Tech::Uwb { format!("{} · {:+.0} cm", row.outliers, row.bias_cm) } else { "–".into() });
                 ui.label(RichText::new(status).color(col));
@@ -504,7 +500,7 @@ pub fn rf_tab(
         egui::Grid::new("rf_weak").striped(true).num_columns(5).spacing(vec2(10.0, 2.0)).show(ui, |ui| {
             for w in &a.weakest {
                 ui.label(RichText::new(format!("{} → {}", w.tag, w.other_id)).strong());
-                ui.label(RichText::new(format!("{:.0} dBm", w.dbm)).monospace().color(if w.heard { theme::ACCENT } else { theme::DANGER }));
+                ui.label(RichText::new(format!("{:.0} dBm", w.dbm)).monospace().color(if w.heard { theme::WARNING } else { theme::DANGER }));
                 ui.label(if w.heard { "weak" } else { "lost" });
                 ui.label(RichText::new(&w.path).small().color(theme::WEAK));
                 ui.label(RichText::new(format!("{:.1} m", w.distance)).small().color(theme::WEAK));
@@ -533,7 +529,7 @@ pub fn rf_tab(
     } else {
         let (covered, zones) = dead_zones(cov);
         let dead_area: f32 = zones.iter().map(|z| z.area_m2).sum();
-        let col = if covered >= 0.95 { theme::SUCCESS } else if covered >= 0.8 { theme::ACCENT } else { theme::DANGER };
+        let col = if covered >= 0.95 { theme::SUCCESS } else if covered >= 0.8 { theme::WARNING } else { theme::DANGER };
         ui.label(RichText::new(format!("{:.0}% of the floor covered · {} dead zones · {:.0} m² without {}", covered * 100.0, zones.len(), dead_area, if *tech == Tech::Rfid { "a read" } else { "a fix" })).color(col));
         egui::Grid::new("rf_dead").striped(true).num_columns(3).show(ui, |ui| {
             for (k, z) in zones.iter().take(8).enumerate() {
@@ -558,6 +554,17 @@ pub fn rf_tab(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_heard_shows_no_signal_not_zero_dbm() {
+        let a = analyze(&RtlsState::default(), &HashMap::new(), None);
+        assert!(a.snap.avg_dbm.is_nan() && a.snap.min_dbm.is_nan(), "{:?}", a.snap);
+    }
+
+    #[test]
+    fn uwb_weak_sits_above_the_sensitivity() {
+        assert!(weak_below(Tech::Uwb) > -95.0, "an inaudible link must not read as fine");
+    }
 
     #[test]
     fn dead_zones_are_connected_areas() {

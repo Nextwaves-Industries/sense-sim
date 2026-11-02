@@ -61,14 +61,14 @@ pub fn sample(state: Res<RtlsState>, mut hist: ResMut<TagHistory>) {
 }
 
 const PALETTE: [Color32; 8] = [
-    Color32::from_rgb(94, 172, 255),
-    Color32::from_rgb(255, 170, 70),
-    Color32::from_rgb(120, 210, 120),
-    Color32::from_rgb(235, 110, 160),
-    Color32::from_rgb(180, 140, 255),
-    Color32::from_rgb(90, 210, 210),
-    Color32::from_rgb(230, 210, 90),
-    Color32::from_rgb(200, 200, 200),
+    Color32::from_rgb(38, 110, 228),
+    Color32::from_rgb(226, 118, 22),
+    Color32::from_rgb(40, 158, 84),
+    Color32::from_rgb(214, 62, 124),
+    Color32::from_rgb(128, 84, 214),
+    Color32::from_rgb(20, 150, 158),
+    Color32::from_rgb(178, 150, 20),
+    Color32::from_rgb(120, 124, 132),
 ];
 
 /// A small multi-line time chart with a title, the latest values and a y range.
@@ -102,7 +102,7 @@ pub(super) fn lines_chart(ui: &mut egui::Ui, title: &str, unit: &str, series: &[
     };
     for frac in [0.5f32] {
         let y = plot.bottom() - frac * plot.height();
-        p.line_segment([egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)], egui::Stroke::new(1.0, Color32::from_white_alpha(14)));
+        p.line_segment([egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)], egui::Stroke::new(1.0, Color32::from_black_alpha(14)));
     }
     for (_, col, s) in series {
         if s.len() >= 2 {
@@ -124,6 +124,9 @@ fn link_kind(k: LinkKind) -> (&'static str, &'static str) {
         LinkKind::Range => ("TWR", " m"),
         LinkKind::Tdoa => ("TDoA", " m"),
         LinkKind::Rssi => ("RSSI", " dBm"),
+        LinkKind::Aoa => ("AoA", " °"),
+        LinkKind::WifiRtt => ("RTT", " m"),
+        LinkKind::WifiRssi => ("WiFi", " dBm"),
         LinkKind::Rfid => ("RFID", " dBm"),
     }
 }
@@ -138,8 +141,8 @@ fn metric(ui: &mut egui::Ui, key: &str, value: String) {
 pub fn details(ui: &mut egui::Ui, e: Entity, track: Option<&Track>, running: bool, ids: &HashMap<Entity, String>, hist: &TagHistory) {
     ui.set_min_width(300.0);
     let Some(tr) = track else {
-        let msg = if running { "No data yet: waiting for the first update." } else { "Simulation is paused: press ▶ Run in ② Test live." };
-        ui.label(RichText::new(msg).color(theme::ACCENT));
+        let msg = if running { "No data yet: waiting for the first update." } else { "Simulation is paused: press Run on the Test live page." };
+        ui.label(RichText::new(msg).color(theme::WARNING));
         return;
     };
     let name = |o: &Entity| ids.get(o).cloned().unwrap_or_else(|| "?".into());
@@ -190,7 +193,7 @@ pub fn details(ui: &mut egui::Ui, e: Entity, track: Option<&Track>, running: boo
                 };
                 ui.label(RichText::new(format!("{:.2} m", l.true_distance)).monospace().color(theme::WEAK));
                 let path = l.path_label();
-                ui.label(RichText::new(path).small().color(if l.walls == 0 { theme::SUCCESS } else { theme::ACCENT }));
+                ui.label(RichText::new(path).small().color(if l.walls == 0 { theme::SUCCESS } else { theme::WARNING }));
                 ui.end_row();
             }
         });
@@ -202,7 +205,7 @@ pub fn details(ui: &mut egui::Ui, e: Entity, track: Option<&Track>, running: boo
     ui.add_space(4.0);
     if tr.tech != "rfid" {
         let err: Vec<(f64, f32)> = h.iter().filter_map(|s| s.err.map(|v| (s.t, v * 100.0))).collect();
-        lines_chart(ui, "Error (cm)", " cm", &[("error".into(), theme::ACCENT, err)], 70.0);
+        lines_chart(ui, "Error (cm)", " cm", &[("error".into(), theme::WARNING, err)], 70.0);
         ui.add_space(3.0);
     }
     let used: Vec<(f64, f32)> = h.iter().map(|s| (s.t, s.used as f32)).collect();
@@ -236,7 +239,7 @@ pub fn add_tags_row<'a>(
     let devices: Vec<(&Device, Vec3)> = devices.collect();
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Add tags").color(theme::WEAK));
-        for kind in [DeviceKind::UwbTag, DeviceKind::BleTag, DeviceKind::RfidTag] {
+        for kind in [DeviceKind::UwbTag, DeviceKind::BleTag, DeviceKind::RfidTag, DeviceKind::WifiClient] {
             let Some(p) = profiles.default_for(kind) else { continue };
             let active = place.profile.as_deref() == Some(p.id.as_str());
             if ui

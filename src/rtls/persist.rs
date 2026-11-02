@@ -34,7 +34,7 @@ pub fn rtls_json(devices: impl Iterator<Item = (Device, Transform)>, zones: impl
         .map(|(d, t)| DeviceDoc { device: d, translation: t.translation.to_array(), rotation: t.rotation.to_array() })
         .collect();
     let zones: Vec<Zone> = zones.collect();
-    json!({ "devices": devices, "zones": zones })
+    json!({ "devices": devices, "zones": zones, "object_materials": super::radio::object_materials_json() })
 }
 
 pub fn parse_rtls(v: &Value) -> (Vec<(Device, Transform)>, Vec<Zone>) {
@@ -55,6 +55,7 @@ pub fn parse_rtls(v: &Value) -> (Vec<(Device, Transform)>, Vec<Zone>) {
 
 pub fn read_layout_rtls(path: &Path) -> anyhow::Result<(Vec<(Device, Transform)>, Vec<Zone>)> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    super::radio::load_object_materials(&v["rtls"]["object_materials"]);
     Ok(parse_rtls(&v["rtls"]))
 }
 
@@ -131,7 +132,7 @@ mod tests {
             motion: Motion::Path { points: vec![[0.0, 1.0, 0.0], [3.0, 1.0, 0.0]], speed: 1.0, ping_pong: true },
             address: String::new(),
             auto: false,
-            radio: crate::rtls::device::RadioOverride { uwb_tx_dbm_mhz: Some(-50.0), antenna: Some(crate::rtls::antenna::AntennaChoice::Omni { gain_dbi: 2.0 }) },
+            radio: crate::rtls::device::RadioOverride { uwb_tx_dbm_mhz: Some(-50.0), antenna: Some(crate::rtls::antenna::AntennaChoice::Omni { gain_dbi: 2.0 }), worn: false },
         };
         let z = Zone { name: "Dock".into(), min: [0.0; 3], max: [2.0, 2.0, 2.0], restricted: true, capacity: 0, auto: false };
         let v = rtls_json(std::iter::once((d, Transform::from_xyz(1.0, 1.2, 2.0))), std::iter::once(z));
@@ -146,5 +147,15 @@ mod tests {
         // A v2 layout has no rtls key.
         let (ds, zs) = parse_rtls(&Value::Null);
         assert!(ds.is_empty() && zs.is_empty());
+    }
+
+    #[test]
+    fn templates_parse_completely() {
+        for (id, s) in &crate::samples::TEMPLATES {
+            let v: Value = serde_json::from_str(s.layout.unwrap()).unwrap();
+            let (ds, zs) = parse_rtls(&v["rtls"]);
+            assert_eq!(ds.len(), v["rtls"]["devices"].as_array().map_or(0, |a| a.len()), "{id}: a device failed to parse");
+            assert_eq!(zs.len(), v["rtls"]["zones"].as_array().map_or(0, |a| a.len()), "{id}: a zone failed to parse");
+        }
     }
 }

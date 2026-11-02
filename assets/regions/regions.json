@@ -1,0 +1,653 @@
+[
+  {
+    "id": "ae",
+    "name": "United Arab Emirates",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Generic UWB to EN 302 065-1: 6.0-8.5 GHz at -41.3 dBm/MHz with or without mitigation; location tracking has the same limit under EN 302 500-1. Version 4.0, Dec 2020; a 2023 TDRA consultation exists and no newer text was found.",
+      "source": "TRA Regulations for Ultra-Wide Band and Short Range Devices V4.0, Article 4 (IB-Lenhardt archive copy) - https://ib-lenhardt.com/assets/pdf/archive/UWB_and_SRD_Regs_V4.0.pdf"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        865,
+        868
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "2 W only on channels at 865.7, 866.3, 866.9 and 867.5 MHz, at most 200 kHz wide. Also 915-921 MHz at 4 W ERP on 916.3, 917.5 and 918.7 MHz, with DAA for passive tags. EN 302 208. Same V4.0 currency caveat as UWB.",
+      "source": "TRA Regulations for Ultra-Wide Band and Short Range Devices V4.0, RFID table and notes 6-8 (IB-Lenhardt archive copy) - https://ib-lenhardt.com/assets/pdf/archive/UWB_and_SRD_Regs_V4.0.pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "ar",
+    "name": "Argentina",
+    "uwb": {
+      "status": "unverified",
+      "note": "ENACOM Resolution 5186-E/2017 added 3.1-10.6 GHz for handheld UWB per a test-lab bulletin, with no limit stated. Limit, and whether fixed anchors qualify, unknown.",
+      "source": "Regulatory Update Argentina, 5 Jul 2017 (Kiwa PCS) - https://careers.kiwa.com/globalassets/uk/pcs/regulatory-updates-2017/regulatory_update_argentina_05-jul-17.pdf"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        902,
+        928
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "4 W EIRP",
+      "note": "FHSS. Weak source: undated copy of the GS1 table, about 2019. A search summary says Resolution 581/2018 made only 915-928 MHz shared-use, which could narrow the band; that text could not be opened.",
+      "source": "Worldwide UHF RFID Frequency Allocations (Airplux, undated copy of GS1 table) - https://airpluxtec.com/worldwide-uhf-rfid-frequency-allocations/"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "au",
+    "name": "Australia",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Class licence item 7 allows 6000-9000 MHz under EN 302 065-1, which sets -41.3 dBm/MHz and 0 dBm/50 MHz in 6-8.5 GHz with no mitigation. No fixed outdoor operation (mobile outdoors allowed), not on aircraft, not within the nominated distance of radio-astronomy sites.",
+      "source": "Radiocommunications (LIPD) Class Licence 2025, F2025L01047, Schedule 1 clause 67 - https://www.legislation.gov.au/F2025L01047/asmade/2025-09-05/text/original/pdf ; ETSI EN 302 065-1 V2.1.1 - https://www.etsi.org/deliver/etsi_en/302000_302099/30206501/02.01.01_60/en_30206501v020101p.pdf"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        920,
+        926
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "4 W EIRP",
+      "note": "Above 1 W EIRP only if necessary for satisfactory system performance. Unwanted EIRP limits: -37 dBm below 917.75 MHz, -33 dBm above 926 MHz. Also 918-926 MHz at 1 W EIRP.",
+      "source": "Radiocommunications (LIPD) Class Licence 2025, F2025L01047, Table 5 and clause 27, in force 1 Oct 2025 - https://www.legislation.gov.au/F2025L01047/asmade/2025-09-05/text/original/pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "br",
+    "name": "Brazil",
+    "uwb": {
+      "status": "unverified",
+      "note": "A test-lab page gives UWB bands 3100-3300 and 3700-10600 MHz under Ato 14448/2017 Table XIV, amended by Ato 423/2022, but no numeric limit. Anatel text could not be opened. Limit and use conditions unknown; test-lab pages also disagree on whether use is vehicle-only.",
+      "source": "ANATEL Short Range Devices (IB-Lenhardt) - https://ib-lenhardt.com/kb/anatel-requirements/short-range-devices"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        915,
+        928
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "4 W EIRP",
+      "note": "FHSS. Also 902-907.5 MHz at 4 W EIRP; 907.5-915 MHz is not included. Anatel text not read.",
+      "source": "RAIN RFID Spectrum Allocation chart, April 2026 - https://therainalliance.org/wp-content/uploads/2026/04/RAIN-RFID-Spectrum-Allocation-042826-FINAL-4.pdf ; Worldwide UHF RFID Frequency Allocations (Airplux, undated copy of GS1 table) - https://airpluxtec.com/worldwide-uhf-rfid-frequency-allocations/"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "ca",
+    "name": "Canada",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Indoor communication/location devices: -41.3 dBm/MHz in 4.75-10.6 GHz, 0 dBm peak in 50 MHz. Must work only indoors or fully enclosed; factory antenna. Hand-held class separately barred from outdoor-mounted antennas and fixed outdoor infrastructure.",
+      "source": "ISED RSS-220 Issue 1 Amendment 1 (2018) - https://ised-isde.canada.ca/site/spectrum-management-telecommunications/sites/default/files/attachments/2022/RSS-220-I1-EN.pdf"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        902,
+        928
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "4 W EIRP, 1 W conducted",
+      "note": "FHSS with at least 50 hopping channels. Fewer than 50 channels: 0.25 W conducted, 1 W EIRP. Hopping channel 20 dB bandwidth at most 500 kHz.",
+      "source": "ISED RSS-247 Issue 4 (July 2025), Amendment 1 (Oct 2026), section 6.2.2 - https://ised-isde.canada.ca/site/spectrum-management-telecommunications/en/devices-and-equipment/radio-equipment-standards/radio-standards-specifications-rss/rss-247-digital-transmission-systems-dtss-frequency-hopping-systems-fhss-and-licence-exempt-local"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "cn",
+    "name": "China",
+    "checked": "2026-11-02",
+    "uwb": {
+      "status": "secondary",
+      "channels": [
+        9
+      ],
+      "note": "7163 to 8812 MHz since 1 Aug 2025. The power limit is in an annex that was not read, so it is not applied.",
+      "source": "CAICT translation of MIIT rules"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        920.5,
+        924.5
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "From a third-party copy of the technical annex, which does not itself cite MIIT 2024 No. 76. 100 mW ERP in 920-920.5 and 924.5-925 MHz. Frequency hopping, 20 channels. Type approval required.",
+      "source": "Technical annex copy - https://file.smejs.cn/file/group1/M00/00/05/rBIAAWY4mWGAItwCAAJsZMHqdFs998.pdf ; IB-Lenhardt summary of MIIT 2024 No. 76"
+    }
+  },
+  {
+    "id": "eu",
+    "name": "European Union, lower band",
+    "checked": "2026-11-02",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Generic use in 6 to 8.5 GHz excludes fixed outdoor installations and road and rail vehicles.",
+      "source": "Decision (EU) 2019/785 as amended by 2024/1467"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        865,
+        868
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "Four channels. Above 1 W ERP the horizontal beam may not exceed 90 degrees; readers must stop when no more tags are read.",
+      "source": "ETSI EN 302 208 V3.3.1"
+    }
+  },
+  {
+    "id": "eu-upper",
+    "name": "European Union, upper band",
+    "checked": "2026-11-02",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Generic use in 6 to 8.5 GHz excludes fixed outdoor installations and road and rail vehicles.",
+      "source": "Decision (EU) 2019/785 as amended by 2024/1467"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        915,
+        921
+      ],
+      "max_eirp_dbm": 38.15,
+      "limit_text": "4 W ERP",
+      "note": "Not implemented in every member state; check CEPT ERC/REC 70-03 for the country.",
+      "source": "ETSI EN 302 208 V3.3.1"
+    }
+  },
+  {
+    "id": "gb",
+    "name": "United Kingdom",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "General use, 6.0-8.5 GHz: -41.3 dBm/MHz mean, 0 dBm peak, no mitigation. Indoors, or outdoors only if not attached to a fixed installation, fixed infrastructure or fixed outdoor antenna. Location-tracking class has the same limits with no indoor/outdoor restriction. Later amendments not checked.",
+      "source": "Wireless Telegraphy (Ultra-Wideband Equipment) (Exemption) Regulations 2015, SI 2015/591, regs 5, 6, 9, 10 (LawPlayer copy) - https://lawplayer.com/uk/act/uksi-2015-591"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        865.6,
+        867.6
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "Read from a third-party copy of Ofcom IR 2030 dated July 2017; the current April 2026 edition returned 403, so confirm there. Also 500 mW ERP in 867.6-868 MHz. Upper band: 4 W ERP on 400 kHz channels at 916.1-916.5, 917.3-917.7 and 918.5-918.9 MHz, DAA for passive tags; a 919.7-920.1 MHz channel is listed but its power could not be aligned in the extracted table.",
+      "source": "Ofcom IR 2030, July 2017 edition (third-party copy), IR2030/13 - https://entirety.biz/wp-content/uploads/IR-2030-UK-Interface-Requirements-2030-Licence-Exempt-Short-Range-Devices.pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "hk",
+    "name": "Hong Kong",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "SRD class licence specification: 4.2-4.8 and/or 6-8.5 GHz, maximum mean -41.3 dBm/MHz EIRP, tested to EN 302 065 or FCC Subpart F. Issue 1, Aug 2018, read from an archive copy. Class-licence location conditions were not read, so outdoor use is unknown.",
+      "source": "HKCA 1080 Issue 1 (IB-Lenhardt archive copy) - https://ib-lenhardt.com/assets/pdf/archive/HKCA_1080.pdf"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        920,
+        925
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "4 W EIRP, 1 W peak transmitter power",
+      "note": "FHSS, at least 10 hopping frequencies, 20 dB bandwidth at most 500 kHz, 0.4 s occupancy in 4 s. Also 865-868 MHz at 2 W ERP to EN 302 208. Summary of HKCA 1049 Issue 2 (March 2026); OFCA text not opened.",
+      "source": "Regulatory Summary: HKCA 1049 and HKCA 1078 (Eleos Compliance) - https://eleoscompliance.com/regulatory/LG_mX7DFAL7meAcboVlMLg"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "id",
+    "name": "Indonesia",
+    "uwb": {
+      "status": "secondary",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "6.0-8.5 GHz: -41.3 dBm/MHz mean, 0 dBm/50 MHz peak. Read in a third-party English translation of the decree, not the Indonesian text. The class-licence regulation PM 2/2023 could not be opened, so licence-exempt status and any location conditions were not confirmed.",
+      "source": "Decree KM 260/2024, Technical Standards of Short-Range Devices, Table 4 (DIMULTI translation hosted by CAICT) - https://gma.caict.ac.cn/uploads/standard/20240611075851.pdf"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        920,
+        923
+      ],
+      "max_eirp_dbm": 26.02,
+      "limit_text": "400 mW EIRP (26.02 dBm)",
+      "note": "Read in a third-party English translation; class-licence regulation PM 2/2023 not opened. An older GS1 table copy lists 923-925 MHz at 2 W ERP, whose licensing was not confirmed.",
+      "source": "Decree KM 260/2024, Technical Standards of Short-Range Devices, Table 3 (DIMULTI translation hosted by CAICT) - https://gma.caict.ac.cn/uploads/standard/20240611075851.pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "in",
+    "name": "India",
+    "uwb": {
+      "status": "unverified",
+      "note": "WPC lists a UWB exemption, G.S.R. 1046(E) of 18 Oct 2018, but its text could not be opened. Bands and limits unknown.",
+      "source": "No primary UWB text could be opened; rule citation seen only in search results for the WPC regulations list - http://wpc.dot.gov.in/content/10_1_Regulations.aspx"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        865,
+        868
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "G.S.R. 853(E) of 10 Dec 2021 supersedes the 2005 865-867 MHz rules; equipment type-approved under those rules is grandfathered. 2 W only on channels at 865.7, 866.3, 866.9 and 867.5 MHz, at most 200 kHz wide. At most 4 s continuous, then 100 ms off the channel.",
+      "source": "G.S.R. 853(E), Use of Low Power Equipment in 865-868 MHz for Short Range Devices (Exemption from Licence) Rules 2021, Table IV (gazette copy) - https://thc.nic.in/Central%20Governmental%20Rules/use%20of%20low%20power%20Equipment%20in%20the%20frequency%20band%20865%20to%20868%20MHz%20for%20Short%20Range%20Devices%20Exemption%20from%20Licence%20Rules,2021.pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "jp",
+    "name": "Japan, unlicensed",
+    "checked": "2026-11-02",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Channel 5 is outside Japan's table. Outdoor use possible in 7.587 to 8.4 GHz.",
+      "source": "MIC document 61-2-2"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        916.7,
+        923.5
+      ],
+      "max_eirp_dbm": 27,
+      "limit_text": "250 mW + 3 dBi (27 dBm EIRP)",
+      "note": "Carrier sense required. The band edges come from GS1.",
+      "source": "ARIB STD-T107"
+    }
+  },
+  {
+    "id": "jp-licensed",
+    "name": "Japan, licensed",
+    "checked": "2026-11-02",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Channel 5 is outside Japan's table. Outdoor use possible in 7.587 to 8.4 GHz.",
+      "source": "MIC document 61-2-2"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        916.7,
+        920.9
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "4 W EIRP with a licence",
+      "note": "Needs a station licence.",
+      "source": "GS1 UHF overview, Feb 2022; ARIB STD-T106"
+    }
+  },
+  {
+    "id": "kr",
+    "name": "South Korea",
+    "uwb": {
+      "status": "unverified",
+      "note": "Secondary sources conflict and the current notice was not readable. Japan's MIC table cites notice 2019-105: 3.735-4.8 and 6.0-10.2 GHz, -41.3 dBm/MHz, 0 dBm/50 MHz. IB-Lenhardt cites 2022-75: about 6.0-8.8 GHz, with DAA or strict EIRP limits mandatory. Whether channels 5 and 9 need no mitigation is unknown.",
+      "source": "MIC Japan document 61-2-2 - https://www.soumu.go.jp/main_content/000786294.pdf ; UWB: Technology and Compliance (IB-Lenhardt) - https://ib-lenhardt.com/kb/ultra-wideband"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        917,
+        923.5
+      ],
+      "max_eirp_dbm": 23,
+      "limit_text": "200 mW EIRP",
+      "note": "FHSS or LBT. Conservative value: the same table lists 917-920.8 MHz at 4 W EIRP, and the RAIN 2026 chart shows 4 W EIRP for Korea, but whether 4 W is licence-exempt was not confirmed. MSIT Notice 2025-14, Article 5, governs; its body text could not be read.",
+      "source": "Worldwide UHF RFID Frequency Allocations (Airplux, undated copy of GS1 table) - https://airpluxtec.com/worldwide-uhf-rfid-frequency-allocations/ ; RAIN RFID Spectrum Allocation chart, April 2026 - https://therainalliance.org/wp-content/uploads/2026/04/RAIN-RFID-Spectrum-Allocation-042826-FINAL-4.pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "mx",
+    "name": "Mexico",
+    "uwb": {
+      "status": "unverified",
+      "note": "No Mexican UWB rule found. Whether channels 5 and 9 are licence-exempt, and at what limit, is unknown.",
+      "source": "No UWB source could be opened"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        902,
+        928
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "4 W EIRP, 1 W peak output",
+      "note": "Free-use spectrum, no concession needed. Frequency hopping: under 250 kHz channels need more than 50 hops at 1 W; 250-500 kHz channels get 0.25 W with 25-50 hops, or 1 W with more than 50. Table covers spread-spectrum radios generally, not RFID by name. EIRP may change if the underlying Acuerdo is replaced.",
+      "source": "IFT-008-2015, DOF 19 Oct 2015, Cuadros 1 and 2 - https://www.ift.org.mx/sites/default/files/dof_-_ift0082015_19102015.pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "my",
+    "name": "Malaysia",
+    "uwb": {
+      "status": "unverified",
+      "note": "MCMC Class Assignment No. 2 of 2025 and MTSFB TC T007:2026 cover UWB, but MCMC returned 403. A summary says T007:2026 added 8500-10600 MHz operation and removed 3400-3700 MHz. Limits for channels 5 and 9 unknown.",
+      "source": "Malaysia: MCMC issues SRD specifications (CAICT summary) - https://gma.caict.ac.cn/en/update/29/1355"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        919,
+        923
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "Band confirmed by a 2026 test-lab note on T007:2026. The 2 W ERP figure comes only from an undated copy of the GS1 table, about 2019; MCMC text not read.",
+      "source": "Worldwide UHF RFID Frequency Allocations (Airplux, undated copy of GS1 table) - https://airpluxtec.com/worldwide-uhf-rfid-frequency-allocations/ ; Malaysia: MCMC Issues New Technical Codes (IB-Lenhardt) - https://ib-lenhardt.com/news/malaysia-mcmc-issues-new-technical-codes-for-equipment-and-srds"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "nz",
+    "name": "New Zealand",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "6000-8500 MHz: -41.3 dBm/MHz mean, -30 dBW maximum power. No fixed outdoor transmitter or antenna, except low-power in-ground devices. Road and rail vehicles need TPC for this level, otherwise -53.3 dBm/MHz. RSM still links this 2017 notice as current.",
+      "source": "General User Radio Licence for Ultra Wide Band Devices, Gazette 2017-go406 - https://gazette.govt.nz/notice/id/2017-go406"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        920,
+        928
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "6 dBW (4 W) EIRP",
+      "note": "General SRD row, not RFID-specific. Above 1 W needs frequency hopping or digital modulation; special condition 23 also applies and its wording was not read. Also 915-928 MHz at 0 dBW and 864-868 MHz at 6 dBW. Latest notice found; a newer one may exist.",
+      "source": "General User Radio Licence for Short Range Devices Notice 2022, Gazette 2022-go3100 - https://gazette.govt.nz/notice/id/2022-go3100"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "ph",
+    "name": "Philippines",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "6.0-8.5 GHz, -41.3 dBm/MHz mean EIRP. NTC type acceptance required. Integral antenna with no connector; stop within 10 s without acknowledgement; non-interference, unprotected basis; not on aircraft, ships or satellites. Fixed outdoor use not addressed.",
+      "source": "NTC Memorandum Circular 06-08-2018, 29 Aug 2018 - https://region7.ntc.gov.ph/wp-content/uploads/2024/01/MC-06-08-2018.pdf"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        918,
+        920
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP (high-power reader)",
+      "note": "Weak source: a 2018 article summarising MC 03-08-2006, which could not be opened. Low-power readers 500 mW ERP. All readers need NTC approval and one-time registration, which is not the same as being unregistered exempt use. Use 29.15 dBm EIRP if planning conservatively.",
+      "source": "RFID Rules and Regulations You Need to Know (Primer, 2018) - https://primer.com.ph/tips-guides/2018/09/30/rfid-rules-and-regulations-you-need-to-know/"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "sa",
+    "name": "Saudi Arabia",
+    "uwb": {
+      "status": "unverified",
+      "note": "CST RI085 is the relevant specification, and a search snippet showed 6-8.5 GHz at -41.3 dBm/MHz, but cst.gov.sa could not be reached, so the text was not opened. Limit and conditions unconfirmed.",
+      "source": "Could not be opened: CST RI085 - https://www.cst.gov.sa/ar/RulesandSystems/RegulatoryDocuments/EquipmentApproval/Technical_Specification/RI085_UWB.pdf"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        865.6,
+        867.6
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "ETSI-style rules. Weak source: undated copy of the GS1 table, about 2019. CST RI055 could not be reached. Upper-band status unknown.",
+      "source": "Worldwide UHF RFID Frequency Allocations (Airplux, undated copy of GS1 table) - https://airpluxtec.com/worldwide-uhf-rfid-frequency-allocations/"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "sg",
+    "name": "Singapore",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Generic UWB 6-8.5 GHz, extension to 9 GHz acceptable: -41.3 dBm/MHz, 0 dBm/50 MHz peak. Value mapped by row order because the PDF table extracts out of line. Not for outdoor installations or fixed outdoor antennas. Integral antenna with no connector; stop within 10 s without acknowledgement. 2011 edition.",
+      "source": "IDA TS UWB Issue 1 Rev 1, May 2011 - https://imda.gov.sg/-/media/imda/files/regulation-licensing-and-consultations/ict-standards/telecommunication-standards/radio-comms/idatsuwb.pdf"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        917,
+        925
+      ],
+      "max_eirp_dbm": 29.15,
+      "limit_text": "500 mW ERP",
+      "note": "Bandwidth at most 400 kHz; transmit no longer than needed. Above 500 mW up to 2 W ERP in 920-925 MHz is RFID-only and needs IMDA approval on an exceptional basis (Table 2). 866-869 MHz at 500 mW ERP is under review for refarming.",
+      "source": "IMDA TS SRD Issue 1 Rev 3, Sep 2023, Tables 1 and 2 - https://www.imda.gov.sg/-/media/imda/files/regulation-licensing-and-consultations/ict-standards/telecommunication-standards/radio-comms/imdatssrd.pdf"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "th",
+    "name": "Thailand",
+    "uwb": {
+      "status": "secondary",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Reproduced NBTC criteria table: 4.8-10.6 GHz at -41.3 dBm/MHz, licence exempted. NBTC TS 1034-2561 returned 403, so indoor, fixed-outdoor and peak conditions were not read. Confirm before relying on it.",
+      "source": "New Criteria on License-Exempt Radiocommunication (Vista Compliance, 21 Jan 2020) - https://www.vista-compliance.com/news/newsposts/2020/newspost200121"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        920,
+        925
+      ],
+      "max_eirp_dbm": 27,
+      "limit_text": "500 mW EIRP",
+      "note": "Highest tier with no licence to possess or use, per the reproduced 2020 table. Up to 4 W EIRP needs a licence to possess and use. Sources conflict: Activio (2025) says a licence is needed above 50 mW EIRP. Type-approval class also varies by power.",
+      "source": "New Criteria on License-Exempt Radiocommunication (Vista Compliance, 21 Jan 2020) - https://www.vista-compliance.com/news/newsposts/2020/newspost200121 ; Guidelines for RFID Usage in Thailand (Activio, 2025) - https://www2.activio.asia/2025/06/20/guidelines-for-rfid-usage-in-thailand/"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "tr",
+    "name": "Turkey",
+    "uwb": {
+      "status": "unverified",
+      "note": "The BTK licence-exempt device criteria document could not be retrieved (connection reset). UWB bands and limits unknown.",
+      "source": "Could not be opened: BTK licence-exempt device criteria - https://www.btk.gov.tr/uploads/pages/frekans-tahsisinden-muaf-telsiz-cihaz-sistemleri-olcutler-633d4ca68c0b1.pdf"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        865.6,
+        867.6
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "ETSI-style rules. Weak source: undated copy of the GS1 table, about 2019; BTK text not reachable. RAIN Alliance reports Turkey has implemented the 915-921 MHz upper band, with limits not stated there.",
+      "source": "Worldwide UHF RFID Frequency Allocations (Airplux, undated copy of GS1 table) - https://airpluxtec.com/worldwide-uhf-rfid-frequency-allocations/ ; RAIN Radio Regulations Advisory Council - https://therainalliance.org/radio-regulations-advisory-council/"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "tw",
+    "name": "Taiwan",
+    "uwb": {
+      "status": "secondary",
+      "channels": [
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Vendor summary of NCC LP0002: -41.3 dBm/MHz in 4224-4752 and 6336-8976 MHz, 0 dBm/50 MHz peak. Channel 5 is excluded because 6240-6336 MHz falls in the -51.3 dBm/MHz (indoor) or -61.3 (handheld) segment. Indoor or handheld classes as under FCC. NCC text not read.",
+      "source": "Certification of SPARK UWB devices, Application Note v1.1.3, section 5.3 - https://www.sparkmicro.com/wp-content/uploads/2025/03/Certification-of-SPARK-UWB-devices-Application-Note-v1.1.3.pdf"
+    },
+    "rfid": {
+      "status": "secondary",
+      "band_mhz": [
+        922,
+        928
+      ],
+      "max_eirp_dbm": 32.15,
+      "limit_text": "1 W ERP",
+      "note": "FHSS. Table also lists 0.5 W ERP for the same band; a search summary of GS1 assigns 1 W to indoor and 0.5 W to outdoor, which could not be confirmed on an opened page. Undated copy of GS1 table, about 2019; LP0002 not read.",
+      "source": "Worldwide UHF RFID Frequency Allocations (Airplux, undated copy of GS1 table) - https://airpluxtec.com/worldwide-uhf-rfid-frequency-allocations/"
+    },
+    "checked": "2026-11-02"
+  },
+  {
+    "id": "us",
+    "name": "United States (FCC)",
+    "checked": "2026-11-02",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        5,
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Part 15.517: indoors only, no outdoor antennas or infrastructure.",
+      "source": "47 CFR 15.517"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        902,
+        928
+      ],
+      "max_eirp_dbm": 36,
+      "limit_text": "1 W conducted + 6 dBi (4 W EIRP)",
+      "note": "Frequency hopping with at least 50 channels. Above 6 dBi, conducted power drops 1 dB per dB.",
+      "source": "47 CFR 15.247"
+    }
+  },
+  {
+    "id": "vn",
+    "name": "Vietnam",
+    "checked": "2026-11-02",
+    "uwb": {
+      "status": "verified",
+      "channels": [
+        9
+      ],
+      "max_dbm_mhz": -41.3,
+      "note": "Licence-exempt list has no row from 4800 to 7238.4 MHz, so channel 5 is not exempt. Fixed outdoor installation is excluded.",
+      "source": "Circular 08/2021/TT-BTTTT, Appendix 13"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        918.4,
+        923
+      ],
+      "max_eirp_dbm": 29.15,
+      "limit_text": "500 mW ERP",
+      "note": "Needs frequency hopping, LBT or a duty-cycle limit.",
+      "source": "Circular 08/2021/TT-BTTTT, Appendix 6"
+    }
+  },
+  {
+    "id": "za",
+    "name": "South Africa",
+    "uwb": {
+      "status": "unverified",
+      "note": "Annexure B has no row labelled UWB. It lists 6000-8500 MHz Radiodetermination Applications at 0 dBm EIRP in 50 MHz to EN 302 065, a peak figure with no mean density stated. Whether RTLS anchors fall under this row, and the mean limit, are unknown.",
+      "source": "Radio Frequency Spectrum Regulations, Annexure B (Acts Online copy) - https://www.acts.co.za/electronic-communications-act-2005/n279_annexure_b"
+    },
+    "rfid": {
+      "status": "verified",
+      "band_mhz": [
+        865,
+        868
+      ],
+      "max_eirp_dbm": 35.15,
+      "limit_text": "2 W ERP",
+      "note": "SANS 302 208. Also interrogators at 4 W ERP on 916.1-916.5, 917.3-917.7, 918.5-918.9 and 919.7-920.1 MHz, and 915.4-919 MHz FHSS at 4 W ERP to FCC 15.247. Read from a third-party legal copy; amendment currency not separately checked.",
+      "source": "Radio Frequency Spectrum Regulations, Annexure B (Acts Online copy) - https://www.acts.co.za/electronic-communications-act-2005/n279_annexure_b"
+    },
+    "checked": "2026-11-02"
+  }
+]

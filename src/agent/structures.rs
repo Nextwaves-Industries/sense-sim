@@ -5,8 +5,9 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bevy::math::{Vec2, Vec3};
+use bevy::math::{Quat, Vec2, Vec3};
 
+use super::assetgen::{self, Mat, Part, Shape};
 use super::vision::perceive::PhotoScene;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,11 +52,11 @@ impl Kind {
     /// Linear-ish display color.
     fn color(self) -> [f32; 3] {
         match self {
-            Self::Floor => [0.42, 0.43, 0.44],
-            Self::Wall => [0.72, 0.73, 0.75],
+            Self::Floor => [0.76, 0.77, 0.78],
+            Self::Wall => [0.9, 0.905, 0.915],
             Self::Column => [0.16, 0.26, 0.52],
-            Self::Block => [0.6, 0.6, 0.6],
-            Self::Ceiling => [0.78, 0.79, 0.8],
+            Self::Block => [0.72, 0.72, 0.73],
+            Self::Ceiling => [0.9, 0.905, 0.91],
             Self::Beam => [0.18, 0.2, 0.22],
         }
     }
@@ -82,11 +83,52 @@ pub fn usd_for(kind: Kind, size: Vec3) -> Result<PathBuf> {
         .join(kind.name())
         .join(format!("{:.2}x{:.2}x{:.2}", size.x, size.y, size.z));
     let path = dir.join(format!("{}.usda", kind.name()));
-    if !path.exists() {
+    // Compared, not just checked for existence: a file from an older version
+    // keeps its colours otherwise.
+    let text = if kind == Kind::Ceiling { ceiling_usda(size) } else { box_usda(kind, size) };
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
         std::fs::create_dir_all(&dir)?;
-        let text = if kind == Kind::Ceiling { ceiling_usda(size) } else { box_usda(kind, size) };
         std::fs::write(&path, text)?;
     }
+    Ok(path)
+}
+
+const CEILING_BOUNCE: f32 = 0.5;
+
+/// Like [`usd_for`] with a real material (color, texture, roughness…). Stays
+/// under `structures/<kind>/` so the piece still counts as that kind.
+pub fn usd_with_material(kind: Kind, size: Vec3, mat: &Mat) -> Result<PathBuf> {
+    let size = size.max(Vec3::splat(0.01));
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    let tag = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{mat:?}").hash(&mut h);
+        h.finish() as u32
+    };
+    let dir = PathBuf::from(base)
+        .join("SenseSim")
+        .join("structures")
+        .join(kind.name())
+        .join(format!("{:.2}x{:.2}x{:.2}_{tag:08x}", size.x, size.y, size.z));
+    let path = dir.join(format!("{}.usda", kind.name()));
+    let part = if kind == Kind::Ceiling {
+        // Same facing as the plain ceiling: visible from below only. Only faint
+        // ambient light reaches a surface facing down, so a white ceiling would
+        // render mid-gray; a little glow stands in for light bounced off the floor.
+        let bounce = mat.color.map(|c| c * CEILING_BOUNCE);
+        let emissive = if mat.emissive == [0.0; 3] && mat.texture.is_none() { bounce } else { mat.emissive };
+        Part {
+            shape: Shape::Panel,
+            size: Vec3::new(size.x, size.z, 0.001),
+            at: Vec3::ZERO,
+            rot: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            mat: Mat { emissive, ..mat.clone() },
+        }
+    } else {
+        Part { shape: Shape::Box, size, at: Vec3::new(0.0, size.y * 0.5, 0.0), rot: Quat::IDENTITY, mat: mat.clone() }
+    };
+    assetgen::write_usd(&path, kind.name(), &[part], Vec3::ZERO)?;
     Ok(path)
 }
 
@@ -194,37 +236,71 @@ pub struct Piece {
     pub center: Vec2,
     pub base_y: f32,
     pub yaw: f32,
+    /// `None`: the kind's plain default look.
+    pub material: Option<Mat>,
 }
 
-/// The room shell implied by a perceived photo: the visible floor, the fitted
-/// walls and detected columns.
+/// Floor-plan bounds of the room: the assistant's estimate, reaching the camera
+/// that stood in it and anything placed outside the estimate.
+fn shell_extent(sc: &PhotoScene) -> Option<(Vec2, Vec2)> {
+    let f = sc.room?;
+    let mut pts = vec![Vec2::ZERO, Vec2::new(f[0], f[1]), Vec2::new(f[2], f[3])];
+    pts.extend(sc.objects.iter().filter_map(|o| o.footprint).map(|f| f.center));
+    let lo = pts.iter().copied().reduce(Vec2::min)?;
+    let hi = pts.iter().copied().reduce(Vec2::max)?;
+    Some((lo, hi))
+}
+
+/// Ceiling height for a photo, and where it came from: the assistant's estimate,
+/// or if it has none, what must fit under it.
+pub fn ceiling_height(sc: &PhotoScene) -> (f32, &'static str) {
+    let tops = sc.objects.iter().filter_map(|o| o.footprint).map(|f| f.base_y + f.height).fold(0.0f32, f32::max);
+    match sc.ceiling_y {
+        Some(h) if h >= tops => (h, "your estimate"),
+        Some(_) => (tops + 0.3, "your estimate, raised above the tallest object"),
+        // The photo was taken from under it, too.
+        None => ((tops + 0.8).max(sc.camera.eye().y + 0.5).max(3.0), "assumed from what stands under it: estimate it"),
+    }
+}
+
+/// The room shell implied by a perceived photo: floor, walls, columns and a
+/// ceiling (unless the photo was declared to have none), in the colors the
+/// photo shows.
 pub fn shell_from_photo(sc: &PhotoScene) -> Vec<Piece> {
     let mut out = Vec::new();
-    if let Some(f) = sc.floor {
-        // Grow the visible floor a little so objects at its edge stand on it.
-        let (w, d) = ((f[2] - f[0]).abs() + 2.0, (f[3] - f[1]).abs() + 2.0);
+    let extent = shell_extent(sc);
+    let look = |c: Option<[u8; 3]>| c.map(Mat::from_srgb);
+    if let Some((lo, hi)) = extent {
+        // Grow it a little so objects at the edge stand on it.
+        let size = hi - lo + Vec2::splat(2.0);
+        let center = (lo + hi) * 0.5;
         out.push(Piece {
             kind: Kind::Floor,
-            size: Vec3::new(w, 0.02, d),
-            center: Vec2::new((f[0] + f[2]) * 0.5, (f[1] + f[3]) * 0.5),
+            size: Vec3::new(size.x, 0.02, size.y),
+            center,
             base_y: -0.02,
             yaw: 0.0,
+            material: look(sc.colors.floor),
         });
     }
-    for w in &sc.walls {
-        let d = w.b - w.a;
-        let len = d.length();
-        if len < 1.0 {
-            continue;
-        }
-        out.push(Piece {
+    // Close the room, leaving the side behind the camera open.
+    if let Some((lo, hi)) = extent {
+        let (lo, hi) = (lo - Vec2::ONE, hi + Vec2::ONE);
+        let (size, center) = (hi - lo, (lo + hi) * 0.5);
+        let height = ceiling_height(sc).0;
+        let wall = |length: f32, at: Vec2, yaw: f32| Piece {
             kind: Kind::Wall,
-            size: Vec3::new(len, w.height.max(2.5), 0.2),
-            center: (w.a + w.b) * 0.5,
+            size: Vec3::new(length, height, 0.2),
+            center: at,
             base_y: 0.0,
-            // Local +X along the wall: axis_x(yaw) = (cos, -sin).
-            yaw: (-d.y).atan2(d.x),
-        });
+            yaw,
+            material: look(sc.colors.walls),
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        out.push(wall(size.x, Vec2::new(center.x, lo.y), 0.0));
+        out.push(wall(size.y, Vec2::new(lo.x, center.y), quarter));
+        // Turned the other way, so that its front face looks into the room too.
+        out.push(wall(size.y, Vec2::new(hi.x, center.y), -quarter));
     }
     for o in &sc.objects {
         let l = o.label.to_ascii_lowercase();
@@ -234,7 +310,7 @@ pub fn shell_from_photo(sc: &PhotoScene) -> Vec<Piece> {
         if let Some(fp) = o.footprint {
             let side = o.lateral_width.clamp(0.15, 1.5);
             // Columns run to the roof; the photo often shows only part of them.
-            let height = sc.ceiling_y.unwrap_or(0.0).max(fp.base_y + fp.height).max(3.0);
+            let height = ceiling_height(sc).0.max(fp.base_y + fp.height);
             let view = fp.center.normalize_or_zero();
             out.push(Piece {
                 kind: Kind::Column,
@@ -243,20 +319,106 @@ pub fn shell_from_photo(sc: &PhotoScene) -> Vec<Piece> {
                 center: fp.center + view * side * 0.5,
                 base_y: 0.0,
                 yaw: sc.dominant_yaw,
+                material: look(o.color),
             });
         }
     }
-    if let (Some(h), Some(f)) = (sc.ceiling_y, sc.floor) {
-        let (w, d) = ((f[2] - f[0]).abs() + 2.0, (f[3] - f[1]).abs() + 2.0);
+    if let Some((lo, hi)) = extent.filter(|_| !sc.no_ceiling) {
+        let size = hi - lo + Vec2::splat(2.0);
         out.push(Piece {
             kind: Kind::Ceiling,
-            size: Vec3::new(w, 0.0, d),
-            center: Vec2::new((f[0] + f[2]) * 0.5, (f[1] + f[3]) * 0.5),
-            base_y: h,
+            size: Vec3::new(size.x, 0.0, size.y),
+            center: (lo + hi) * 0.5,
+            base_y: ceiling_height(sc).0,
             yaw: 0.0,
+            material: look(sc.colors.ceiling),
         });
     }
     out
+}
+
+/// Longest side of a texture projected onto the shell.
+const PROJECTED_MAX: u32 = 1536;
+const PROJECTED_PER_M: f32 = 48.0;
+
+/// The world point of a texel (s, t in 0..1, t = 0 at the top row) on the inward
+/// face of a shell piece. Rows and columns follow the generated meshes' UVs.
+fn shell_texel(p: &Piece, s: f32, t: f32) -> Option<Vec3> {
+    let c = p.center;
+    match p.kind {
+        Kind::Floor => Some(Vec3::new(c.x + (s - 0.5) * p.size.x, 0.0, c.y + (t - 0.5) * p.size.z)),
+        Kind::Ceiling => Some(Vec3::new(c.x + (s - 0.5) * p.size.x, p.base_y, c.y - (t - 0.5) * p.size.z)),
+        Kind::Wall => {
+            // Local +X and the front (+Z) face looks into the room.
+            let axis = Vec2::new(p.yaw.cos(), -p.yaw.sin());
+            let at = c + axis * (s - 0.5) * p.size.x;
+            let front = Vec2::new(p.yaw.sin(), p.yaw.cos()) * p.size.z * 0.5;
+            Some(Vec3::new(at.x + front.x, (1.0 - t) * p.size.y, at.y + front.y))
+        }
+        _ => None,
+    }
+}
+
+/// What the photo shows on a shell piece: each texel takes the color of the photo
+/// pixel that sees it from the photo camera, so the piece looks right from there
+/// whatever size the room was guessed to be. Texels the photo doesn't see get `fill`,
+/// and so do those it sees through an object: painted on the floor behind it, a
+/// shopper or a shelf would smear across the room from any other viewpoint.
+pub fn project_photo(sc: &PhotoScene, photo: &image::RgbImage, p: &Piece, fill: [u8; 3]) -> Option<image::RgbImage> {
+    let placed: std::collections::HashSet<usize> = sc.placed.values().copied().collect();
+    let in_the_way: Vec<[f32; 4]> =
+        sc.objects.iter().filter(|o| placed.contains(&o.id) || o.label.to_ascii_lowercase().contains("person")).map(|o| o.bbox).collect();
+    let (len_u, len_v) = match p.kind {
+        Kind::Floor | Kind::Ceiling => (p.size.x, p.size.z),
+        Kind::Wall => (p.size.x, p.size.y),
+        _ => return None,
+    };
+    let side = |m: f32| ((m * PROJECTED_PER_M) as u32).clamp(16, PROJECTED_MAX);
+    let (w, h) = (side(len_u), side(len_v));
+    let (pw, ph) = (photo.width(), photo.height());
+    let mut any = false;
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        let world = shell_texel(p, (x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+        let hit = world.and_then(|q| sc.camera.project(q)).filter(|uv| (0.0..1.0).contains(&uv.x) && (0.0..1.0).contains(&uv.y));
+        let seen = hit.is_some();
+        any |= seen;
+        let hit = hit.filter(|uv| !in_the_way.iter().any(|b| uv.x >= b[0] && uv.x <= b[2] && uv.y >= b[1] && uv.y <= b[3]));
+        match hit {
+            Some(uv) => {
+                *photo.get_pixel(((uv.x * pw as f32) as u32).min(pw - 1), ((uv.y * ph as f32) as u32).min(ph - 1))
+            }
+            None => image::Rgb(fill),
+        }
+    });
+    any.then_some(img)
+}
+
+/// Saves a projection and returns the material showing it.
+pub fn projected_material(img: &image::RgbImage, tag: &str) -> Result<Mat> {
+    let dir = assetgen::custom_dir().join("_textures");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("projected_{tag}.png"));
+    img.save(&path)?;
+    Ok(Mat { texture: Some(path), color: [1.0; 3], unlit: true, ..Default::default() })
+}
+
+/// Roof beams under a photo shell's ceiling.
+pub fn beams_for_photo(sc: &PhotoScene, spacing: f32) -> Vec<Piece> {
+    match shell_extent(sc).filter(|_| !sc.no_ceiling) {
+        Some((lo, hi)) => {
+            let (lo, hi) = (lo - Vec2::ONE, hi + Vec2::ONE);
+            // The first piece is the ceiling, which the shell already has.
+            let mut beams: Vec<Piece> = ceiling_pieces(lo, hi, ceiling_height(sc).0, Some(spacing)).into_iter().skip(1).collect();
+            // In the photo's own roof color, darker, not near-black bars across it.
+            if let Some(c) = sc.colors.ceiling {
+                for b in &mut beams {
+                    b.material = Some(Mat::from_srgb(c.map(|v| (v as f32 * 0.7) as u8)));
+                }
+            }
+            beams
+        }
+        None => Vec::new(),
+    }
 }
 
 /// Ceiling over `lo..hi` (x, z) at `height`, plus optional roof beams along
@@ -264,11 +426,11 @@ pub fn shell_from_photo(sc: &PhotoScene) -> Vec<Piece> {
 pub fn ceiling_pieces(lo: Vec2, hi: Vec2, height: f32, beams: Option<f32>) -> Vec<Piece> {
     let size = hi - lo;
     let center = (lo + hi) * 0.5;
-    let mut out = vec![Piece { kind: Kind::Ceiling, size: Vec3::new(size.x, 0.0, size.y), center, base_y: height, yaw: 0.0 }];
+    let mut out = vec![Piece { kind: Kind::Ceiling, size: Vec3::new(size.x, 0.0, size.y), center, base_y: height, yaw: 0.0, material: None }];
     if let Some(sp) = beams.filter(|s| *s >= 1.0) {
         let mut z = lo.y + sp * 0.5;
         while z < hi.y {
-            out.push(Piece { kind: Kind::Beam, size: Vec3::new(size.x, 0.4, 0.2), center: Vec2::new(center.x, z), base_y: height - 0.6, yaw: 0.0 });
+            out.push(Piece { kind: Kind::Beam, size: Vec3::new(size.x, 0.4, 0.2), center: Vec2::new(center.x, z), base_y: height - 0.6, yaw: 0.0, material: None });
             z += sp;
         }
     }
@@ -446,6 +608,190 @@ mod tests {
         assert!(ys.iter().cloned().fold(f32::MAX, f32::min).abs() < 1e-5, "stands on y = 0");
         assert!(!l.z_up);
         assert!((l.meters_per_unit - 1.0).abs() < 1e-6);
+    }
+
+    fn photo_scene() -> PhotoScene {
+        use crate::agent::vision::geometry::{Floor, Frame, PhotoCamera};
+        let floor = Floor { n: Vec3::new(0.0, -0.97, -0.24).normalize(), d: 1.6, inlier_ratio: 1.0 };
+        PhotoScene {
+            image_id: "t".into(),
+            width: 640,
+            height: 480,
+            hfov_deg: 65.0,
+            hfov_source: "given",
+            camera: PhotoCamera::new(Frame::new(&floor), 65.0, 640, 480),
+            camera_guess: None,
+            objects: vec![],
+            ceiling_y: None,
+            room: Some([-4.0, -9.0, 4.0, -1.0]),
+            dominant_yaw: 0.0,
+            placed: Default::default(),
+            colors: Default::default(),
+            no_ceiling: false,
+        }
+    }
+
+    fn ceilings(sc: &PhotoScene) -> Vec<Piece> {
+        shell_from_photo(sc).into_iter().filter(|p| p.kind == Kind::Ceiling).collect()
+    }
+
+    #[test]
+    fn a_photo_shell_has_a_ceiling_even_when_none_was_measured() {
+        let mut sc = photo_scene();
+        let c = ceilings(&sc);
+        assert_eq!(c.len(), 1, "the ceiling must not depend on it being visible");
+        assert_eq!(c[0].base_y, 3.0);
+        assert!(ceiling_height(&sc).1.starts_with("assumed"));
+        sc.ceiling_y = Some(5.5);
+        assert_eq!(ceilings(&sc)[0].base_y, 5.5);
+        assert_eq!(ceiling_height(&sc).1, "your estimate");
+    }
+
+    #[test]
+    fn the_room_is_as_big_as_it_was_guessed() {
+        let mut sc = photo_scene();
+        sc.room = Some([-20.0, -45.0, 12.0, 0.0]);
+        let c = &ceilings(&sc)[0];
+        assert!(c.size.z >= 45.0 && c.size.x >= 32.0, "{:?}", c.size);
+        assert!((c.center.y + 22.5).abs() < 1e-4, "{:?}", c.center);
+    }
+
+    #[test]
+    fn no_room_guess_builds_no_shell() {
+        let mut sc = photo_scene();
+        sc.room = None;
+        assert!(shell_from_photo(&sc).iter().all(|p| !matches!(p.kind, Kind::Floor | Kind::Wall | Kind::Ceiling)));
+    }
+
+    #[test]
+    fn a_room_is_closed_except_behind_the_camera() {
+        let sc = photo_scene();
+        let walls: Vec<Piece> = shell_from_photo(&sc).into_iter().filter(|p| p.kind == Kind::Wall).collect();
+        assert_eq!(walls.len(), 3);
+        // Floor -4..4 by -9..-1, reaching the camera at z = 0, plus a meter all round.
+        assert!(walls.iter().any(|w| (w.center.y + 10.0).abs() < 1e-4 && w.yaw == 0.0), "back wall");
+        assert!(walls.iter().all(|w| w.center.y < 0.1), "nothing behind the camera");
+    }
+
+    #[test]
+    fn photo_beams_hang_under_the_ceiling_across_the_room() {
+        let sc = photo_scene();
+        let beams = beams_for_photo(&sc, 3.0);
+        assert!(!beams.is_empty());
+        assert!(beams.iter().all(|b| b.kind == Kind::Beam && b.base_y < ceiling_height(&sc).0));
+    }
+
+    fn projected_sees_itself(p: &Piece, sc: &PhotoScene) {
+        // A photo whose color encodes where each pixel is.
+        let photo = image::RgbImage::from_fn(256, 256, |x, y| image::Rgb([x as u8, y as u8, 0]));
+        let img = project_photo(sc, &photo, p, [0, 0, 255]).expect("part of it is in view");
+        let mut checked = 0;
+        for (x, y, px) in img.enumerate_pixels() {
+            if px[2] == 255 {
+                continue;
+            }
+            let q = shell_texel(p, (x as f32 + 0.5) / img.width() as f32, (y as f32 + 0.5) / img.height() as f32).unwrap();
+            let uv = sc.camera.project(q).unwrap();
+            assert!((uv.x * 256.0 - px[0] as f32).abs() < 2.0 && (uv.y * 256.0 - px[1] as f32).abs() < 2.0, "{uv} vs {px:?}");
+            checked += 1;
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn projected_shell_pieces_show_what_the_photo_shows_there() {
+        let mut sc = photo_scene();
+        sc.ceiling_y = Some(4.0);
+        sc.room = Some([-8.0, -30.0, 8.0, -1.0]);
+        for p in shell_from_photo(&sc) {
+            projected_sees_itself(&p, &sc);
+        }
+    }
+
+    #[test]
+    fn objects_in_the_way_are_not_painted_onto_the_floor() {
+        use crate::agent::vision::perceive::PhotoObject;
+        let mut sc = photo_scene();
+        sc.objects.push(PhotoObject { id: 0, label: "person".into(), score: 1.0, bbox: [0.4, 0.6, 0.6, 0.95], footprint: None, lateral_width: 0.5, radial: false, color: None, guess: Default::default(), source: "", checks: serde_json::Value::Null });
+        let photo = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 0, 0]));
+        let floor = shell_from_photo(&sc).into_iter().find(|p| p.kind == Kind::Floor).unwrap();
+        let img = project_photo(&sc, &photo, &floor, [0, 0, 255]).unwrap();
+        let (mut filled_in_box, mut painted) = (0, 0);
+        for (x, y, px) in img.enumerate_pixels() {
+            let q = shell_texel(&floor, (x as f32 + 0.5) / img.width() as f32, (y as f32 + 0.5) / img.height() as f32).unwrap();
+            let Some(uv) = sc.camera.project(q).filter(|uv| (0.0..1.0).contains(&uv.x) && (0.0..1.0).contains(&uv.y)) else { continue };
+            if (0.42..0.58).contains(&uv.x) && (0.62..0.93).contains(&uv.y) {
+                assert_eq!(px[2], 255, "painted through the person at {uv}");
+                filled_in_box += 1;
+            } else if px[0] == 200 {
+                painted += 1;
+            }
+        }
+        assert!(filled_in_box > 0 && painted > 0);
+    }
+
+    #[test]
+    fn side_walls_face_into_the_room() {
+        let walls: Vec<Piece> = shell_from_photo(&photo_scene()).into_iter().filter(|p| p.kind == Kind::Wall).collect();
+        for w in &walls {
+            let inner = shell_texel(w, 0.5, 0.5).unwrap();
+            let outer_center = Vec2::new(w.center.x, w.center.y);
+            let toward_room = Vec2::new(0.0, -5.0) - outer_center;
+            assert!((Vec2::new(inner.x, inner.z) - outer_center).dot(toward_room) > 0.0, "{:?}", w.center);
+        }
+    }
+
+    #[test]
+    fn outdoor_photos_can_skip_the_ceiling() {
+        let mut sc = photo_scene();
+        sc.no_ceiling = true;
+        assert!(ceilings(&sc).is_empty());
+    }
+
+    #[test]
+    fn the_ceiling_clears_the_tallest_object_and_covers_the_walls() {
+        use crate::agent::vision::geometry::Footprint;
+        use crate::agent::vision::perceive::PhotoObject;
+        let mut sc = photo_scene();
+        sc.ceiling_y = Some(2.5);
+        sc.room = Some([-12.0, -20.0, 12.0, -1.0]);
+        sc.objects.push(PhotoObject {
+            id: 0,
+            label: "shelf".into(),
+            score: 1.0,
+            bbox: [0.4, 0.4, 0.6, 0.8],
+            footprint: Some(Footprint { center: Vec2::new(0.0, -5.0), size: Vec2::ONE, yaw: 0.0, base_y: 0.0, height: 3.2, points: 100 }),
+            lateral_width: 1.0,
+            radial: false,
+            color: None,
+            guess: Default::default(),
+            source: "",
+            checks: serde_json::Value::Null,
+        });
+        let c = &ceilings(&sc)[0];
+        assert!((c.base_y - 3.5).abs() < 1e-5, "{}", c.base_y);
+        assert!(c.size.x >= 24.0 && c.size.z >= 19.0, "{:?}", c.size);
+    }
+
+    #[test]
+    fn the_shell_takes_its_colors_from_the_photo() {
+        let mut sc = photo_scene();
+        sc.colors.floor = Some([10, 20, 30]);
+        sc.colors.ceiling = Some([200, 200, 200]);
+        let shell = shell_from_photo(&sc);
+        let floor = shell.iter().find(|p| p.kind == Kind::Floor).unwrap();
+        assert_eq!(floor.material, Some(Mat::from_srgb([10, 20, 30])));
+        assert_eq!(ceilings(&sc)[0].material, Some(Mat::from_srgb([200, 200, 200])));
+    }
+
+    #[test]
+    fn a_material_ceiling_still_faces_down_and_stays_a_ceiling() {
+        let p = usd_with_material(Kind::Ceiling, Vec3::new(4.0, 0.0, 6.0), &Mat::from_srgb([200, 200, 200])).unwrap();
+        assert_eq!(Kind::of_asset(&p), Some(Kind::Ceiling));
+        let l = crate::usd_load::load(&p).unwrap();
+        let part = &l.parts[0];
+        assert!(part.positions.iter().all(|v| v[1].abs() < 1e-4));
+        assert!(part.normals.iter().all(|n| n[1] < -0.99), "{:?}", part.normals);
     }
 
     #[test]

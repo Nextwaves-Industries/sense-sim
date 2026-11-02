@@ -1,14 +1,22 @@
-//! egui UI: top bar, left rail (library / scene / downloads), properties,
-//! status bar, settings dialog, viewport overlays.
+//! egui UI: top bar, tool ribbon, status bar, and over the full-bleed 3D canvas
+//! the floating cards: project tree (library, simulations, downloads) on the
+//! left, scene tree and nav cube on the right, detail cards beside them.
 
+mod design_bar;
 mod downloads;
 mod inspector;
 mod library;
 pub mod loading;
 mod outliner;
+mod ribbon;
 mod settings;
 mod start;
 mod statusbar;
+mod tabbar;
+mod topbar;
+mod tree;
+mod viewcube;
+mod workbench;
 
 use std::path::PathBuf;
 
@@ -16,7 +24,7 @@ use bevy::camera::Viewport;
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::egui::{Align, Align2, Layout, Margin, RichText, vec2};
+use bevy_egui::egui::{Align2, Margin, RichText, pos2, vec2};
 use bevy_egui::{EguiContexts, egui};
 
 use crate::library::Library;
@@ -24,19 +32,13 @@ use crate::prototype::{ProtoState, PrototypeCache};
 use crate::scene::{
     Action, Actions, Handle, HandleUi, OrbitCamera, PlaceMode, PlacedObject, Selection, Status, UiBlock, ViewSettings,
 };
+use crate::tabs::{NewTab, Request, Tabs};
 use crate::theme::{self, ACCENT, icon};
 
 pub use settings::SettingsTab;
+pub use workbench::{DesignCommand, DesignInfo, StudioDoc, StudioFile, Workbench};
 
-pub type ObjectQuery<'w, 's> = Query<'w, 's, (Entity, &'static mut PlacedObject, &'static mut Transform)>;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum LeftTab {
-    Library,
-    Scene,
-    Downloads,
-    Rtls,
-}
+pub type ObjectQuery<'w, 's> = Query<'w, 's, (Entity, &'static mut PlacedObject, &'static mut Transform, &'static mut Visibility)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
@@ -50,22 +52,98 @@ pub enum Filter {
 #[derive(Resource, Default)]
 pub struct HideOverlays(pub u32);
 
-/// The left panel area handed to systems that draw their own tab content
-/// after `ui_system` (the RTLS panel). `rtls` is the content rect while the
-/// RTLS tab is showing; set `open_rtls` to switch to that tab.
+/// Progress of the positioning system, shown as the tree's status markers.
+/// Published by the RTLS system each frame.
+#[derive(Clone, Copy, Default)]
+pub struct RtlsStatus {
+    pub deploy: theme::Dot,
+    pub test: theme::Dot,
+    pub ems: theme::Dot,
+    pub fdtd: theme::Dot,
+    pub devices: usize,
+    pub zones: usize,
+}
+
+/// A long-running task for the "Job status" card.
+pub struct Job {
+    pub text: String,
+    /// 0..1, or negative when unknown.
+    pub progress: f32,
+}
+
+/// What the UI and the systems that draw their own cards (positioning, plant)
+/// tell each other: where a card goes, and what the trees should show.
 #[derive(Resource, Default)]
 pub struct LeftPanelSlot {
+    /// The workbench in front.
+    pub bench: workbench::Benches,
+    /// Room for the positioning card this frame (its top-left and largest size).
     pub rtls: Option<egui::Rect>,
-    pub open_rtls: bool,
-    /// Active RTLS alarms, set every frame by the RTLS system; shown as a red dot on the rail.
+    /// The positioning card is open.
+    pub rtls_open: bool,
+    /// Active RTLS alarms, set every frame by the RTLS system.
     pub rtls_alerts: u32,
+    pub rtls_status: RtlsStatus,
+    /// Part of the canvas no tree or detail card covers; other cards anchor to it.
+    pub free: Option<egui::Rect>,
+    /// The same, ignoring the properties card (which only covers the top).
+    pub between: Option<egui::Rect>,
+    /// Jobs started by other systems.
+    pub jobs: Vec<Job>,
+    /// A plant is in the scene, and whether it runs.
+    pub plant: Option<bool>,
+    pub plant_toggle: bool,
+    /// Antenna Studio covers the canvas; the scene's cards step aside.
+    pub studio_open: bool,
+    /// The 3D Design workspace is open, in the same canvas.
+    pub design_open: bool,
+    /// Asked from the design strip, for the design workspace.
+    pub design_send: bool,
+    pub design_licences: bool,
+    pub design_commands: Vec<DesignCommand>,
+    /// How the design workspace stands, from the workspace.
+    pub design_info: DesignInfo,
+    /// Where the strip's File button is: a click there isn't a click away from its menu.
+    pub design_file_button: Option<egui::Rect>,
+    /// The canvas Antenna Studio may fill this frame.
+    pub studio_rect: Option<egui::Rect>,
+    /// Scripted Studio steps (`--open antenna-<page>`), in order.
+    pub studio_goto: Vec<String>,
+    /// Asked of the open antenna project from the File menu.
+    pub studio_file: Vec<workbench::StudioFile>,
+    /// A new name for the antenna project, typed in the top bar.
+    pub studio_rename: Option<String>,
+    /// The open antenna project, for the top bar.
+    pub studio_doc: workbench::StudioDoc,
+    /// The page Antenna Studio shows, for the ribbon.
+    #[cfg(feature = "antenna-studio")]
+    pub studio_page: crate::antenna::ui::Page,
+}
+
+/// Which parts of the project trees are expanded.
+pub struct Sections {
+    library: bool,
+    /// The workbench's own part of the tree.
+    bench: bool,
+    downloads: bool,
+    jobs: bool,
+    scene: bool,
+    scene_root: bool,
+}
+
+impl Default for Sections {
+    fn default() -> Self {
+        Self { library: true, bench: true, downloads: false, jobs: false, scene: true, scene_root: true }
+    }
 }
 
 #[derive(Resource)]
 pub struct UiState {
     layout_path: Option<PathBuf>,
-    left_tab: LeftTab,
-    left_open: bool,
+    sections: Sections,
+    left_w: f32,
+    right_w: f32,
+    detail_w: f32,
     filter: Filter,
     /// Library shows only assets with moving parts.
     movable_only: bool,
@@ -73,52 +151,95 @@ pub struct UiState {
     scene_search: String,
     settings_open: bool,
     settings_tab: SettingsTab,
+    ribbon_tab: ribbon::RibbonTab,
+    /// The workbench the last frame drew, to notice a change.
+    shown_bench: Workbench,
     /// 0: nothing applied, 1: fonts loaded, 2: style applied.
     theme_stage: u8,
     logo: Option<egui::TextureHandle>,
     /// Start screen (create / open / sample scene) is showing.
     start_open: bool,
-    /// The start screen can be closed without choosing (a scene exists).
-    start_cancelable: bool,
+    start: start::StartState,
     scene_name: String,
+    /// What the start screen's name field holds.
+    start_name: String,
+    /// The tab waiting for its "save changes?" answer.
+    closing: Option<u64>,
     /// Sample to load as soon as the UI runs (`--sample N`).
     start_sample: Option<usize>,
     /// Frames since a sample was requested; frames the camera once it has loaded.
     frame_after_load: Option<u32>,
+    /// `--open`: cards and dialogs to open once the UI runs (scripted screenshots).
+    script: Vec<String>,
+    /// Nav cube: the (yaw, pitch) the camera is gliding to.
+    view_target: Option<(f32, f32)>,
+    /// The selected object as it was when selected, for the card's discard button.
+    edit_base: Option<inspector::EditBase>,
 }
 
 impl Default for UiState {
     fn default() -> Self {
         Self {
             layout_path: None,
-            left_tab: LeftTab::Library,
-            left_open: true,
+            sections: Sections::default(),
+            left_w: 284.0,
+            right_w: 262.0,
+            detail_w: 420.0,
             filter: Filter::All,
             movable_only: false,
             list_view: false,
             scene_search: String::new(),
             settings_open: false,
             settings_tab: SettingsTab::General,
+            ribbon_tab: ribbon::RibbonTab::default(),
+            shown_bench: Workbench::default(),
             theme_stage: 0,
             logo: None,
             start_open: true,
-            start_cancelable: false,
+            start: start::StartState::default(),
             scene_name: String::new(),
+            start_name: String::new(),
+            closing: None,
             start_sample: None,
             frame_after_load: None,
+            script: Vec::new(),
+            view_target: None,
+            edit_base: None,
         }
     }
 }
 
 impl UiState {
-    fn open_tab(&mut self, tab: LeftTab) {
-        self.left_tab = tab;
-        self.left_open = true;
-    }
-
     fn open_settings(&mut self, tab: SettingsTab) {
         self.settings_open = true;
         self.settings_tab = tab;
+    }
+
+    /// The current scene's name, file and pending framing; tabs exchange these.
+    pub(crate) fn scene_fields(&mut self) -> (&mut String, &mut Option<PathBuf>, &mut Option<u32>) {
+        self.view_target = None;
+        self.edit_base = None;
+        (&mut self.scene_name, &mut self.layout_path, &mut self.frame_after_load)
+    }
+
+    pub(crate) fn scene_title(&self) -> &str {
+        &self.scene_name
+    }
+
+    pub(crate) fn name_scene(&mut self, name: String) {
+        self.scene_name = name;
+    }
+
+    /// Frame the camera on the scene once it has loaded.
+    pub(crate) fn frame_on_load(&mut self) {
+        self.frame_after_load = Some(0);
+    }
+
+    /// The last tab closed: there is nothing to go back to.
+    pub(crate) fn ask_for_scene(&mut self) {
+        self.start_open = true;
+        self.start_name.clear();
+        self.start = start::StartState::default();
     }
 
     /// Goes straight to the editor (scripted runs), optionally loading a sample.
@@ -127,15 +248,84 @@ impl UiState {
         self.start_sample = sample.filter(|&i| i < crate::samples::SAMPLES.len());
     }
 
-    /// Loads sample `i` into the scene (replacing it).
-    fn load_sample(&mut self, i: usize, library: &Library, actions: &mut Actions, status: &mut Status) {
+    /// Cards and dialogs to open once the UI runs (`--open`, for scripted screenshots).
+    pub fn open_at_start(&mut self, names: Vec<String>) {
+        self.script = names;
+    }
+
+    fn run_script(&mut self, slot: &mut LeftPanelSlot, rtls: &mut crate::rtls::ui::RtlsUiState, agent: &mut crate::agent::Agent) {
+        use crate::rtls::ui::{Page, Tab};
+        for name in std::mem::take(&mut self.script) {
+            let page = match name.as_str() {
+                "deploy" => Some(Page::Deploy),
+                "test" => Some(Page::Test),
+                "devices" => Some(Page::Tool(Tab::Devices)),
+                "inspector" => Some(Page::Tool(Tab::Inspector)),
+                "live" => Some(Page::Tool(Tab::Live)),
+                "rf" => Some(Page::Tool(Tab::Rf)),
+                "planning" => Some(Page::Tool(Tab::Planning)),
+                "outputs" => Some(Page::Tool(Tab::Outputs)),
+                "rtls-settings" => Some(Page::Tool(Tab::Settings)),
+                "openems" => Some(Page::OpenEms),
+                "fdtd" => Some(Page::Fdtd),
+                "predictions" => Some(Page::Outcomes),
+                _ => None,
+            };
+            if let Some(p) = page {
+                rtls.local.set_page(p);
+                slot.rtls_open = true;
+                continue;
+            }
+            if let Some(bench) = name.strip_prefix("bench-").and_then(Workbench::from_name) {
+                // The design system says it exists a frame after the UI first runs.
+                slot.design_open |= bench == Workbench::Design;
+                if bench != Workbench::Design {
+                    workbench::switch(slot, rtls, bench);
+                }
+                continue;
+            }
+            let tab = match name.as_str() {
+                "settings" => Some(SettingsTab::General),
+                "settings-viewport" => Some(SettingsTab::Viewport),
+                "settings-graphics" => Some(SettingsTab::Graphics),
+                "settings-performance" => Some(SettingsTab::Performance),
+                "settings-assistant" => Some(SettingsTab::Assistant),
+                _ => None,
+            };
+            if let Some(t) = tab {
+                self.open_settings(t);
+                continue;
+            }
+            if name == "antenna" {
+                slot.studio_open = true;
+                continue;
+            }
+            if let Some(page) = name.strip_prefix("antenna-") {
+                slot.studio_goto.push(page.to_string());
+                continue;
+            }
+            match name.as_str() {
+                "assistant" => agent.open = true,
+                "downloads" => self.sections.downloads = true,
+                "jobs" => self.sections.jobs = true,
+                "start-empty" => self.start.select_empty(),
+                "start-antenna" => self.start.select_antenna(),
+                other => {
+                    if let Some(i) = other.strip_prefix("start-").and_then(|n| n.parse::<usize>().ok()) {
+                        self.start.select_sample(i.saturating_sub(1));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Opens sample `i` in a tab.
+    fn open_sample(&mut self, i: usize, name: Option<String>, library: &Library, tabs: &mut Tabs, status: &mut Status) {
         match crate::samples::write_layout(i, library) {
             Ok((path, missing)) => {
-                self.scene_name = crate::samples::SAMPLES[i].title.to_string();
+                let title = name.unwrap_or_else(|| crate::samples::SAMPLES[i].title.to_string());
                 // Saving asks for a location instead of overwriting the sample.
-                self.layout_path = None;
-                self.frame_after_load = Some(0);
-                actions.0.push(Action::LoadLayout(path));
+                tabs.request(Request::Open(vec![NewTab { title, path: None, load: Some(path) }]));
                 if !missing.is_empty() {
                     status.0 = format!("Downloading {} asset(s) for this sample: {}", missing.len(), missing.join(", "));
                 }
@@ -149,19 +339,6 @@ fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let img = image::load_from_memory(include_bytes!("../../assets/logo_small.png")).ok()?.thumbnail(64, 64).to_rgba8();
     let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
     Some(ctx.load_texture("logo", ci, egui::TextureOptions::LINEAR))
-}
-
-/// Menu entry with icon and shortcut; returns true (and closes the menu) when clicked.
-fn menu_entry(ui: &mut egui::Ui, icon: &str, text: &str, shortcut: &str, enabled: bool) -> bool {
-    let mut b = egui::Button::new(theme::label(icon, text));
-    if !shortcut.is_empty() {
-        b = b.shortcut_text(RichText::new(shortcut).color(theme::WEAK));
-    }
-    let clicked = ui.add_enabled(enabled, b).clicked();
-    if clicked {
-        ui.close();
-    }
-    clicked
 }
 
 fn pick_layout_save(scene_name: &str) -> Option<PathBuf> {
@@ -178,38 +355,47 @@ pub fn ui_system(
     mut actions: ResMut<Actions>,
     mut settings: ResMut<ViewSettings>,
     mut cache: ResMut<PrototypeCache>,
-    (mut status, mut block, mut state, pending): (ResMut<Status>, ResMut<UiBlock>, ResMut<UiState>, Res<crate::scene::PendingSpawns>),
-    (handles, mut undo_req, undo_stack, mut hide, mut slot): (
+    (mut status, mut block, mut state, pending, profiles, mut device_place): (
+        ResMut<Status>,
+        ResMut<UiBlock>,
+        ResMut<UiState>,
+        Res<crate::scene::PendingSpawns>,
+        Res<crate::rtls::device::Profiles>,
+        ResMut<crate::rtls::DevicePlace>,
+    ),
+    (handles, mut undo_req, undo_stack, mut hide, mut slot, mut rtls): (
         Res<HandleUi>,
         ResMut<crate::undo::UndoRequest>,
         Res<crate::undo::UndoStack>,
         ResMut<HideOverlays>,
         ResMut<LeftPanelSlot>,
+        ResMut<crate::rtls::ui::RtlsUiState>,
     ),
     mut objects: ObjectQuery,
-    mut camera: Single<&mut Camera, With<OrbitCamera>>,
+    mut camera: Single<(&mut Camera, &mut OrbitCamera, &Projection)>,
     window: Single<&Window, With<PrimaryWindow>>,
     diagnostics: Res<DiagnosticsStore>,
     mut walls: ResMut<crate::wall_tool::WallTool>,
-    (mut agent, mut catalog, bridge, mut gpu): (
+    (mut agent, mut catalog, bridge, mut gpu, render_stats, mut tabs): (
         ResMut<crate::agent::Agent>,
         ResMut<crate::agent::catalog::Catalog>,
         Res<crate::agent::tools::ToolBridge>,
         ResMut<crate::gpu::Gpu>,
+        Res<crate::lod::RenderStats>,
+        ResMut<Tabs>,
     ),
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
-    let overlays = hide.0 == 0;
+    let overlays = hide.0 == 0 && !slot.canvas_taken();
     hide.0 = hide.0.saturating_sub(1);
     slot.rtls = None;
-    if std::mem::take(&mut slot.open_rtls) {
-        state.open_tab(LeftTab::Rtls);
-    }
     match state.theme_stage {
         0 => {
             theme::apply_fonts(&ctx);
             state.logo = load_logo(&ctx);
             state.theme_stage = 1;
+            // The fonts exist from the next frame; nothing can name the bold family yet.
+            return Ok(());
         }
         1 => {
             theme::apply_style(&ctx);
@@ -217,6 +403,8 @@ pub fn ui_system(
         }
         _ => {}
     }
+    state.run_script(&mut slot, &mut rtls, &mut agent);
+    workbench::follow(&mut slot, &mut rtls);
     let (messages, to_place, rescanned) = library.update(&ctx);
     if let Some(m) = messages.into_iter().last() {
         status.0 = m;
@@ -230,7 +418,7 @@ pub fn ui_system(
     }
 
     if let Some(i) = state.start_sample.take() {
-        state.load_sample(i, &library, &mut actions, &mut status);
+        state.open_sample(i, None, &library, &mut tabs, &mut status);
     }
     // Frame the camera on a freshly loaded sample once everything has arrived.
     if let Some(n) = state.frame_after_load {
@@ -243,14 +431,21 @@ pub fn ui_system(
     }
 
     // Global shortcuts that egui owns (scene shortcuts live in scene.rs / undo.rs).
-    let (save, save_as, open, new) = ctx.input_mut(|i| {
+    let mut flags = ctx.input_mut(|i| {
         let save_as = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::S));
         let save = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::S));
         let open = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::O));
-        let new = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::N));
-        (save, save_as, open, new)
+        let new = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::N))
+            | i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::T));
+        let close = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::W));
+        // Longest modifier set first: Ctrl+Tab would also match Ctrl+Shift+Tab.
+        if i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Tab)) {
+            tabs.request(Request::Step(-1));
+        } else if i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Tab)) {
+            tabs.request(Request::Step(1));
+        }
+        topbar::Flags { new, open, save, save_as, close }
     });
-    let (mut do_save, mut do_save_as, mut do_open, mut do_new) = (save, save_as, open, new);
 
     let mut root = egui::Ui::new(
         ctx.clone(),
@@ -258,154 +453,84 @@ pub fn ui_system(
         egui::UiBuilder::new().layer_id(egui::LayerId::background()).max_rect(ctx.viewport_rect()),
     );
 
-    // ---------------- Top bar
-    let (active_dl, queued_dl) = library.download_count();
-    egui::Panel::top("menu")
-        .frame(egui::Frame::new().fill(theme::BG).inner_margin(Margin::symmetric(10, 5)))
-        .show(&mut root, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                if let Some(logo) = &state.logo {
-                    ui.add(egui::Image::new(logo).fit_to_exact_size(vec2(20.0, 20.0)));
-                }
-                ui.label(RichText::new(crate::APP_NAME).text_style(egui::TextStyle::Heading));
-                if !state.scene_name.is_empty() {
-                    ui.label(RichText::new(format!("/  {}", state.scene_name)).color(theme::WEAK));
-                }
-                ui.add_space(10.0);
-                ui.menu_button("File", |ui| {
-                    ui.set_min_width(230.0);
-                    do_new |= menu_entry(ui, icon::PLUS, "New scene…", "Ctrl+N", true);
-                    do_open |= menu_entry(ui, icon::FOLDER_OPEN, "Open layout…", "Ctrl+O", true);
-                    do_save |= menu_entry(ui, icon::FLOPPY_DISK, "Save layout", "Ctrl+S", true);
-                    do_save_as |= menu_entry(ui, icon::FLOPPY_DISK, "Save layout as…", "Ctrl+Shift+S", true);
-                    ui.separator();
-                    if menu_entry(ui, icon::EXPORT, "Export scene as USDA…", "", true)
-                        && let Some(p) = rfd::FileDialog::new().add_filter("USD", &["usda"]).set_file_name("scene.usda").save_file()
-                    {
-                        actions.0.push(Action::ExportUsda(p));
-                    }
-                    ui.separator();
-                    if menu_entry(ui, icon::TRASH, "Clear scene", "", true) {
-                        actions.0.push(Action::ClearScene);
-                    }
-                    if menu_entry(ui, icon::SIGN_OUT, "Quit", "", true) {
-                        std::process::exit(0);
-                    }
-                });
-                ui.menu_button("Edit", |ui| {
-                    ui.set_min_width(200.0);
-                    if menu_entry(ui, icon::ARROW_U_UP_LEFT, "Undo", "Ctrl+Z", undo_stack.can_undo()) {
-                        undo_req.undo = true;
-                    }
-                    if menu_entry(ui, icon::ARROW_U_UP_RIGHT, "Redo", "Ctrl+Y", undo_stack.can_redo()) {
-                        undo_req.redo = true;
-                    }
-                    ui.separator();
-                    let sel = selection.selected;
-                    if menu_entry(ui, icon::COPY, "Duplicate", "Ctrl+D", sel.is_some()) {
-                        actions.0.extend(sel.map(Action::Duplicate));
-                    }
-                    if menu_entry(ui, icon::CROSSHAIR, "Focus", "F", sel.is_some()) {
-                        actions.0.extend(sel.map(Action::Focus));
-                    }
-                    if menu_entry(ui, icon::SELECTION_SLASH, "Deselect", "Esc", sel.is_some()) {
-                        actions.0.push(Action::Select(None));
-                    }
-                    if menu_entry(ui, icon::TRASH, "Delete", "Del", sel.is_some()) {
-                        actions.0.extend(sel.map(Action::Delete));
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    ui.set_min_width(220.0);
-                    if menu_entry(ui, icon::FRAME_CORNERS, "Frame all", "F", true) {
-                        actions.0.push(Action::FrameAll);
-                    }
-                    ui.separator();
-                    ui.checkbox(&mut settings.grid, "Grid");
-                    ui.checkbox(&mut settings.bounds, "Hover bounds");
-                    ui.checkbox(&mut settings.no_overlap, "Prevent overlap");
-                    ui.checkbox(&mut settings.gravity, "Gravity");
-                    ui.checkbox(&mut settings.shadows, "Shadows");
-                    ui.separator();
-                    ui.menu_button(theme::label(icon::IMAGE, "Texture quality"), |ui| {
-                        for s in [256u32, 512, 1024, 2048, 4096] {
-                            ui.radio_value(&mut cache.max_texture, s, format!("{s} px"));
-                        }
-                    });
-                    if menu_entry(ui, icon::SLIDERS_HORIZONTAL, "Lighting & viewport…", "", true) {
-                        state.open_settings(SettingsTab::Viewport);
-                    }
-                    ui.separator();
-                    ui.checkbox(&mut agent.open, "Assistant panel");
-                });
+    // ---------------- Bars
+    topbar::show(&mut root, &mut state, &mut library, &mut agent, &mut actions, &mut settings, &mut cache, &mut undo_req, &undo_stack, &selection, &mut slot, &mut flags);
+    ribbon::show(&mut root, &mut state, &mut place, &mut walls, &undo_stack, &mut undo_req, &selection, &mut actions, &mut settings, &mut slot, &mut rtls, &mut flags, &mut agent.open);
+    // A tool left armed would keep acting on a workbench that doesn't show it.
+    if state.shown_bench != slot.bench.current {
+        state.shown_bench = slot.bench.current;
+        state.ribbon_tab = ribbon::RibbonTab::Tools;
+        walls.active = false;
+        place.asset = None;
+        device_place.profile = None;
+        device_place.waypoints_for = None;
+    }
+    if agent.running {
+        state.closing = None;
+    }
+    // Designs have tabs of their own: the scene tabs wait for the scene to come back.
+    if slot.design_open {
+        design_bar::show(&mut root, &mut slot);
+    } else if !slot.studio_open {
+        tabbar::show(&mut root, &mut tabs, &mut state, &mut flags);
+    }
+    workbench::route_file_commands(&mut flags, &mut slot);
+    tabbar::close_if_asked(&mut tabs, &mut state, &flags);
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let ai = egui::Button::new(theme::label(icon::SPARKLE, "Assistant")).selected(agent.open).min_size(vec2(0.0, 28.0));
-                    if ui.add(ai).on_hover_text("Build scenes from instructions or a reference photo").clicked() {
-                        agent.open = !agent.open;
-                    }
-                    if theme::icon_button(ui, icon::GEAR_SIX, "Settings").clicked() {
-                        state.settings_open = true;
-                    }
-                    let n = active_dl + queued_dl;
-                    let tip = if n > 0 { format!("Downloads: {active_dl} active, {queued_dl} queued") } else { "Downloads".into() };
-                    let r = theme::icon_button_colored(ui, icon::CLOUD_ARROW_DOWN, &tip, (n > 0).then_some(theme::ONLINE), false);
-                    if n > 0 {
-                        let c = r.rect.right_top() + vec2(-5.0, 6.0);
-                        ui.painter().circle_filled(c, 7.0, theme::ONLINE);
-                        ui.painter().text(c, Align2::CENTER_CENTER, n.min(99).to_string(), egui::FontId::proportional(9.5), theme::BG);
-                    }
-                    if r.clicked() {
-                        state.open_tab(LeftTab::Downloads);
-                    }
-                });
-            });
-        });
-
-    // ---------------- Start screen: every session begins by creating (or opening) a scene
-    if do_new && !state.start_open {
+    // ---------------- Start screen: what to work on. A blank scene is always there to fall back on.
+    if flags.new && !state.start_open {
         state.start_open = true;
-        state.start_cancelable = true;
-        state.scene_name.clear();
+        state.start_name.clear();
+        state.start = start::StartState::default();
     }
     if state.start_open {
-        let mut name = std::mem::take(&mut state.scene_name);
-        let cancelable = state.start_cancelable;
-        let choice = start::show(&ctx, &mut library, &mut name, cancelable);
-        state.scene_name = name;
+        let mut name = std::mem::take(&mut state.start_name);
+        let mut st = std::mem::take(&mut state.start);
+        let choice = start::show(&ctx, &mut st, &mut library, &mut name, slot.shows(Workbench::Antenna), slot.bench.design_ready);
+        state.start = st;
+        state.start_name = name;
+        let typed = Some(state.start_name.trim().to_string()).filter(|t| !t.is_empty());
         match choice {
             Some(start::Choice::Empty) => {
-                if state.scene_name.trim().is_empty() {
-                    state.scene_name = "Untitled scene".into();
-                }
-                state.scene_name = state.scene_name.trim().to_string();
-                state.layout_path = None;
-                actions.0.push(Action::ClearScene);
+                let title = typed.unwrap_or_else(|| "Untitled scene".into());
+                tabs.request(Request::Open(vec![NewTab { title, path: None, load: None }]));
                 state.start_open = false;
             }
             Some(start::Choice::Sample(i)) => {
-                state.load_sample(i, &library, &mut actions, &mut status);
+                state.open_sample(i, typed, &library, &mut tabs, &mut status);
                 state.start_open = false;
             }
-            Some(start::Choice::Open) => do_open = true,
+            Some(start::Choice::Antenna) => {
+                workbench::switch(&mut slot, &mut rtls, Workbench::Antenna);
+                slot.studio_goto.push("gallery".to_string());
+                state.start_open = false;
+            }
+            Some(start::Choice::OpenAntenna) => {
+                workbench::switch(&mut slot, &mut rtls, Workbench::Antenna);
+                slot.studio_file.push(workbench::StudioFile::Open);
+                state.start_open = false;
+            }
+            Some(start::Choice::Design) => {
+                workbench::switch(&mut slot, &mut rtls, Workbench::Design);
+                state.start_open = false;
+            }
+            Some(start::Choice::Open) => flags.open = true,
             Some(start::Choice::Cancel) => state.start_open = false,
             None => {}
         }
         // The scene's own shortcuts wait until a scene exists.
-        do_save = false;
-        do_save_as = false;
+        flags.save = false;
+        flags.save_as = false;
     }
 
-    if do_open && let Some(p) = rfd::FileDialog::new().add_filter("Layout", &["json"]).pick_file() {
-        state.scene_name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        state.layout_path = Some(p.clone());
+    if flags.open && let Some(files) = rfd::FileDialog::new().add_filter("Layout", &["json"]).pick_files() {
+        let new = files.into_iter().map(|p| NewTab { title: crate::tabs::title_of(&p), path: Some(p.clone()), load: Some(p) }).collect();
+        tabs.request(Request::Open(new));
         state.start_open = false;
-        actions.0.push(Action::LoadLayout(p));
     }
-    if do_save || do_save_as {
+    if flags.save || flags.save_as {
         let name = state.scene_name.clone();
-        let p = if do_save_as { pick_layout_save(&name) } else { state.layout_path.clone().or_else(|| pick_layout_save(&name)) };
+        let p = if flags.save_as { pick_layout_save(&name) } else { state.layout_path.clone().or_else(|| pick_layout_save(&name)) };
         if let Some(p) = p {
             state.layout_path = Some(p.clone());
             actions.0.push(Action::SaveLayout(p));
@@ -414,144 +539,112 @@ pub fn ui_system(
 
     // ---------------- Status bar
     let object_count = objects.iter().count();
-    statusbar::show(&mut root, &diagnostics, &mut library, &cache, &mut status, &mut state, object_count);
+    // A sample or a new scene has no file yet, so anything in it would be lost.
+    let unsaved = undo_stack.dirty() || (state.layout_path.is_none() && object_count > 0);
+    tabs.mirror(&state.scene_name, state.layout_path.as_ref(), unsaved);
+    let selected_name = selection.selected.and_then(|e| objects.get(e).ok()).map(|(_, o, _, _)| o.name.clone());
+    let selected_more = selection.group.iter().filter(|e| Some(**e) != selection.selected).count();
+    // Nothing of the scene is drawn while a workspace has the canvas, so "0 of N triangles" would only mislead.
+    let shown_stats = if slot.canvas_taken() { crate::lod::RenderStats::default() } else { *render_stats };
+    statusbar::show(&mut root, &diagnostics, &mut library, &cache, &mut status, &mut state, object_count, shown_stats, selected_name.as_deref(), selected_more, !slot.canvas_taken());
 
-    // ---------------- Left rail
-    egui::Panel::left("rail")
-        .exact_size(48.0)
-        .resizable(false)
-        .frame(egui::Frame::new().fill(theme::BG).inner_margin(Margin::symmetric(6, 8)))
-        .show(&mut root, |ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            let tabs = [
-                (LeftTab::Library, icon::SQUARES_FOUR, "Asset library"),
-                (LeftTab::Scene, icon::TREE_STRUCTURE, "Scene objects"),
-                (LeftTab::Downloads, icon::CLOUD_ARROW_DOWN, "Downloads"),
-                (LeftTab::Rtls, icon::BROADCAST, "Positioning · RTLS"),
-            ];
-            for (tab, ic, tip) in tabs {
-                let sel = state.left_open && state.left_tab == tab;
-                let r = ui.add(
-                    egui::Button::new(RichText::new(ic).size(18.0).color(if sel { ACCENT } else { theme::WEAK }))
-                        .selected(sel)
-                        .frame_when_inactive(sel)
-                        .min_size(vec2(36.0, 36.0)),
-                );
-                if tab == LeftTab::Rtls && slot.rtls_alerts > 0 {
-                    ui.painter().circle_filled(r.rect.right_top() + vec2(-6.0, 6.0), 4.5, theme::DANGER);
-                }
-                let tip = if tab == LeftTab::Rtls && slot.rtls_alerts > 0 { format!("{tip} · {} alarms", slot.rtls_alerts) } else { tip.to_string() };
-                if r.on_hover_text(tip).clicked() {
-                    if sel {
-                        state.left_open = false;
-                    } else {
-                        state.open_tab(tab);
-                    }
-                }
-            }
-            ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
-                let r = ui.add(egui::Button::new(RichText::new(icon::GEAR_SIX).size(18.0).color(theme::WEAK)).frame_when_inactive(false).min_size(vec2(36.0, 36.0)));
-                if r.on_hover_text("Settings").clicked() {
-                    state.settings_open = true;
-                }
-            });
-        });
-
-    // ---------------- Left panel
-    if state.left_open && state.left_tab == LeftTab::Rtls {
-        // Own panel id so its (wider) size is kept separately from the library's.
-        egui::Panel::left("left_panel_rtls")
-            .default_size(440.0)
-            .size_range(320.0..=760.0)
-            .resizable(true)
-            .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::same(10)))
-            .show(&mut root, |ui| {
-                // Reserve the space; the RTLS system draws into it after this system.
-                let rect = ui.available_rect_before_wrap();
-                ui.allocate_rect(rect, egui::Sense::hover());
-                slot.rtls = Some(rect);
-            });
-    } else if state.left_open {
-        egui::Panel::left("left_panel")
-            .default_size(290.0)
-            .size_range(230.0..=480.0)
-            .resizable(true)
-            .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::same(10)))
-            .show(&mut root, |ui| match state.left_tab {
-                LeftTab::Library => library::show(ui, &mut library, &mut place, &mut cache, &mut state),
-                LeftTab::Scene => outliner::show(ui, &mut objects, &selection, &mut actions, &mut state),
-                LeftTab::Downloads => downloads::show(ui, &mut library, &mut state),
-                LeftTab::Rtls => {}
-            });
-    }
-
-    // ---------------- AI assistant (outermost on the right)
+    // ---------------- AI assistant (docked on the right)
     if crate::agent::panel::show(&mut root, &ctx, &mut agent, &mut library, &bridge) {
         state.open_settings(SettingsTab::Assistant);
     }
 
-    // ---------------- Viewport = what's left
+    // ---------------- Viewport = everything the bars leave; cards float over it
     let central = root.available_rect_before_wrap();
+    slot.studio_rect = Some(central);
     let scale = window.scale_factor();
     let pos = (central.min.to_vec2() * scale).max(egui::Vec2::ZERO);
     let size = (central.size() * scale).max(egui::vec2(1.0, 1.0));
     let max = egui::vec2(window.physical_width() as f32, window.physical_height() as f32);
     let size = size.min(max - pos).max(egui::vec2(1.0, 1.0));
-    camera.viewport = Some(Viewport {
+    let (ref mut cam, ref mut orbit, projection) = *camera;
+    // These have their own canvas: no point rendering the scene behind them.
+    cam.is_active = !slot.canvas_taken();
+    cam.viewport = Some(Viewport {
         physical_position: UVec2::new(pos.x as u32, pos.y as u32),
         physical_size: UVec2::new(size.x as u32, size.y as u32),
         ..default()
     });
 
-    // ---------------- Properties: floating card over the viewport while something is selected
-    if overlays && selection.selected.is_some_and(|e| objects.contains(e)) {
-        let w = 290.0f32.min(central.width() - 24.0).max(200.0);
-        egui::Area::new(egui::Id::new("properties_card"))
-            .order(egui::Order::Foreground)
-            .pivot(Align2::RIGHT_TOP)
-            .fixed_pos(central.right_top() + vec2(-12.0, 12.0))
-            .constrain_to(central)
-            .show(&ctx, |ui| {
-                theme::floating_frame().inner_margin(Margin::same(10)).show(ui, |ui| {
-                    ui.set_width(w);
-                    ui.set_max_height(central.height() - 24.0 - 20.0);
-                    inspector::show(ui, &mut objects, &selection, &handles, &mut actions);
-                });
-            });
+    // ---------------- Where the cards go
+    const M: f32 = 10.0;
+    let wide = central.width() > 720.0;
+    let left_rect = egui::Rect::from_min_size(central.min + vec2(M, M), vec2(state.left_w, central.height() - 2.0 * M));
+    let right_rect = egui::Rect::from_min_max(pos2(central.right() - M - state.right_w, central.top() + M), pos2(central.right() - M, central.bottom() - viewcube::HEIGHT - 6.0));
+    let mut free = egui::Rect::from_min_max(pos2(left_rect.right() + M, central.top()), pos2(if wide { right_rect.left() - M } else { central.right() }, central.bottom()));
+
+    // ---------------- Project tree (left), positioning card beside it
+    if overlays {
+        tree::left_card(&ctx, left_rect, &mut state, &mut library, &mut place, &mut cache, (&profiles, &mut device_place), &mut slot, &mut rtls, agent.running);
+        let (mut w, range) = (state.left_w, 230.0..=480.0);
+        theme::width_grip(&ctx, "left", pos2(left_rect.right() + 5.0, left_rect.center().y), &mut w, range, 1.0);
+        state.left_w = w;
+    }
+    if overlays && slot.rtls_open {
+        let w = state.detail_w.min(free.width() - M).max(300.0);
+        slot.rtls = Some(egui::Rect::from_min_size(pos2(free.left(), central.top() + M), vec2(w, central.height() - 2.0 * M)));
+        let (mut dw, range) = (state.detail_w, 320.0..=760.0);
+        theme::width_grip(&ctx, "detail", pos2(free.left() + w + 5.0, central.top() + M + 120.0), &mut dw, range, 1.0);
+        state.detail_w = dw;
+        free.min.x += w + M;
     }
 
-    // ---------------- Floating toolbar (top centre of the viewport)
-    // Centred in the part of the viewport the properties card leaves free.
-    let card_w = if selection.selected.is_some_and(|e| objects.contains(e)) { 314.0 } else { 0.0 };
-    let toolbar_x = (central.left() + central.right() - card_w) / 2.0;
+    // ---------------- Scene tree (right), properties card beside it
+    if overlays && wide {
+        outliner::card(&ctx, right_rect, &mut objects, &selection, &mut actions, &mut state);
+        let (mut w, range) = (state.right_w, 200.0..=440.0);
+        theme::width_grip(&ctx, "right", pos2(right_rect.left() - 5.0, right_rect.top() + 120.0), &mut w, range, -1.0);
+        state.right_w = w;
+    }
+    slot.between = Some(free);
+    let selected = selection.selected.is_some_and(|e| objects.contains(e));
+    if overlays && selected {
+        let w = 330.0f32.min(free.width() - 2.0 * M).max(220.0);
+        egui::Area::new(egui::Id::new("properties_card"))
+            .order(egui::Order::Middle)
+            .pivot(Align2::RIGHT_TOP)
+            .fixed_pos(pos2(free.right(), central.top() + M))
+            .constrain_to(central)
+            .show(&ctx, |ui| {
+                theme::fixed_card(ui, w, central.height() - 2.0 * M, |ui| {
+                    inspector::show(ui, &mut objects, &selection, &handles, &mut actions, &mut state.edit_base);
+                });
+            });
+        free.max.x -= w + M;
+    } else {
+        state.edit_base = None;
+    }
+    slot.free = Some(free);
+
+    // ---------------- View toolbar (top centre of the free canvas)
+    let toolbar_x = free.center().x;
     if overlays && !state.start_open {
         egui::Area::new(egui::Id::new("viewport_toolbar"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .pivot(Align2::CENTER_TOP)
-            .fixed_pos(egui::pos2(toolbar_x, central.top() + 10.0))
+            .fixed_pos(pos2(toolbar_x, central.top() + M))
             .constrain_to(central)
             .show(&ctx, |ui| {
                 theme::floating_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        theme::icon_toggle(ui, &mut place.sticky, icon::STACK, "Multi-place: keep placing copies after each click (or hold Shift)");
-                        theme::icon_toggle(ui, &mut walls.active, icon::WALL, "Draw walls: click points on the floor (Ctrl snap, Shift 15°, Esc or right-click to stop)");
-                        ui.separator();
-                        if ui.add_enabled_ui(undo_stack.can_undo(), |ui| theme::icon_button(ui, icon::ARROW_U_UP_LEFT, "Undo (Ctrl+Z)")).inner.clicked() {
-                            undo_req.undo = true;
-                        }
-                        if ui.add_enabled_ui(undo_stack.can_redo(), |ui| theme::icon_button(ui, icon::ARROW_U_UP_RIGHT, "Redo (Ctrl+Y)")).inner.clicked() {
-                            undo_req.redo = true;
-                        }
-                        ui.separator();
                         if theme::icon_button(ui, icon::FRAME_CORNERS, "Frame all (F)").clicked() {
                             actions.0.push(Action::FrameAll);
                         }
                         theme::icon_toggle(ui, &mut settings.grid, icon::GRID_FOUR, "Grid");
                         theme::icon_toggle(ui, &mut settings.bounds, icon::BOUNDING_BOX, "Hover bounds");
-                        theme::icon_toggle(ui, &mut settings.no_overlap, icon::STACK, "Prevent overlap");
-                        theme::icon_toggle(ui, &mut settings.gravity, icon::ARROW_LINE_DOWN, "Gravity: objects fall onto what is under them (lift or Alt-move to keep them in the air)");
                         theme::icon_toggle(ui, &mut settings.shadows, icon::SUN, "Shadows");
+                        ui.add_space(2.0);
+                        let (sep, _) = ui.allocate_exact_size(vec2(1.0, 18.0), egui::Sense::hover());
+                        ui.painter().rect_filled(sep, 0.0, theme::STROKE);
+                        ui.add_space(2.0);
+                        if theme::icon_button(ui, icon::SLIDERS_HORIZONTAL, "Lighting & viewport settings").clicked() {
+                            state.open_settings(SettingsTab::Viewport);
+                        }
                     });
                 });
             });
@@ -561,9 +654,9 @@ pub fn ui_system(
     let placing = place.ghost.as_ref().map(|(_, a)| (a.clone(), true)).or_else(|| place.asset.clone().map(|a| (a, false)));
     if let Some((asset, ready)) = placing.filter(|_| overlays) {
         egui::Area::new(egui::Id::new("placing_banner"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .pivot(Align2::CENTER_TOP)
-            .fixed_pos(egui::pos2(toolbar_x, central.top() + 58.0))
+            .fixed_pos(pos2(toolbar_x, central.top() + 58.0))
             .constrain_to(central)
             .show(&ctx, |ui| {
                 theme::floating_frame().inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
@@ -592,9 +685,9 @@ pub fn ui_system(
     // ---------------- Wall drawing banner
     if walls.active && overlays {
         egui::Area::new(egui::Id::new("wall_banner"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .pivot(Align2::CENTER_TOP)
-            .fixed_pos(egui::pos2(toolbar_x, central.top() + 58.0))
+            .fixed_pos(pos2(toolbar_x, central.top() + 58.0))
             .constrain_to(central)
             .show(&ctx, |ui| {
                 theme::floating_frame().inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
@@ -619,16 +712,17 @@ pub fn ui_system(
     }
 
     // ---------------- Empty scene hint
-    if overlays && object_count == 0 && place.asset.is_none() && !walls.active {
+    let page_needs_scene = !slot.rtls_open || !matches!(rtls.local.page(), crate::rtls::ui::Page::Fdtd | crate::rtls::ui::Page::Outcomes);
+    if overlays && object_count == 0 && place.asset.is_none() && !walls.active && page_needs_scene {
         egui::Area::new(egui::Id::new("empty_scene"))
-            .order(egui::Order::Middle)
+            .order(egui::Order::Background)
             .pivot(Align2::CENTER_CENTER)
-            .fixed_pos(central.center())
+            .fixed_pos(free.center())
             .interactable(false)
             .show(&ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(icon::CUBE).size(34.0).color(theme::WEAK));
-                    ui.label(RichText::new("Your scene is empty").strong());
+                    ui.label(RichText::new(icon::CUBE).size(36.0).color(theme::FAINT));
+                    ui.label(RichText::new("Your scene is empty").size(19.0).italics().color(theme::WEAK));
                     ui.label(RichText::new("Pick an asset from the library, or ask the assistant to build one.").small().color(theme::WEAK));
                 });
             });
@@ -636,44 +730,46 @@ pub fn ui_system(
 
     // ---------------- Joint overlay: rings on each moving part, label on the hot one
     let painter = ctx
-        .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("joint_overlay")))
+        .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("joint_overlay")))
         .with_clip_rect(central);
     for m in handles.joints.iter().filter(|_| overlays) {
-        let p = egui::pos2(m.screen.x, m.screen.y);
-        let anchor = egui::pos2(m.anchor.x, m.anchor.y);
+        let p = pos2(m.screen.x, m.screen.y);
+        let anchor = pos2(m.anchor.x, m.anchor.y);
         let h = Handle::Joint(m.index);
         let hot = handles.active == Some(h) || handles.hovered == Some(h);
         if p.distance(anchor) > 1.5 {
             // Dot was moved off an overlapping one: tie it to the real joint.
-            painter.line_segment([anchor, p], egui::Stroke::new(1.0, egui::Color32::from_white_alpha(170)));
-            painter.circle_filled(anchor, 1.8, egui::Color32::WHITE);
+            painter.line_segment([anchor, p], egui::Stroke::new(1.0, theme::WEAK));
+            painter.circle_filled(anchor, 1.8, theme::INK);
         }
         if hot {
-            painter.circle_filled(p + egui::vec2(1.0, 1.5), 8.0, egui::Color32::from_black_alpha(120));
+            painter.circle_filled(p + vec2(1.0, 1.5), 8.0, egui::Color32::from_black_alpha(70));
             painter.circle_filled(p, 8.0, ACCENT);
             painter.circle_stroke(p, 8.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
-            let galley = painter.layout_no_wrap(m.label.clone(), egui::FontId::monospace(12.5), egui::Color32::WHITE);
-            let rect = egui::Rect::from_min_size(
-                p + egui::vec2(16.0, -galley.size().y / 2.0 - 5.0),
-                galley.size() + egui::vec2(16.0, 10.0),
-            );
-            painter.rect_filled(rect, 6.0, theme::PANEL.gamma_multiply(0.95));
-            painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
-            painter.galley(rect.min + egui::vec2(8.0, 5.0), galley, egui::Color32::WHITE);
+            let galley = painter.layout_no_wrap(m.label.clone(), egui::FontId::monospace(12.5), theme::TEXT);
+            let rect = egui::Rect::from_min_size(p + vec2(16.0, -galley.size().y / 2.0 - 5.0), galley.size() + vec2(16.0, 10.0));
+            painter.rect_filled(rect, 5.0, theme::PANEL);
+            painter.rect_stroke(rect, 5.0, egui::Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+            painter.galley(rect.min + vec2(8.0, 5.0), galley, theme::TEXT);
         } else {
-            // Small, see-through dot so the part under it stays visible.
+            // Small, see-through dot so the part under it stays visible; the
+            // dark rim keeps it readable on light surfaces.
             painter.circle_filled(p, 5.0, egui::Color32::from_rgba_unmultiplied(30, 30, 30, 90));
+            painter.circle_stroke(p, 6.0, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)));
             painter.circle_stroke(p, 5.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
         }
     }
     if overlays && let Some(c) = handles.compact {
-        painter.text(
-            egui::pos2(c.x, c.y + 14.0),
-            Align2::CENTER_TOP,
-            "Small object · press F to zoom",
-            egui::FontId::proportional(11.5),
-            egui::Color32::from_white_alpha(200),
-        );
+        painter.text(pos2(c.x, c.y + 14.0), Align2::CENTER_TOP, "Small object · press F to zoom", egui::FontId::proportional(12.0), theme::TEXT);
+    }
+
+    // ---------------- Scale bar and nav cube
+    viewcube::animate(&ctx, orbit, &mut state.view_target);
+    if overlays {
+        if let Projection::Perspective(p) = projection {
+            viewcube::scale_bar(&ctx, central, orbit.radius, p.fov);
+        }
+        viewcube::show(&ctx, central, orbit, &mut state.view_target, &mut actions);
     }
 
     // ---------------- Settings dialog
@@ -684,15 +780,13 @@ pub fn ui_system(
         state.settings_open = open;
     }
 
-    let over_ui = ctx
-        .pointer_latest_pos()
-        .map(|p| {
-            !central.contains(p)
-                || ctx.layer_id_at(p).is_some_and(|l| l.order != egui::Order::Background && l.order != egui::Order::Middle)
-        })
-        .unwrap_or(true);
-    block.pointer = over_ui || ctx.egui_is_using_pointer() || state.start_open;
-    block.keyboard = ctx.egui_wants_keyboard_input() || state.start_open;
+    tabbar::confirm_close(&ctx, &mut tabs, &mut state, &mut actions);
+
+    let over_ui = ctx.pointer_latest_pos().map(|p| !central.contains(p) || ctx.layer_id_at(p).is_some_and(|l| l.order != egui::Order::Background)).unwrap_or(true);
+    // The Studio's canvas is on the background order, but the scene isn't what's under it.
+    block.pointer = over_ui || ctx.egui_is_using_pointer() || state.start_open || slot.studio_open;
+    // A full-canvas workspace has its own keys: Delete there mustn't reach the scene.
+    block.keyboard = ctx.egui_wants_keyboard_input() || state.start_open || slot.canvas_taken();
     Ok(())
 }
 

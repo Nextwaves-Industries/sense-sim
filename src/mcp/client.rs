@@ -287,6 +287,10 @@ impl McpHub {
         self.servers.lock().unwrap().iter().flat_map(|s| s.tools.iter().map(|t| t.2.clone())).collect()
     }
 
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.servers.lock().unwrap().iter().any(|s| s.tools.iter().any(|t| t.0 == name))
+    }
+
     /// Runs an MCP tool; `None` if no connected server owns `name`.
     pub fn call(&self, name: &str, input: &Value) -> Option<ToolOutput> {
         let (server, orig) = {

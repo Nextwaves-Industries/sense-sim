@@ -31,44 +31,88 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 7] = [Tab::Devices, Tab::Inspector, Tab::Live, Tab::Rf, Tab::Planning, Tab::Outputs, Tab::Settings];
     fn label(self) -> &'static str {
         match self {
-            Tab::Devices => "Devices",
+            Tab::Devices => "Devices & zones",
             Tab::Inspector => "Inspector",
-            Tab::Live => "Live",
+            Tab::Live => "Live data",
             Tab::Rf => "RF analysis",
             Tab::Planning => "Planning",
             Tab::Outputs => "Outputs / EMS",
-            Tab::Settings => "Settings",
+            Tab::Settings => "Positioning settings",
         }
     }
 }
 
-/// The panel's top-level pages.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+/// What the detail card shows; the project tree picks it.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
-    #[default]
-    Positioning,
+    Deploy,
+    Test,
+    /// One of the positioning tools.
+    Tool(Tab),
     OpenEms,
     Fdtd,
+    /// Predictions and how they held up (`crate::outcomes`).
+    Outcomes,
+}
+
+impl Page {
+    fn title(self) -> &'static str {
+        match self {
+            Page::Deploy => "Deploy",
+            Page::Test => "Test live",
+            Page::Tool(t) => t.label(),
+            Page::OpenEms => "OpenEMS Edge",
+            Page::Fdtd => "RF solver (FDTD)",
+            Page::Outcomes => "Predictions",
+        }
+    }
+
+    fn key(self) -> u8 {
+        match self {
+            Page::Deploy => 0,
+            Page::Test => 1,
+            Page::OpenEms => 2,
+            Page::Fdtd => 3,
+            Page::Outcomes => 4,
+            Page::Tool(t) => 10 + t as u8,
+        }
+    }
 }
 
 pub struct UiLocal {
     page: Page,
-    tab: Tab,
     tech: Tech,
     height: f32,
     cell: f32,
     add: usize,
+    /// Profile to plan with, when a technology has more than one kind.
+    plan_profile: Option<String>,
+    /// Extra tag heights to plan for, as typed ("0.3 1.8").
+    plan_heights: String,
+    plan_3d: bool,
+    plan_redundancy: bool,
+    plan_spacing: f32,
+    plan_cost: f32,
+    plan_refine: bool,
     draft: Option<OutputsConfig>,
     new_zone: String,
-    advanced: bool,
+}
+
+impl UiLocal {
+    pub fn page(&self) -> Page {
+        self.page
+    }
+
+    pub fn set_page(&mut self, page: Page) {
+        self.page = page;
+    }
 }
 
 impl Default for UiLocal {
     fn default() -> Self {
-        Self { page: Page::Positioning, tab: Tab::Devices, tech: Tech::Uwb, height: 1.2, cell: 0.5, add: 4, draft: None, new_zone: "Zone 1".into(), advanced: false }
+        Self { page: Page::Deploy, tech: Tech::Uwb, height: 1.2, cell: 0.5, add: 4, plan_profile: None, plan_heights: String::new(), plan_3d: false, plan_redundancy: false, plan_spacing: 1.5, plan_cost: 0.0005, plan_refine: true, draft: None, new_zone: "Zone 1".into() }
     }
 }
 
@@ -95,14 +139,14 @@ pub fn run_plan_jobs(world: &mut World) {
 fn state_color(s: LinkState) -> Color32 {
     match s {
         LinkState::Connected => theme::SUCCESS,
-        LinkState::Connecting => theme::ACCENT,
+        LinkState::Connecting => theme::WARNING,
         LinkState::Error => theme::DANGER,
     }
 }
 
 fn c32(c: Color) -> Color32 {
     let s = c.to_srgba();
-    Color32::from_rgb((s.red * 255.0) as u8, (s.green * 255.0) as u8, (s.blue * 255.0) as u8)
+    theme::ink(Color32::from_rgb((s.red * 255.0) as u8, (s.green * 255.0) as u8, (s.blue * 255.0) as u8))
 }
 
 fn filter_ui(ui: &mut egui::Ui, f: &mut EventFilter) {
@@ -165,6 +209,10 @@ pub struct DeployState {
     pub uwb: bool,
     pub ble: bool,
     pub rfid: bool,
+    pub ble_aoa: bool,
+    pub wifi: bool,
+    /// Keep the target with any one device failed.
+    pub redundancy: bool,
     pub target_cm: f32,
     /// Anchor cap; 0 = as few as meet the target.
     pub max_anchors: usize,
@@ -176,7 +224,7 @@ pub struct DeployState {
 
 impl Default for DeployState {
     fn default() -> Self {
-        Self { uwb: true, ble: false, rfid: false, target_cm: 30.0, max_anchors: 0, anchor_tx_dbm_mhz: None, pending: None, last: None }
+        Self { uwb: true, ble: false, rfid: false, ble_aoa: false, wifi: false, redundancy: false, target_cm: 30.0, max_anchors: 0, anchor_tx_dbm_mhz: None, pending: None, last: None }
     }
 }
 
@@ -202,19 +250,8 @@ fn humanize(detail: &str) -> String {
     }
 }
 
-fn step_header(ui: &mut egui::Ui, n: &str, title: &str, done: bool) {
-    ui.horizontal(|ui| {
-        let col = if done { theme::SUCCESS } else { theme::ACCENT };
-        ui.label(RichText::new(n).strong().size(16.0).color(col));
-        ui.label(RichText::new(title).strong().size(15.0));
-        if done {
-            ui.label(RichText::new("✔").color(theme::SUCCESS));
-        }
-    });
-}
-
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::new().fill(theme::RAISED).corner_radius(8).inner_margin(10).show(ui, |ui| {
+    theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui)
     })
@@ -270,23 +307,29 @@ pub struct RtlsPanel<'w, 's> {
     fdtd: ResMut<'w, super::fdtd::Fdtd>,
     applied: ResMut<'w, super::planning::AppliedAntenna>,
     library: ResMut<'w, super::antenna::AntennaLibrary>,
+    outcomes: ResMut<'w, crate::outcomes::ui::OutcomesUi>,
+    predictions: ResMut<'w, crate::outcomes::Predictions>,
+    recipe_jobs: Res<'w, crate::outcomes::hardware::Jobs>,
 }
 
 impl RtlsPanel<'_, '_> {
-    /// The panel body: three pages. Positioning (① Deploy, ② Test live,
-    /// Advanced tools), OpenEMS (the energy-management link) and FDTD (the
+    /// The card's body: the page the tree picked. Deploy and Test live, the
+    /// positioning tools, OpenEMS (the energy-management link) and FDTD (the
     /// openEMS field solver).
-    pub fn show(&mut self, ui: &mut egui::Ui) {
-        let Self { commands, cfg, state, hub, place, rsel, cov, profiles, jobs, ems, deploy, bindings, ui_state, devices, zones, orbit, names, rf_hist, fdtd, applied, library } = self;
+    pub fn show(&mut self, ui: &mut egui::Ui, max_height: f32) {
+        let Self { commands, cfg, state, hub, place, rsel, cov, profiles, jobs, ems, deploy, bindings, ui_state, devices, zones, orbit, names, rf_hist, fdtd, applied, library, outcomes, predictions, recipe_jobs } = self;
         let local = &mut ui_state.local;
         let Ok(mut orbit) = orbit.single_mut() else { return };
-        theme::segmented_fill(ui, &mut local.page, &[(Page::Positioning, "Positioning"), (Page::OpenEms, "OpenEMS Edge"), (Page::Fdtd, "RF solver (FDTD)")]);
-        ui.add_space(6.0);
-            egui::ScrollArea::vertical().id_salt(("rtls_page", local.page as u8)).auto_shrink([false, false]).show(ui, |ui| {
+        let page = local.page;
+            egui::ScrollArea::vertical().id_salt(("rtls_page", page.key())).max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
-                match local.page {
+                match page {
                     Page::OpenEms => {
                         openems_page(ui, ems, hub, bindings, state);
+                        return;
+                    }
+                    Page::Outcomes => {
+                        crate::outcomes::ui::show(ui, outcomes, predictions, recipe_jobs);
                         return;
                     }
                     Page::Fdtd => {
@@ -297,21 +340,40 @@ impl RtlsPanel<'_, '_> {
                         }
                         return;
                     }
-                    Page::Positioning => {}
+                    Page::Tool(tab) => {
+                        match tab {
+                            Tab::Devices => devices_tab(ui, local, place, rsel, profiles, devices, zones, commands, state, &mut orbit),
+                            Tab::Inspector => inspector_tab(ui, place, rsel, profiles, library, devices, zones, &names.0, state, commands),
+                            Tab::Live => live_tab(ui, state, hub, devices),
+                            Tab::Rf => {
+                                let ids: std::collections::HashMap<Entity, String> = devices.iter().map(|(e, d, _)| (e, d.id.clone())).collect();
+                                super::rf::rf_tab(ui, &mut local.tech, state, &ids, rf_hist, cov, &mut jobs.coverage, rsel, &mut orbit)
+                            }
+                            Tab::Planning => planning_tab(ui, local, cov, jobs, profiles, commands, devices),
+                            Tab::Outputs => outputs_tab(ui, local, cfg, hub),
+                            Tab::Settings => settings_tab(ui, cfg, profiles),
+                        }
+                        return;
+                    }
+                    Page::Deploy | Page::Test => {}
                 }
 
-                // ① Deploy
-                let deployed = deploy.last.is_some() || devices.iter().any(|(_, d, _)| !d.kind.is_mobile());
-                step_header(ui, "①", "Deploy", deployed);
-                card(ui, |ui| {
+                if page == Page::Deploy {
                     ui.horizontal(|ui| {
-                        // One positioning technology: UWB or BLE.
-                        if ui.radio(deploy.uwb, "UWB").clicked() {
-                            (deploy.uwb, deploy.ble) = (true, false);
+                        // Any mix of technologies: each is planned with its own
+                        // link model, on spots the others leave free.
+                        ui.checkbox(&mut deploy.uwb, "UWB");
+                        if ui.checkbox(&mut deploy.ble, "BLE").on_hover_text("RSSI beacons").changed() && deploy.ble {
+                            deploy.ble_aoa = false;
                         }
-                        if ui.radio(deploy.ble, "BLE").clicked() {
-                            (deploy.uwb, deploy.ble) = (false, true);
+                        if ui.checkbox(&mut deploy.ble_aoa, "BLE AoA").on_hover_text("Direction-finding locators: far fewer devices, better accuracy").changed() && deploy.ble_aoa {
+                            deploy.ble = false;
                         }
+                        ui.checkbox(&mut deploy.wifi, "WiFi").on_hover_text("Access points with RTT (802.11mc)");
+                        ui.checkbox(&mut deploy.rfid, "RFID").on_hover_text("Readers aimed at shelves and zones, portal pairs on doorways");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut deploy.redundancy, "survive 1 failure").on_hover_text("Keep the target with any one device down. Takes more devices.");
                         ui.label(RichText::new("accuracy").color(theme::WEAK));
                         egui::ComboBox::from_id_salt("rtls_target").selected_text(format!("{:.0} cm", deploy.target_cm)).width(70.0).show_ui(ui, |ui| {
                             for t in [10.0, 20.0, 30.0, 50.0, 100.0] {
@@ -359,7 +421,7 @@ impl RtlsPanel<'_, '_> {
                             if range_of(tx_now, &p) < MIN_USEFUL_RANGE_M {
                                 ui.label(
                                     RichText::new(format!(
-                                        "⚠ Too weak: an anchor reaches only {:.1} m, so tags can't be positioned. Raise the power (−41.3 is the legal maximum) or use many anchors close together.",
+                                        "Too weak: an anchor reaches only {:.1} m, so tags can't be positioned. Raise the power (−41.3 is the legal maximum) or use many anchors close together.",
                                         range_of(tx_now, &p)
                                     ))
                                     .small()
@@ -369,13 +431,13 @@ impl RtlsPanel<'_, '_> {
                         }
                     }
                     let busy = deploy.pending.is_some();
-                    let label = if busy { "Placing devices and testing…" } else { "⚡ Auto deploy" };
-                    let b = egui::Button::new(RichText::new(label).strong().size(15.0)).fill(theme::ACCENT.gamma_multiply(if busy { 0.4 } else { 0.85 })).min_size(vec2(ui.available_width(), 34.0));
-                    if ui.add_enabled(!busy && (deploy.uwb || deploy.ble || deploy.rfid), b)
+                    let label = if busy { "Placing devices and testing…".to_string() } else { theme::label(theme::icon::LIGHTNING, "Auto deploy") };
+                    let b = egui::Button::new(RichText::new(label).strong().size(15.0).color(theme::ON_ACCENT)).fill(if busy { theme::FAINT } else { theme::ACCENT }).stroke(egui::Stroke::NONE).min_size(vec2(ui.available_width(), 36.0));
+                    if ui.add_enabled(!busy && (deploy.uwb || deploy.ble || deploy.ble_aoa || deploy.wifi || deploy.rfid), b)
                         .on_hover_text("Places anchors, beacons, readers and tags for this scene, then runs a 30 s test. Running it again replaces only what it placed.")
                         .clicked()
                     {
-                        deploy.pending = Some(DeployRequest { uwb: deploy.uwb, ble: deploy.ble, rfid: false, target_m: deploy.target_cm / 100.0, max_anchors: (deploy.max_anchors > 0).then_some(deploy.max_anchors), anchor_tx_dbm_mhz: deploy.anchor_tx_dbm_mhz, ..Default::default() });
+                        deploy.pending = Some(DeployRequest { uwb: deploy.uwb, ble: deploy.ble, rfid: deploy.rfid, ble_aoa: deploy.ble_aoa, wifi: deploy.wifi, redundancy: deploy.redundancy, target_m: deploy.target_cm / 100.0, max_anchors: (deploy.max_anchors > 0).then_some(deploy.max_anchors), anchor_tx_dbm_mhz: deploy.anchor_tx_dbm_mhz, ..Default::default() });
                     }
                     if let Some(r) = &deploy.last {
                         deploy_result(ui, r);
@@ -392,7 +454,7 @@ impl RtlsPanel<'_, '_> {
                             cov.quality.target_m = target_m;
                             cov.dirty = true;
                         }
-                        let scan_tech = if cov.cells.is_empty() { infra_tech.unwrap_or(if deploy.ble { Tech::Ble } else { Tech::Uwb }) } else { cov.tech };
+                        let scan_tech = if cov.cells.is_empty() { infra_tech.unwrap_or(if deploy.ble || deploy.ble_aoa { Tech::Ble } else if deploy.wifi { Tech::Wifi } else { Tech::Uwb }) } else { cov.tech };
                         // Two full-width rows (what to show, for which technology), so
                         // the controls never push the panel wider than it is.
                         ui.add_space(2.0);
@@ -442,18 +504,18 @@ impl RtlsPanel<'_, '_> {
                             });
                             if !cov.cells.is_empty() {
                                 let share = cov.quality_share();
-                                let col = if share >= 0.95 { theme::SUCCESS } else { theme::ACCENT };
+                                let col = if share >= 0.95 { theme::SUCCESS } else { theme::WARNING };
                                 ui.label(RichText::new(format!("{:.0}% of the floor passes ({}, tag at {:.1} m)", share * 100.0, cov.tech.label(), cov.height)).color(col));
                             }
                         }
                         let legend = match (cov.view, cov.tech) {
-                            (MapView::Quality, Tech::Rfid) | (MapView::Accuracy, Tech::Rfid) => "blue = tags readable here · grey = no read".to_string(),
+                            (MapView::Quality, Tech::Rfid) | (MapView::Accuracy, Tech::Rfid) => "blue = read chance per round over 90% · grey = less".to_string(),
                             (MapView::Quality, _) => format!(
                                 "green = ≥ {:.0}% of readings within {:.0} cm · orange/red = less · grey = no position",
                                 cov.quality.min_share * 100.0,
                                 deploy.target_cm
                             ),
-                            (MapView::Accuracy, _) => "green ≤ 10 cm · yellow ≈ 30 cm · red ≥ 1 m · grey = no position".to_string(),
+                            (MapView::Accuracy, _) => "RMS error, 95% of readings within 1.7× that: green ≤ 10 cm · yellow ≈ 30 cm · red ≥ 1 m · grey = no position".to_string(),
                             (MapView::Signal, t) => {
                                 let (lo, hi) = super::planning::signal_scale(t);
                                 format!("red {lo:.0} dBm (weak) → green {hi:.0} dBm (strong) · grey = nothing heard")
@@ -464,16 +526,13 @@ impl RtlsPanel<'_, '_> {
                             ui.label(RichText::new(format!("{} Antennas: {} from FDTD (pattern + {:.1} dB match)", theme::icon::BROADCAST, a.label, a.mismatch_db)).small().color(theme::ONLINE));
                         }
                     }
-                });
+                }
 
-                // ② Test
-                ui.add_space(4.0);
-                let snap = state.snapshot.clone();
-                step_header(ui, "②", "Test live", cfg.settings.running && snap.tags_total > 0);
-                card(ui, |ui| {
+                if page == Page::Test {
+                    let snap = state.snapshot.clone();
                     ui.horizontal(|ui| {
                         let s = &mut cfg.settings;
-                        let label = if s.running { "⏸ Pause" } else { "▶ Run" };
+                        let label = if s.running { theme::label(theme::icon::PAUSE, "Pause") } else { theme::label(theme::icon::PLAY, "Run") };
                         if ui.add(egui::Button::new(RichText::new(label).strong()).min_size(vec2(80.0, 28.0))).clicked() {
                             s.running = !s.running;
                         }
@@ -482,7 +541,7 @@ impl RtlsPanel<'_, '_> {
                                 ui.selectable_value(&mut s.speed, v, format!("{v}×"));
                             }
                         });
-                        if ui.button("⟲").on_hover_text("Restart time and statistics").clicked() {
+                        if ui.button(theme::icon::ARROW_COUNTER_CLOCKWISE).on_hover_text("Restart time and statistics").clicked() {
                             let seed = s.seed;
                             state.restart(seed);
                         }
@@ -490,10 +549,9 @@ impl RtlsPanel<'_, '_> {
                     });
                     super::tag_card::add_tags_row(ui, place, profiles, devices.iter().map(|(_, d, t)| (d, t.translation)), commands, &mut state.rng);
                     if ui.button("RF analysis: signal, NLOS, anchors, dead zones").clicked() {
-                        local.advanced = true;
-                        local.tab = Tab::Rf;
+                        local.page = Page::Tool(Tab::Rf);
                     }
-                    let (rmse, _, c95, _) = state.error_stats(None);
+                    let live = state.error_stats_checked(None);
                     ui.horizontal(|ui| {
                         let kpi = |ui: &mut egui::Ui, v: String, k: &str, col: Color32| {
                             ui.vertical(|ui| {
@@ -502,10 +560,11 @@ impl RtlsPanel<'_, '_> {
                             });
                             ui.add_space(14.0);
                         };
-                        let located_col = if snap.tags_lost > 0 { theme::ACCENT } else { theme::SUCCESS };
+                        let located_col = if snap.tags_lost > 0 { theme::WARNING } else { theme::SUCCESS };
                         kpi(ui, format!("{}/{}", snap.tags_located, snap.tags_total), "tags located", located_col);
-                        kpi(ui, format!("{:.0} cm", rmse * 100.0), "avg error", theme::TEXT);
-                        kpi(ui, format!("{:.0} cm", c95 * 100.0), "95% within", theme::TEXT);
+                        let cm = |v: Option<f32>| v.map_or("–".to_string(), |v| format!("{:.0} cm", v * 100.0));
+                        kpi(ui, cm(live.map(|e| e.rmse)), "RMS error (30 s)", theme::TEXT);
+                        kpi(ui, cm(live.map(|e| e.cep95)), "95% within (30 s)", theme::TEXT);
                         kpi(ui, format!("{}", state.alarms.len()), "alarms", if state.alarms.is_empty() { theme::TEXT } else { theme::DANGER });
                     });
                     for a in state.alarms.values().take(3) {
@@ -532,34 +591,6 @@ impl RtlsPanel<'_, '_> {
                             ui.label(RichText::new(format!("+ {} more", snap.tags.len() - 8)).small().color(theme::WEAK));
                         }
                     }
-                });
-
-                // Advanced
-                ui.add_space(6.0);
-                let header = egui::CollapsingHeader::new(RichText::new("Advanced").color(theme::WEAK)).open(Some(local.advanced)).show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for t in Tab::ALL {
-                            if ui.selectable_label(local.tab == t, t.label()).clicked() {
-                                local.tab = t;
-                            }
-                        }
-                    });
-                    ui.separator();
-                    match local.tab {
-                        Tab::Devices => devices_tab(ui, local, place, rsel, profiles, devices, zones, commands, state, &mut orbit),
-                        Tab::Inspector => inspector_tab(ui, place, rsel, profiles, library, devices, zones, &names.0, state, commands),
-                        Tab::Live => live_tab(ui, state, hub, devices),
-                        Tab::Rf => {
-                            let ids: std::collections::HashMap<Entity, String> = devices.iter().map(|(e, d, _)| (e, d.id.clone())).collect();
-                            super::rf::rf_tab(ui, &mut local.tech, state, &ids, rf_hist, cov, &mut jobs.coverage, rsel, &mut orbit)
-                        }
-                        Tab::Planning => planning_tab(ui, local, cov, jobs, profiles, commands, devices),
-                        Tab::Outputs => outputs_tab(ui, local, cfg, hub),
-                        Tab::Settings => settings_tab(ui, cfg),
-                    }
-                });
-                if header.header_response.clicked() {
-                    local.advanced = !local.advanced;
                 }
             });
     }
@@ -577,12 +608,12 @@ fn openems_page(ui: &mut egui::Ui, ems: &mut LocalEms, hub: &Hub, bindings: &sup
         Phase::Idle if !installed => (theme::WEAK, "Not installed", "The first start downloads Java 21 and OpenEMS Edge (~120 MB). No admin rights needed.".to_string()),
         Phase::Idle => (theme::WEAK, "Stopped", "Start it to stream the positioning data into a local OpenEMS Edge.".to_string()),
         Phase::Failed(e) => (theme::DANGER, "Couldn't start", e.chars().take(200).collect()),
-        Phase::Working(step, p) if *p >= 0.0 => (theme::ACCENT, "Starting…", format!("{step} · {:.0}%", p * 100.0)),
-        Phase::Working(step, _) => (theme::ACCENT, "Starting…", step.clone()),
+        Phase::Working(step, p) if *p >= 0.0 => (theme::WARNING, "Starting…", format!("{step} · {:.0}%", p * 100.0)),
+        Phase::Working(step, _) => (theme::WARNING, "Starting…", step.clone()),
         Phase::Running { .. } if connected => (theme::SUCCESS, "Connected", "Positioning data is streaming into OpenEMS.".to_string()),
         Phase::Running { .. } => match &link_error {
             Some(e) => (theme::DANGER, "Can't reach OpenEMS", e.clone()),
-            None => (theme::ACCENT, "Connecting…", String::new()),
+            None => (theme::WARNING, "Connecting…", String::new()),
         },
     };
 
@@ -592,10 +623,10 @@ fn openems_page(ui: &mut egui::Ui, ems: &mut LocalEms, hub: &Hub, bindings: &sup
             ui.label(RichText::new("●").size(14.0).color(dot));
             ui.label(RichText::new(title).strong().size(15.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let accent = |text: &str| egui::Button::new(RichText::new(text).strong().color(Color32::from_rgb(28, 22, 8))).fill(theme::ACCENT).min_size(vec2(0.0, 28.0));
+                let accent = |text: &str| egui::Button::new(RichText::new(text).strong().color(theme::ON_ACCENT)).fill(theme::ACCENT).stroke(egui::Stroke::NONE).min_size(vec2(0.0, 28.0));
                 match &phase {
                     Phase::Idle | Phase::Failed(_) => {
-                        if ui.add(accent(if installed { "▶ Start" } else { "⬇ Install & start" })).clicked() {
+                        if ui.add(accent(&if installed { theme::label(theme::icon::PLAY, "Start") } else { theme::label(theme::icon::DOWNLOAD_SIMPLE, "Install & start") })).clicked() {
                             ems.start();
                         }
                     }
@@ -604,7 +635,7 @@ fn openems_page(ui: &mut egui::Ui, ems: &mut LocalEms, hub: &Hub, bindings: &sup
                     }
                     Phase::Running { .. } => {
                         if !connected || !ems.owns_process() {
-                            if ui.add(accent(if installed { "⟲ Restart" } else { "⬇ Install & start" })).clicked() {
+                            if ui.add(accent(&if installed { theme::label(theme::icon::ARROW_COUNTER_CLOCKWISE, "Restart") } else { theme::label(theme::icon::DOWNLOAD_SIMPLE, "Install & start") })).clicked() {
                                 ems.stop();
                                 ems.start();
                             }
@@ -693,7 +724,7 @@ fn openems_page(ui: &mut egui::Ui, ems: &mut LocalEms, hub: &Hub, bindings: &sup
             "Sense Sim writes the positioning values into the OpenEMS component rtls0 over REST (tags located, zone occupancy, alarms).",
             "OpenEMS drives objects through rtls0/Actuator1…n. Set rtls0/Automation = 0 to drive them yourself instead of the zone rule.",
             "Write rtls0/SimRunning = 0 to pause the simulation, 1 to resume.",
-            "Address, password and the other outputs (MQTT, Modbus…): Positioning → Advanced → Outputs / EMS.",
+            "Address, password and the other outputs (MQTT, Modbus…): Simulation → Outputs.",
         ] {
             ui.horizontal_top(|ui| {
                 ui.label(RichText::new("•").color(theme::WEAK));
@@ -707,7 +738,7 @@ fn openems_page(ui: &mut egui::Ui, ems: &mut LocalEms, hub: &Hub, bindings: &sup
         }
         if installed {
             ui.add(egui::Label::new(RichText::new("Starting keeps failing? Reinstall downloads Java and OpenEMS Edge again (~120 MB), then starts it.").small().color(theme::WEAK)).wrap());
-            if ui.button("⬇ Reinstall OpenEMS").clicked() {
+            if ui.button(theme::label(theme::icon::DOWNLOAD_SIMPLE, "Reinstall OpenEMS")).clicked() {
                 let dir = super::openems_local::base_dir();
                 let _ = std::fs::remove_file(dir.join("openems-edge.jar"));
                 let _ = std::fs::remove_dir_all(dir.join("jre"));
@@ -718,9 +749,8 @@ fn openems_page(ui: &mut egui::Ui, ems: &mut LocalEms, hub: &Hub, bindings: &sup
     });
 }
 
-/// Viewport overlay: device labels, the RTLS badge, placement hints, the card
-/// next to the selected device, and the panel as a floating window while no
-/// left-panel tab hosts it.
+/// Viewport overlay: device labels, placement hints, the card next to the
+/// selected device, the tag details, and the detail card the tree opened.
 #[allow(clippy::too_many_arguments)]
 pub fn rtls_ui(
     mut contexts: EguiContexts,
@@ -732,8 +762,9 @@ pub fn rtls_ui(
     hist: Res<super::tag_card::TagHistory>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
-    // The assistant hides overlays while it captures the viewport.
-    if hide.0 > 0 {
+    publish_status(&mut slot, &mut panel);
+    // The assistant hides overlays while it captures the viewport; Antenna Studio covers it.
+    if hide.0 > 0 || slot.canvas_taken() {
         return Ok(());
     }
     let (cam, cam_gt) = *camera;
@@ -748,10 +779,12 @@ pub fn rtls_ui(
             )
         })
         .unwrap_or(ctx.content_rect());
+    // The part of the canvas no tree or detail card covers.
+    let free = slot.free.unwrap_or(vp);
 
     // ---- Labels over the viewport
     if panel.cfg.settings.show_labels {
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("rtls_labels"))).with_clip_rect(vp);
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("rtls_labels"))).with_clip_rect(vp);
         for (e, d, t) in panel.devices.iter() {
             let Ok(s) = cam.world_to_viewport(cam_gt, t.translation + Vec3::Y * 0.12) else { continue };
             let mut text = d.id.clone();
@@ -765,14 +798,14 @@ pub fn rtls_ui(
             let col = if d.enabled { c32(d.kind.color()) } else { theme::WEAK };
             let galley = painter.layout_no_wrap(text, egui::FontId::proportional(11.0), col);
             let r = egui::Rect::from_center_size(egui::pos2(s.x, s.y) - vec2(0.0, 8.0), galley.size() + vec2(8.0, 2.0));
-            painter.rect_filled(r, 3.0, Color32::from_black_alpha(160));
+            theme::viewport_chip(&painter, r);
             painter.galley(r.min + vec2(4.0, 1.0), galley, col);
         }
         for (_, z) in panel.zones.iter() {
             let c = (Vec3::from(z.min) + Vec3::from(z.max)) * 0.5;
             if let Ok(s) = cam.world_to_viewport(cam_gt, Vec3::new(c.x, z.max[1], c.z)) {
                 let n = panel.state.zone_occupancy.get(&z.name).copied().unwrap_or(0);
-                let col = if z.restricted { theme::DANGER } else { Color32::from_rgb(110, 190, 255) };
+                let col = if z.restricted { theme::DANGER } else { theme::ONLINE };
                 painter.text(egui::pos2(s.x, s.y), egui::Align2::CENTER_BOTTOM, format!("{} · {n}", z.name), egui::FontId::proportional(12.0), col);
             }
         }
@@ -784,9 +817,9 @@ pub fn rtls_ui(
         } else {
             "Click to place · Shift keeps placing · right-click / Esc to stop"
         };
-        egui::Area::new(egui::Id::new("rtls_hint")).order(egui::Order::Foreground).fixed_pos(vp.center_top() + vec2(-170.0, 56.0)).show(&ctx, |ui| {
-            egui::Frame::new().fill(Color32::from_black_alpha(200)).corner_radius(6).inner_margin(8).show(ui, |ui| {
-                ui.label(RichText::new(msg).color(theme::ACCENT));
+        egui::Area::new(egui::Id::new("rtls_hint")).order(egui::Order::Middle).pivot(egui::Align2::CENTER_TOP).fixed_pos(egui::pos2(free.center().x, vp.top() + 58.0)).show(&ctx, |ui| {
+            theme::floating_frame().inner_margin(8).show(ui, |ui| {
+                ui.label(RichText::new(msg));
             });
         });
     }
@@ -807,8 +840,8 @@ pub fn rtls_ui(
         let mut details = false;
         let track = panel.state.tracks.get(&e).cloned();
         let replies = panel.state.infra_links.get(&e).copied();
-        egui::Area::new(egui::Id::new("rtls_device_card")).order(egui::Order::Foreground).fixed_pos(egui::pos2(s.x + 18.0, s.y - 10.0)).constrain(true).show(&ctx, |ui| {
-            egui::Frame::new().fill(theme::PANEL).stroke(egui::Stroke::new(1.0, theme::STROKE)).corner_radius(8).inner_margin(8).show(ui, |ui| {
+        egui::Area::new(egui::Id::new("rtls_device_card")).order(egui::Order::Middle).fixed_pos(egui::pos2(s.x + 18.0, s.y - 10.0)).constrain(true).show(&ctx, |ui| {
+            theme::floating_frame().inner_margin(8).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("●").color(c32(d.kind.color())));
                     ui.label(RichText::new(&d.id).strong());
@@ -838,7 +871,7 @@ pub fn rtls_ui(
                         delete = true;
                     }
                 });
-                ui.label(RichText::new("drag onto racks, walls or ceiling · Shift+drag flat · Alt+drag height · Q/E rotate").small().color(theme::WEAK));
+                ui.label(RichText::new("drag onto racks, walls or ceiling · Shift+drag flat · Rings rotate · Green arrow lifts").small().color(theme::WEAK));
             });
         });
         if delete {
@@ -847,9 +880,8 @@ pub fn rtls_ui(
         }
         if details {
             let l = &mut panel.ui_state.local;
-            l.advanced = true;
-            l.tab = Tab::Inspector;
-            slot.open_rtls = true;
+            l.page = Page::Tool(Tab::Inspector);
+            slot.rtls_open = true;
         }
     }
 
@@ -867,29 +899,30 @@ pub fn rtls_ui(
         let kind = d.kind.label();
         let color = c32(d.kind.color());
         let track = panel.state.tracks.get(&e).cloned();
-        let width = 380.0f32.min(vp.width() * 0.45);
-        let rect = egui::Rect::from_min_max(egui::pos2(vp.right() - width - 8.0, vp.top() + 8.0), egui::pos2(vp.right() - 8.0, vp.bottom() - 8.0));
+        let width = 380.0f32.min(free.width() * 0.7).max(260.0);
+        let rect = egui::Rect::from_min_max(egui::pos2(free.right() - width, vp.top() + 10.0), egui::pos2(free.right(), vp.bottom() - 10.0));
         let mut close = false;
         let mut delete = false;
         let mut enabled = d.enabled;
-        egui::Area::new(egui::Id::new("rtls_tag_dock")).order(egui::Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
-            egui::Frame::new().fill(theme::PANEL).stroke(egui::Stroke::new(1.0, theme::STROKE)).corner_radius(8).inner_margin(10).show(ui, |ui| {
+        egui::Area::new(egui::Id::new("rtls_tag_dock")).order(egui::Order::Middle).fixed_pos(rect.min).show(&ctx, |ui| {
+            ui.set_max_height(rect.height());
+            theme::floating_frame().inner_margin(10).show(ui, |ui| {
                 ui.set_width(rect.width() - 20.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("●").color(color));
                     ui.label(RichText::new(&title).strong().size(15.0));
                     ui.label(RichText::new(kind).color(theme::WEAK));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(theme::icon::X).on_hover_text("Close (click the tag again or \"Show data & graphs\" to reopen)").clicked() {
+                        if theme::close_button(ui, "Close (click the tag again or \"Show data & graphs\" to reopen)").clicked() {
                             close = true;
                         }
-                        if ui.button(theme::icon::TRASH).on_hover_text("Delete (Del)").clicked() {
+                        if theme::icon_button(ui, theme::icon::TRASH, "Delete (Del)").clicked() {
                             delete = true;
                         }
                         ui.checkbox(&mut enabled, "on");
                     });
                 });
-                ui.label(RichText::new("drag the tag onto racks, walls or ceiling · Shift+drag flat · Alt+drag height · Q/E rotate").small().color(theme::WEAK));
+                ui.label(RichText::new("drag the tag onto racks, walls or ceiling · Shift+drag flat · Rings rotate · Green arrow lifts").small().color(theme::WEAK));
                 ui.separator();
                 egui::ScrollArea::vertical().id_salt("rtls_tag_dock_scroll").max_height(rect.height() - 64.0).auto_shrink([false, false]).show(ui, |ui| {
                     super::tag_card::details(ui, e, track.as_ref(), running, &ids, &hist);
@@ -908,20 +941,75 @@ pub fn rtls_ui(
         }
     }
 
-    slot.rtls_alerts = panel.state.alarms.len() as u32;
-
-    // ---- The panel itself, in the left-panel "Positioning" tab.
+    // ---- The detail card the tree opened, beside the tree.
     if let Some(rect) = slot.rtls {
-        // Draw on the panels' own (background) layer: a free-standing layer isn't
-        // registered as an area, so egui never sees it as hovered and the scroll
-        // area inside would ignore the mouse wheel.
-        let layer = egui::LayerId::background();
-        let mut ui = egui::Ui::new(ctx.clone(), egui::Id::new("rtls_panel"), egui::UiBuilder::new().layer_id(layer).max_rect(rect));
-        ui.set_clip_rect(rect);
-        theme::panel_header(&mut ui, "Positioning", |_| {});
-        panel.show(&mut ui);
+        let title = panel.ui_state.local.page.title();
+        let mut close = false;
+        egui::Area::new(egui::Id::new("rtls_card")).order(egui::Order::Middle).fixed_pos(rect.min).show(&ctx, |ui| {
+            theme::fixed_card(ui, rect.width(), rect.height(), |ui| {
+                theme::card_title(ui, title, |ui| {
+                    close = theme::close_button(ui, "Close this card").clicked();
+                });
+                egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 10, top: 10, bottom: 12 }).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                    panel.show(ui, rect.height() - 76.0);
+                });
+            });
+        });
+        if close {
+            slot.rtls_open = false;
+        }
     }
     Ok(())
+}
+
+/// What the project tree shows about the positioning system.
+fn publish_status(slot: &mut crate::ui::LeftPanelSlot, panel: &mut RtlsPanel) {
+    use theme::Dot;
+    slot.rtls_alerts = panel.state.alarms.len() as u32;
+    let devices = panel.devices.iter().count();
+    let infra = panel.devices.iter().any(|(_, d, _)| !d.kind.is_mobile());
+    let deploying = panel.deploy.pending.is_some();
+    let ems_phase = panel.ems.phase();
+    let connected = panel.hub.sinks.iter().find(|s| s.name == "OpenEMS REST").is_some_and(|s| s.shared.status().state == LinkState::Connected);
+    let fdtd = panel.fdtd.status();
+    slot.rtls_status = crate::ui::RtlsStatus {
+        deploy: if deploying {
+            Dot::Busy
+        } else if infra || panel.deploy.last.is_some() {
+            Dot::Done
+        } else {
+            Dot::Todo
+        },
+        test: if panel.cfg.settings.running && panel.state.snapshot.tags_total > 0 {
+            Dot::Done
+        } else {
+            Dot::Optional
+        },
+        ems: match &ems_phase {
+            Phase::Running { .. } if connected => Dot::Done,
+            Phase::Running { .. } | Phase::Working(..) => Dot::Busy,
+            Phase::Failed(_) => Dot::Todo,
+            Phase::Idle => Dot::Optional,
+        },
+        fdtd: match &fdtd {
+            super::fdtd::Status::Busy(..) => Dot::Busy,
+            super::fdtd::Status::Failed(_) => Dot::Todo,
+            super::fdtd::Status::Idle => Dot::Optional,
+        },
+        devices,
+        zones: panel.zones.iter().count(),
+    };
+    slot.jobs.clear();
+    if deploying {
+        slot.jobs.push(crate::ui::Job { text: "Placing devices and testing".into(), progress: -1.0 });
+    }
+    if let Phase::Working(step, p) = &ems_phase {
+        slot.jobs.push(crate::ui::Job { text: format!("OpenEMS: {step}"), progress: *p });
+    }
+    if let super::fdtd::Status::Busy(msg, p) = &fdtd {
+        slot.jobs.push(crate::ui::Job { text: format!("RF solver: {}", msg.chars().take(60).collect::<String>()), progress: *p });
+    }
 }
 
 fn open_url(url: &str) -> std::io::Result<()> {
@@ -949,23 +1037,16 @@ fn devices_tab(
     state: &RtlsState,
     orbit: &mut OrbitCamera,
 ) {
-    ui.label(RichText::new("Place a device (click in the scene)").strong());
+    theme::caption(ui, "Place a device (click in the scene)");
+    let w = ui.available_width();
     for kind in DeviceKind::ALL {
-        let list: Vec<_> = profiles.0.iter().filter(|p| p.kind == kind).collect();
-        if list.is_empty() {
-            continue;
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("●").color(c32(kind.color())));
-            for p in list {
-                let active = place.profile.as_deref() == Some(p.id.as_str());
-                let b = egui::Button::new(&p.name).selected(active);
-                if ui.add(b).on_hover_text(format!("{} · {} · id {}", kind.label(), p.vendor, p.id)).clicked() {
-                    place.profile = if active { None } else { Some(p.id.clone()) };
-                    place.waypoints_for = None;
-                }
+        for p in profiles.0.iter().filter(|p| p.kind == kind) {
+            let active = place.profile.as_deref() == Some(p.id.as_str());
+            if theme::color_row(ui, w, c32(kind.color()), &p.name, active).on_hover_text(format!("{}\n{} · {} · id {}", p.name, kind.label(), p.vendor, p.id)).clicked() {
+                place.profile = if active { None } else { Some(p.id.clone()) };
+                place.waypoints_for = None;
             }
-        });
+        }
     }
     ui.checkbox(&mut place.sticky, "Keep placing after each click");
     ui.label(
@@ -975,10 +1056,10 @@ fn devices_tab(
     );
     ui.separator();
 
+    theme::caption(ui, "Zones");
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Zones").strong());
-        ui.text_edit_singleline(&mut local.new_zone);
-        if ui.button(theme::label(theme::icon::PLUS, "Add at view centre")).clicked() {
+        ui.add_sized([(ui.available_width() - 78.0).max(60.0), 26.0], egui::TextEdit::singleline(&mut local.new_zone));
+        if ui.button(theme::label(theme::icon::PLUS, "Add")).on_hover_text("Add a zone at the centre of the view").clicked() {
             let c = orbit.focus;
             let z = Zone { name: local.new_zone.clone(), min: [c.x - 2.0, 0.0, c.z - 2.0], max: [c.x + 2.0, 2.5, c.z + 2.0], restricted: false, capacity: 0, auto: false };
             let e = commands.spawn((Name::new(format!("Zone {}", z.name)), z)).id();
@@ -986,7 +1067,7 @@ fn devices_tab(
             rsel.device = None;
             let n = zones.iter().count() + 2;
             local.new_zone = format!("Zone {n}");
-            local.tab = Tab::Inspector;
+            local.page = Page::Tool(Tab::Inspector);
         }
     });
     let mut zl: Vec<(Entity, String, bool)> = zones.iter().map(|(e, z)| (e, z.name.clone(), z.restricted)).collect();
@@ -994,17 +1075,49 @@ fn devices_tab(
     for (e, name, restricted) in zl {
         ui.horizontal(|ui| {
             let n = state.zone_occupancy.get(&name).copied().unwrap_or(0);
-            let txt = format!("{}{name} · {n} inside", if restricted { "⛔ " } else { "" });
+            let txt = format!("{}{name} · {n} inside", if restricted { "\u{e4e2} " } else { "" });
             if ui.selectable_label(rsel.zone == Some(e), txt).clicked() {
                 rsel.zone = Some(e);
                 rsel.device = None;
-                local.tab = Tab::Inspector;
+                local.page = Page::Tool(Tab::Inspector);
             }
         });
     }
     ui.separator();
 
-    ui.label(RichText::new(format!("Devices ({})", devices.iter().count())).strong());
+    ui.horizontal(|ui| {
+        theme::caption(ui, &format!("Devices ({})", devices.iter().count()));
+        // Remove every device of one kind (e.g. all anchors) or all of them.
+        let present: Vec<(DeviceKind, usize)> =
+            DeviceKind::ALL.into_iter().map(|k| (k, devices.iter().filter(|(_, d, _)| d.kind == k).count())).filter(|&(_, n)| n > 0).collect();
+        if present.is_empty() {
+            return;
+        }
+        let mut remove: Option<Option<DeviceKind>> = None;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button(format!("{} Remove all", theme::icon::TRASH), |ui| {
+                for &(k, n) in &present {
+                    if ui.button(format!("All {} ({n})", plural(k.label()))).clicked() {
+                        remove = Some(Some(k));
+                    }
+                }
+                ui.separator();
+                if ui.button(RichText::new("Every device").color(theme::DANGER)).clicked() {
+                    remove = Some(None);
+                }
+            });
+        });
+        if let Some(kind) = remove {
+            for (e, d, _) in devices.iter() {
+                if kind.is_none_or(|k| d.kind == k) {
+                    commands.entity(e).despawn();
+                    if rsel.device == Some(e) {
+                        rsel.device = None;
+                    }
+                }
+            }
+        }
+    });
     let mut list: Vec<(Entity, String, DeviceKind, bool, Vec3)> = devices.iter().map(|(e, d, t)| (e, d.id.clone(), d.kind, d.enabled, t.translation)).collect();
     list.sort_by(|a, b| (a.2 as u8, &a.1).cmp(&(b.2 as u8, &b.1)));
     egui::Grid::new("rtls_dev_list").striped(true).num_columns(4).show(ui, |ui| {
@@ -1013,7 +1126,7 @@ fn devices_tab(
                 rsel.device = Some(e);
                 rsel.zone = None;
                 orbit.focus = pos;
-                local.tab = Tab::Inspector;
+                local.page = Page::Tool(Tab::Inspector);
             }
             ui.label(RichText::new(kind.label()).color(theme::WEAK));
             let status = match state.tracks.get(&e) {
@@ -1093,7 +1206,7 @@ fn antenna_edit(
             ui.label(RichText::new("Aimed where the device faces (rotate it in the viewport).").small().color(theme::WEAK));
         }
         Some(A::Library { name }) if library.get(name).is_none() => {
-            ui.label(RichText::new(format!("\"{name}\" is not in the antenna library: treated as 0 dBi.")).small().color(theme::ACCENT));
+            ui.label(RichText::new(format!("\"{name}\" is not in the antenna library: treated as 0 dBi.")).small().color(theme::WARNING));
         }
         _ => {}
     }
@@ -1194,7 +1307,7 @@ fn inspector_tab(
             ui.label(RichText::new(format!("≈ {range:.0} m LOS")).color(theme::WEAK));
         });
     }
-    if matches!(kind, DeviceKind::UwbAnchor | DeviceKind::UwbTag | DeviceKind::BleNode | DeviceKind::BleTag) {
+    if matches!(kind, DeviceKind::UwbAnchor | DeviceKind::UwbTag | DeviceKind::BleNode | DeviceKind::BleTag | DeviceKind::WifiAp | DeviceKind::WifiClient) {
         antenna_edit(ui, &mut d.radio.antenna, &prof, library, kind, commands);
     }
     ui.horizontal(|ui| {
@@ -1210,19 +1323,29 @@ fn inspector_tab(
         t.translation = p;
     }
     ui.horizontal(|ui| {
-        let (mut yaw, _, _) = t.rotation.to_euler(EulerRot::YXZ);
-        let mut deg = yaw.to_degrees();
-        ui.label("Yaw");
-        if ui.add(egui::DragValue::new(&mut deg).speed(1.0).suffix("°")).changed() {
-            yaw = deg.to_radians();
-            t.rotation = Quat::from_rotation_y(yaw);
+        // Each field turns by the change alone, so editing one keeps the other two
+        // (and a ceiling mount, where yaw and roll share an axis, stays put).
+        let (yaw, tilt, roll) = t.rotation.to_euler(EulerRot::YXZ);
+        let angle = |ui: &mut egui::Ui, name: &str, tip: &str, rad: f32| {
+            let mut deg = rad.to_degrees();
+            ui.label(name).on_hover_text(tip);
+            ui.add(egui::DragValue::new(&mut deg).speed(1.0).suffix("°")).changed().then(|| deg.to_radians() - rad)
+        };
+        if let Some(d) = angle(ui, "Yaw", "Turn around the vertical.", yaw) {
+            t.rotate_y(d);
         }
-        if !kind.is_mobile() && ui.button("Height = profile").on_hover_text(format!("{:.1} m", prof.mount_height_m)).clicked() {
-            t.translation.y = prof.mount_height_m;
+        if let Some(d) = angle(ui, "Tilt", "Aim up (+) or down (-). -90° points straight down.", tilt) {
+            t.rotate_local_x(d);
+        }
+        if let Some(d) = angle(ui, "Roll", "Turn around the direction it faces.", roll) {
+            t.rotate_local_z(d);
         }
     });
+    if !kind.is_mobile() && ui.button("Height = profile").on_hover_text(format!("{:.1} m", prof.mount_height_m)).clicked() {
+        t.translation.y = prof.mount_height_m;
+    }
     ui.label(
-        RichText::new("Drag in the viewport to move · Alt+drag changes height · Q/E rotate · G look at · Del deletes · Ctrl+D duplicates").small().color(theme::WEAK),
+        RichText::new("Drag in the viewport to move · Rings rotate (Ctrl: 15° steps) · Green arrow or Alt+drag changes height · Q/E rotate · G look at · Del deletes · Ctrl+D duplicates").small().color(theme::WEAK),
     );
 
     if kind.is_mobile() {
@@ -1255,7 +1378,7 @@ fn inspector_tab(
                 });
                 ui.horizontal(|ui| {
                     let adding = place.waypoints_for == Some(e);
-                    if ui.add(egui::Button::new(if adding { "✔ Done adding".to_string() } else { theme::label(theme::icon::PLUS, "Add waypoints by clicking") }).selected(adding)).clicked() {
+                    if ui.add(egui::Button::new(if adding { theme::label(theme::icon::CHECK, "Done adding") } else { theme::label(theme::icon::PLUS, "Add waypoints by clicking") }).selected(adding)).clicked() {
                         place.waypoints_for = if adding { None } else { Some(e) };
                         place.profile = None;
                     }
@@ -1347,7 +1470,7 @@ fn inspector_tab(
                     (_, Some(v)) => format!("{v:.0} dBm"),
                 });
                 ui.label(RichText::new(l.path_label()).color(if l.walls == 0 { theme::SUCCESS } else { theme::DANGER }));
-                ui.label(if l.used { "✔" } else { "" });
+                ui.label(if l.used { theme::icon::CHECK } else { "" });
                 ui.end_row();
             }
         });
@@ -1360,8 +1483,10 @@ fn inspector_tab(
 }
 
 fn live_tab(ui: &mut egui::Ui, state: &mut RtlsState, hub: &Hub, devices: &DeviceQuery<'_, '_>) {
-    let (rmse, c50, c95, max) = state.error_stats(None);
+    let live = state.error_stats_checked(None);
+    let whole = state.run_stats(None, None);
     let snap = state.snapshot.clone();
+    let cm = |v: Option<f32>, digits: usize| v.map_or("–".to_string(), |v| format!("{:.digits$} cm", v * 100.0));
     egui::Grid::new("rtls_metrics").num_columns(4).spacing(vec2(14.0, 4.0)).show(ui, |ui| {
         let kv = |ui: &mut egui::Ui, k: &str, v: String| {
             ui.label(RichText::new(k).color(theme::WEAK));
@@ -1370,32 +1495,37 @@ fn live_tab(ui: &mut egui::Ui, state: &mut RtlsState, hub: &Hub, devices: &Devic
         kv(ui, "Tags located", format!("{} / {}", snap.tags_located, snap.tags_total));
         kv(ui, "Lost", format!("{}", snap.tags_lost));
         ui.end_row();
-        kv(ui, "RMSE (30 s)", format!("{:.1} cm", rmse * 100.0));
-        kv(ui, "CEP50 / 95", format!("{:.0} / {:.0} cm", c50 * 100.0, c95 * 100.0));
+        kv(ui, "RMSE (30 s)", cm(live.map(|e| e.rmse), 1));
+        kv(ui, "CEP50 / 95 (30 s)", format!("{} / {}", cm(live.map(|e| e.cep50), 0), cm(live.map(|e| e.cep95), 0)));
         ui.end_row();
-        kv(ui, "Max error", format!("{:.0} cm", max * 100.0));
+        kv(ui, "Max error (30 s)", cm(live.map(|e| e.max), 0));
         kv(ui, "RFID reads/s", format!("{:.0}", state.rfid_rate()));
+        ui.end_row();
+        kv(ui, "RMSE (whole run)", cm(whole.stats().map(|e| e.rmse), 1));
+        kv(ui, "CEP95 (whole run)", cm(whole.stats().map(|e| e.cep95), 0));
+        ui.end_row();
+        kv(ui, "Fixes (whole run)", format!("{} of {} updates", whole.fixes, whole.attempts));
+        kv(ui, "Rejected as wild", format!("{}", whole.rejected));
         ui.end_row();
         kv(ui, "Infra online", format!("{} / {}", snap.infra_online, snap.infra_total));
         kv(ui, "Events out", format!("{} ({} published)", state.events_total, hub.published));
         ui.end_row();
     });
-    for tech in ["uwb", "ble"] {
-        let (r, _, c95, _) = state.error_stats(Some(tech));
-        if r > 0.0 {
-            ui.label(RichText::new(format!("{}: RMSE {:.1} cm · CEP95 {:.1} cm", tech.to_uppercase(), r * 100.0, c95 * 100.0)).color(theme::WEAK));
+    for tech in ["uwb", "ble", "wifi"] {
+        if let Some(e) = state.error_stats_checked(Some(tech)) {
+            ui.label(RichText::new(format!("{} (30 s): RMSE {:.1} cm · CEP95 {:.1} cm · {} fixes", tech.to_uppercase(), e.rmse * 100.0, e.cep95 * 100.0, e.n)).color(theme::WEAK));
         }
     }
     if ui.button("Reset statistics").clicked() {
         state.reset_metrics();
     }
-    let rm: Vec<(f64, f32)> = state.series.iter().map(|p| (p.t, p.rmse * 100.0)).collect();
-    chart(ui, &rm, Color32::from_rgb(90, 210, 255), "RMSE", " cm");
+    let rm: Vec<(f64, f32)> = state.series.iter().filter(|p| p.rmse.is_finite()).map(|p| (p.t, p.rmse * 100.0)).collect();
+    chart(ui, &rm, Color32::from_rgb(20, 130, 200), "RMSE", " cm");
     let lo: Vec<(f64, f32)> = state.series.iter().map(|p| (p.t, p.located as f32)).collect();
     chart(ui, &lo, theme::SUCCESS, "Tags located", "");
     let rd: Vec<(f64, f32)> = state.series.iter().map(|p| (p.t, p.reads)).collect();
     if rd.iter().any(|p| p.1 > 0.0) {
-        chart(ui, &rd, Color32::from_rgb(140, 230, 120), "RFID reads/s", "");
+        chart(ui, &rd, Color32::from_rgb(40, 158, 84), "RFID reads/s", "");
     }
 
     if !state.alarms.is_empty() {
@@ -1417,8 +1547,9 @@ fn live_tab(ui: &mut egui::Ui, state: &mut RtlsState, hub: &Hub, devices: &Devic
             let col = kinds.get(&t.id).map(|k| c32(k.color())).unwrap_or(theme::TEXT);
             ui.label(RichText::new(&t.id).color(col));
             ui.label(&t.tech);
-            ui.label(format!("{:.2}", t.x));
-            ui.label(format!("{:.2}", t.z));
+            let at = |v: f32| if v.is_finite() { format!("{v:.2}") } else { "–".to_string() };
+            ui.label(at(t.x));
+            ui.label(at(t.z));
             let err = state.tracks.values().find(|x| x.id == t.id).and_then(|x| x.err);
             ui.label(if t.lost { RichText::new("lost").color(theme::DANGER) } else { RichText::new(err.map(|e| format!("{:.0} cm", e * 100.0)).unwrap_or_default()) });
             ui.label(format!("{:.0}%", t.quality * 100.0));
@@ -1467,14 +1598,14 @@ fn planning_tab(
     if !cov.summary.is_empty() {
         ui.label(&cov.summary);
         let legend = match (cov.tech, cov.view) {
-            (Tech::Rfid, _) => "blue = readable (brighter = more link margin) · grey = no read".to_string(),
+            (Tech::Rfid, _) => "blue = read chance per round over 90% (brighter = more link margin) · grey = less".to_string(),
             (_, MapView::Quality) => format!(
                 "green = ≥ {:.0}% of readings within {:.0} cm ({:.0}% of the floor) · red = less · grey = no fix",
                 cov.quality.min_share * 100.0,
                 cov.quality.target_m * 100.0,
                 cov.quality_share() * 100.0
             ),
-            (_, MapView::Accuracy) => "green ≤ 10 cm · yellow ≈ 30 cm · red ≥ 1 m predicted error · grey = no fix".to_string(),
+            (_, MapView::Accuracy) => "predicted RMS error, 95% of readings within 1.7× that: green ≤ 10 cm · yellow ≈ 30 cm · red ≥ 1 m · grey = no fix".to_string(),
             (t, MapView::Signal) => {
                 let (lo, hi) = super::planning::signal_scale(t);
                 format!("red {lo:.0} dBm (weak) → green {hi:.0} dBm (strong) · grey = nothing heard")
@@ -1488,8 +1619,47 @@ fn planning_tab(
         ui.add(egui::DragValue::new(&mut local.add).range(1..=32).prefix("add "));
         ui.label(local.tech.infra().label());
         if ui.button("Suggest positions").clicked() {
-            jobs.optimize = Some(OptimizeRequest { tech: local.tech, add: local.add, height: local.height, ..Default::default() });
+            let mut heights = vec![local.height];
+            heights.extend(local.plan_heights.split([' ', ',']).filter_map(|h| h.parse::<f32>().ok()));
+            jobs.optimize = Some(OptimizeRequest {
+                tech: local.tech,
+                add: local.add,
+                height: local.height,
+                heights,
+                profile: local.plan_profile.clone(),
+                dim3: local.plan_3d,
+                redundancy: local.plan_redundancy,
+                min_spacing_m: Some(local.plan_spacing),
+                cost_weight: Some(local.plan_cost),
+                refine: local.plan_refine,
+                expand_heights: true,
+                ..Default::default()
+            });
         }
+    });
+    // A technology with several kinds of device (BLE beacon or AoA locator, WiFi RTT or RSSI).
+    let kinds: Vec<(String, String)> = profiles.0.iter().filter(|p| p.kind == local.tech.infra()).map(|p| (p.id.clone(), p.name.clone())).collect();
+    if local.plan_profile.as_ref().is_some_and(|id| !kinds.iter().any(|k| k.0 == *id)) {
+        local.plan_profile = None;
+    }
+    if kinds.len() > 1 {
+        let shown = local.plan_profile.as_ref().and_then(|id| kinds.iter().find(|k| k.0 == *id)).or(kinds.first()).map_or("", |k| k.1.as_str()).to_string();
+        egui::ComboBox::from_id_salt("rtls_plan_profile").selected_text(shown).show_ui(ui, |ui| {
+            for (id, name) in &kinds {
+                ui.selectable_value(&mut local.plan_profile, Some(id.clone()), name);
+            }
+        });
+    }
+    egui::CollapsingHeader::new(RichText::new("Options").small().color(theme::WEAK)).id_salt("rtls_plan_options").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("more tag heights");
+            ui.add(egui::TextEdit::singleline(&mut local.plan_heights).desired_width(70.0).hint_text("0.3 1.8"));
+        });
+        ui.checkbox(&mut local.plan_3d, "full 3D fixes").on_hover_text("Asks for height too: needs anchors at different heights");
+        ui.checkbox(&mut local.plan_redundancy, "survive 1 device failure");
+        ui.checkbox(&mut local.plan_refine, "fine-tune along the mounting surface");
+        ui.add(egui::DragValue::new(&mut local.plan_spacing).range(0.3..=20.0).speed(0.1).prefix("min spacing ").suffix(" m"));
+        ui.add(egui::DragValue::new(&mut local.plan_cost).range(0.0..=0.05).speed(0.0002).prefix("cost weight "));
     });
     if !cov.suggestion_note.is_empty() {
         ui.label(&cov.suggestion_note);
@@ -1500,16 +1670,20 @@ fn planning_tab(
         }
         ui.horizontal(|ui| {
             if ui.button("Place all suggested").clicked()
-                && let Some(prof) = profiles.default_for(local.tech.infra())
+                && let Some(prof) = local.plan_profile.as_deref().and_then(|id| profiles.get(id)).filter(|p| p.kind == local.tech.infra()).or_else(|| profiles.default_for(local.tech.infra()))
             {
                 let mut ids: Vec<String> = devices.iter().map(|(_, d, _)| d.id.clone()).collect();
-                for p in std::mem::take(&mut cov.suggestions) {
+                let aims = std::mem::take(&mut cov.suggestion_facing);
+                for (k, p) in std::mem::take(&mut cov.suggestions).into_iter().enumerate() {
                     let id = super::device::next_id(prof.kind, ids.iter().map(String::as_str));
                     ids.push(id.clone());
+                    // Aimed as planned: a reader's beam or an array's view depends on it.
+                    let dir = aims.get(k).copied().unwrap_or(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
+                    let up = if dir.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y };
                     super::view::spawn_device(
                         commands,
                         Device { id, kind: prof.kind, profile: prof.id.clone(), enabled: true, motion: Motion::Static, address: String::new(), auto: false, radio: Default::default() },
-                        Transform::from_translation(p),
+                        Transform::from_translation(p).looking_to(dir, up),
                     );
                 }
                 jobs.coverage = Some(CoverageRequest { tech: local.tech, height: local.height, cell: local.cell });
@@ -1724,8 +1898,61 @@ fn outputs_tab(ui: &mut egui::Ui, local: &mut UiLocal, cfg: &mut RtlsConfig, hub
     });
 }
 
-fn settings_tab(ui: &mut egui::Ui, cfg: &mut RtlsConfig) {
+/// Picks the regulatory region and shows what it means for this deployment.
+fn region_section(ui: &mut egui::Ui, region: &mut String, profiles: &mut Profiles) {
+    ui.label(RichText::new("Regulatory region").strong());
+    let shown = profiles.1.active.as_ref().map_or_else(|| "None (profile values)".to_string(), |r| r.name.clone());
+    let mut pick = None;
+    egui::ComboBox::from_id_salt("rtls_region").selected_text(shown).width(240.0).show_ui(ui, |ui| {
+        if ui.selectable_label(profiles.1.active.is_none(), "None (profile values)").clicked() {
+            pick = Some(String::new());
+        }
+        for r in &profiles.1.regions {
+            let on = profiles.1.active.as_ref().is_some_and(|a| a.id == r.id);
+            if ui.selectable_label(on, &r.name).clicked() {
+                pick = Some(r.id.clone());
+            }
+        }
+    });
+    if let Some(id) = pick
+        && profiles.set_region(&id).is_ok()
+    {
+        *region = id;
+    }
+    let small = |ui: &mut egui::Ui, text: String, color: Color32| {
+        ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
+    };
+    let Some(r) = &profiles.1.active else {
+        small(ui, "Devices use their profile values, which may exceed local limits.".into(), theme::WARNING);
+        ui.separator();
+        return;
+    };
+    let channels: Vec<String> = r.uwb.channels.iter().map(u32::to_string).collect();
+    let uwb = if channels.is_empty() {
+        format!("UWB: {}. {}", r.uwb.status.label(), r.uwb.note)
+    } else {
+        let power = r.uwb.max_dbm_mhz.map_or("power limit not confirmed".to_string(), |m| format!("{m} dBm/MHz"));
+        format!("UWB: channel {}, {power} ({}). {}", channels.join(", "), r.uwb.status.label(), r.uwb.note)
+    };
+    small(ui, uwb, theme::WEAK);
+    let rfid = match r.rfid.band_mhz {
+        Some([lo, hi]) => format!("RFID: {lo} to {hi} MHz, {} ({}). {}", r.rfid.limit_text, r.rfid.status.label(), r.rfid.note),
+        None => format!("RFID: {}. {}", r.rfid.status.label(), r.rfid.note),
+    };
+    small(ui, rfid, theme::WEAK);
+    for c in r.changes(&profiles.1.base) {
+        small(ui, format!("Changed: {c}"), theme::WEAK);
+    }
+    for w in r.warnings() {
+        small(ui, w, theme::WARNING);
+    }
+    small(ui, format!("Checked {}. {} Design inputs, not legal advice: confirm with the regulator. Add countries as JSON in {}.", r.checked, super::region::PATTERN_NOTE, super::region::user_dirs().last().map(|d| d.display().to_string()).unwrap_or_default()), theme::WEAK);
+    ui.separator();
+}
+
+fn settings_tab(ui: &mut egui::Ui, cfg: &mut RtlsConfig, profiles: &mut Profiles) {
     let before = cfg.settings.clone();
+    region_section(ui, &mut cfg.settings.region, profiles);
     let s = &mut cfg.settings;
     egui::Grid::new("rtls_settings").num_columns(2).show(ui, |ui| {
         ui.label("Tick rate");
@@ -1772,14 +1999,19 @@ fn range_of(tx: f32, p: &super::device::Profile) -> f32 {
     super::radio::uwb_link_range_m(&super::device::Profile { uwb_tx_dbm_mhz: tx, ..p.clone() })
 }
 
-/// "35 cm" or "6.4 m".
-fn dist(m: f32) -> String {
-    if !m.is_finite() {
-        "–".into()
-    } else if m < 1.0 {
-        format!("{:.0} cm", m * 100.0)
-    } else {
-        format!("{m:.1} m")
+use super::deploy::{ClassResult, Verdict, dist};
+
+/// One class of tags in plain words: how far 95 % land, out of how many updates and how many
+/// of those had a fix. A position that isn't there counts against the 95 %.
+fn class_line(c: &ClassResult) -> String {
+    let share = c.availability().unwrap_or(0.0) * 100.0;
+    let count = format!("{} updates, {:.0}% with a fix, {} tag{}", c.attempts, share, c.tags, if c.tags == 1 { "" } else { "s" });
+    match c.p95_m {
+        Some(p) if p.is_finite() => format!("95% within {} · typically {} · {count}", dist(p), dist(c.rmse_m.unwrap_or(f32::NAN))),
+        _ => match c.fix_p95_m {
+            Some(p) => format!("95% not reached: {count}. Of the fixes, 95% within {}", dist(p)),
+            None => format!("no position: {count}"),
+        },
     }
 }
 
@@ -1788,17 +2020,11 @@ fn dist(m: f32) -> String {
 fn deploy_result(ui: &mut egui::Ui, r: &super::deploy::DeployReport) {
     let uwb = r.anchor_reach_m > 0.0;
     let too_weak = uwb && r.anchor_reach_m < MIN_USEFUL_RANGE_M;
-    let (err, err95) = if r.anchors > 0 { (r.uwb_rmse_m, r.uwb_cep95_m) } else { (r.rmse_m, r.cep95_m) };
-    let (icon, verdict, color) = if too_weak {
-        ("✗", "Anchors are too weak to position anything".to_string(), theme::DANGER)
-    } else if uwb && r.anchors == 0 {
-        ("✗", "No anchors were placed".to_string(), theme::DANGER)
-    } else if r.targets_met {
-        ("✓", format!("Good: 95% of positions within {}", dist(err95.min(r.target_m))), theme::SUCCESS)
-    } else if r.coverage >= 0.8 {
-        ("!", format!("Almost: not every spot reaches {}", dist(r.target_m)), theme::ACCENT)
-    } else {
-        ("✗", format!("Not accurate enough for {}", dist(r.target_m)), theme::DANGER)
+    let (level, verdict) = r.verdict();
+    let (icon, color) = match level {
+        Verdict::Good => (theme::icon::CHECK_CIRCLE, theme::SUCCESS),
+        Verdict::Almost => (theme::icon::WARNING, theme::WARNING),
+        Verdict::Bad => (theme::icon::WARNING_CIRCLE, theme::DANGER),
     };
     ui.label(RichText::new(format!("{icon} {verdict}")).strong().size(15.0).color(color));
     ui.label(RichText::new(r.headline()).color(theme::WEAK));
@@ -1807,17 +2033,29 @@ fn deploy_result(ui: &mut egui::Ui, r: &super::deploy::DeployReport) {
     let row = |ui: &mut egui::Ui, k: &str, v: String, good: bool| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(k).color(theme::WEAK));
-            ui.label(RichText::new(v).strong().color(if good { theme::TEXT } else { theme::ACCENT }));
+            ui.label(RichText::new(v).strong().color(if good { theme::TEXT } else { theme::WARNING }));
         });
     };
     if r.total_tags > 0 {
-        row(ui, "Tags found in the 30 s test:", format!("{} of {}", r.located, r.total_tags), r.located == r.total_tags);
-        if r.located > 0 {
-            row(ui, "Position error:", format!("typically {}, 95% within {}", dist(err), dist(err95)), err95 <= r.target_m);
+        row(ui, &format!("Tags found in the {:.0} s simulated test:", r.test_s), format!("{} of {}", r.found, r.total_tags), r.found == r.total_tags);
+    }
+    for a in &r.accuracy {
+        let t = a.tech.to_uppercase();
+        for (name, c) in [("moving", &a.moving), ("parked", &a.parked)] {
+            if c.attempts > 0 {
+                row(ui, &format!("{t} {name} tags:"), class_line(c), c.p95_m.is_some_and(|p| p <= a.target_m));
+            }
         }
     }
+    if r.rfid_tags > 0 {
+        let read = r.rfid_tags - r.rfid_unread.len();
+        row(ui, &format!("RFID read within {:.0} s:", r.test_s), format!("{read} of {} tags · {:.0}% read chance per round", r.rfid_tags, r.rfid_read_chance * 100.0), r.rfid_unread.is_empty());
+    }
     if r.anchors > 0 {
-        row(ui, "Floor with a good position:", format!("{:.0}%", r.coverage * 100.0), r.coverage >= 0.95);
+        row(ui, &format!("Floor with a usable position (95% within {}):", dist(r.target_m * 3.0)), format!("{:.0}%", r.coverage * 100.0), r.coverage >= 0.95);
+        if r.reachable_coverage < 0.95 {
+            row(ui, "Most these mounting points can reach:", format!("{:.0}%", r.reachable_coverage * 100.0), false);
+        }
     }
 
     // What to do.
@@ -1855,4 +2093,9 @@ fn deploy_result(ui: &mut egui::Ui, r: &super::deploy::DeployReport) {
             }
         });
     }
+}
+
+/// "UWB anchor" -> "UWB anchors".
+fn plural(label: &str) -> String {
+    format!("{label}s")
 }

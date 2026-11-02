@@ -8,6 +8,7 @@ pub mod parts;
 pub mod persist;
 pub mod ports;
 pub mod recipes;
+pub mod reroute;
 pub mod route;
 pub mod sim;
 pub mod tools;
@@ -36,6 +37,7 @@ impl Plugin for PlantPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Links>()
             .init_resource::<Plant>()
+            .init_resource::<reroute::Rerouting>()
             .init_resource::<persist::Hook>()
             .init_resource::<view::Liquids>()
             .init_gizmo_group::<view::FlowGizmos>()
@@ -50,6 +52,7 @@ impl Plugin for PlantPlugin {
                     sim::step.after(crate::scene::apply_actions).before(crate::scene::apply_joints).before(crate::undo::undo_system),
                     sim::keep_on_belts.after(sim::step).after(crate::scene::gravity),
                     view::sync_liquid.after(sim::step),
+                    reroute::reroute_dropped.after(crate::scene::gravity).before(crate::undo::undo_system),
                 ),
             )
             .add_systems(PostUpdate, view::draw.after(TransformSystems::Propagate))

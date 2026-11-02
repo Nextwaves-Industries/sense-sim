@@ -199,7 +199,7 @@ pub fn mesh_axis(fixed: &[f64], lo: f64, hi: f64, max_cell: f64, ratio: f64) -> 
     }
     // Size of the smallest cell touching each fixed line (fixed spacing near it).
     let mut out = vec![f[0]];
-    let near: Vec<f64> = (0..f.len())
+    let mut near: Vec<f64> = (0..f.len())
         .map(|i| {
             let l = if i > 0 { f[i] - f[i - 1] } else { f64::MAX };
             let r = if i + 1 < f.len() { f[i + 1] - f[i] } else { f64::MAX };
@@ -208,37 +208,59 @@ pub fn mesh_axis(fixed: &[f64], lo: f64, hi: f64, max_cell: f64, ratio: f64) -> 
         .collect();
     for i in 0..f.len() - 1 {
         let (a, b) = (f[i], f[i + 1]);
-        let gap = b - a;
-        if gap <= max_cell * 1.0001 {
-            out.push(b);
-            continue;
-        }
-        // Grow from both ends towards max_cell, then fill the middle evenly.
-        let (mut left, mut right) = (vec![], vec![]);
-        let (mut sl, mut sr) = (near[i], near[i + 1]);
-        let (mut pa, mut pb) = (a, b);
-        loop {
-            sl = (sl * ratio).min(max_cell);
-            sr = (sr * ratio).min(max_cell);
-            if pb - pa <= sl + sr || (sl >= max_cell && sr >= max_cell) {
-                break;
-            }
-            pa += sl;
-            pb -= sr;
-            left.push(pa);
-            right.push(pb);
-        }
-        let rest = pb - pa;
-        // Tolerance: a gap of exactly k cells (rounding aside) stays k cells.
-        let n = (rest / max_cell - 1e-6).ceil().max(1.0) as usize;
-        out.extend(left);
-        for k in 1..n {
-            out.push(pa + rest * k as f64 / n as f64);
-        }
-        out.extend(right.into_iter().rev());
+        out.extend(fill_gap(a, b, near[i], near[i + 1], max_cell, ratio));
+        // The next gap has to grow from the cell this one really ended on.
+        near[i + 1] = near[i + 1].min(b - out[out.len() - 1]);
         out.push(b);
     }
     out
+}
+
+/// Lines inside a gap, so no cell exceeds `max_cell` and each grows from its neighbour by
+/// at most `ratio`: `ca` and `cb` are the finest cells touching its two ends. It steps from
+/// the finer end towards `max_cell`, then fills what's left evenly.
+fn fill_gap(a: f64, b: f64, ca: f64, cb: f64, max_cell: f64, ratio: f64) -> Vec<f64> {
+    let (mut pa, mut pb, mut sl, mut sr) = (a, b, ca, cb);
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut middle = Vec::new();
+    for _ in 0..1024 {
+        let rest = pb - pa;
+        let (nl, nr) = ((sl * ratio).min(max_cell), (sr * ratio).min(max_cell));
+        if rest <= nl.min(nr) * 1.0001 {
+            break;
+        }
+        if sl >= max_cell * 0.9999 && sr >= max_cell * 0.9999 {
+            // Barely over one cell would halve into cells too small beside full ones:
+            // take a full neighbour in and share it out.
+            if rest < ratio * max_cell {
+                if left.pop().is_some() {
+                    pa = left.last().copied().unwrap_or(a);
+                } else if right.pop().is_some() {
+                    pb = right.last().copied().unwrap_or(b);
+                }
+            }
+            let rest = pb - pa;
+            // Tolerance: a gap of exactly k cells (rounding aside) stays k cells.
+            let n = (rest / max_cell - 1e-6).ceil().max(1.0) as usize;
+            middle = (1..n).map(|k| pa + rest * k as f64 / n as f64).collect();
+            break;
+        }
+        // Two equal cells rather than leaving a sliver.
+        if sl <= sr {
+            let step = if rest < 2.0 * nl { rest / 2.0 } else { nl };
+            pa += step;
+            left.push(pa);
+            sl = step;
+        } else {
+            let step = if rest < 2.0 * nr { rest / 2.0 } else { nr };
+            pb -= step;
+            right.push(pb);
+            sr = step;
+        }
+    }
+    left.extend(middle);
+    left.extend(right.into_iter().rev());
+    left
 }
 
 /// Builds the three mesh axes for a domain, keeping every primitive edge.
@@ -296,6 +318,20 @@ mod tests {
         for w in cells.windows(2) {
             let r = w[1].max(w[0]) / w[1].min(w[0]);
             assert!(r < 1.6, "ratio {r}");
+        }
+    }
+
+    #[test]
+    fn mesh_grades_a_gap_no_wider_than_a_cell() {
+        // A 0.4 mm feature beside a 10 mm gap, with cells of up to 12 mm: the audit's 31:1.
+        let m = mesh_axis(&[0.0, 0.0004, 0.0104], -0.05, 0.05, 0.012, 1.4);
+        for e in [0.0, 0.0004, 0.0104] {
+            assert!(m.iter().any(|x| (x - e).abs() < 1e-12), "edge {e} missing");
+        }
+        let cells: Vec<f64> = m.windows(2).map(|w| w[1] - w[0]).collect();
+        for w in cells.windows(2) {
+            let r = w[1].max(w[0]) / w[1].min(w[0]);
+            assert!(r < 1.6, "ratio {r}: {cells:?}");
         }
     }
 

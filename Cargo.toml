@@ -1,6 +1,6 @@
 [package]
 name = "sense_sim"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 description = "Sense Sim - SimReady USD asset viewer and scene builder"
 
@@ -8,7 +8,18 @@ description = "Sense Sim - SimReady USD asset viewer and scene builder"
 name = "SenseSim"
 path = "src/main.rs"
 
+[workspace]
+members = ["crates/antenna_core", "crates/proof", "crates/ifc"]
+
+[features]
+default = ["antenna-studio"]
+# Antenna Studio: the antenna design workspace (see src/antenna).
+antenna-studio = []
+
 [dependencies]
+antenna_core = { path = "crates/antenna_core" }
+ifc = { path = "crates/ifc" }
+proof = { path = "crates/proof" }
 bevy = "0.20"
 bevy_egui = "0.43"
 openusd = { version = "0.8", features = ["mmap"] }
@@ -32,6 +43,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["fancy-re
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 kamadak-exif = "0.6"
+knowledge = { path = "crates/knowledge" }
 
 [dev-dependencies]
 resvg = "0.49"
@@ -44,6 +56,11 @@ opt-level = 1
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+# A workspace member, so the rule above misses it, and its solvers are the slow part.
+[profile.dev.package.antenna_core]
 opt-level = 3
 debug = false
 

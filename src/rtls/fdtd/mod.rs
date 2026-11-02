@@ -69,14 +69,49 @@ pub struct Slice {
     pub frames: Vec<Vec<f32>>,
 }
 
+/// How an openEMS run ended.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RunEnd {
+    /// It hit the step limit with the energy still above the end criterion.
+    pub truncated: bool,
+    /// The last energy the solver reported (dB, ≤ 0).
+    pub energy_db: Option<f64>,
+}
+
 pub struct AntennaResult {
     pub design: Design,
     pub sweep: Sweep,
     pub pattern: Option<Pattern>,
     pub slice: Option<Slice>,
+    /// Radiated over accepted power at the band centre, with the pattern.
+    pub efficiency: Option<f64>,
+    pub run: RunEnd,
     pub cells: u64,
     pub seconds: f64,
     pub dir: PathBuf,
+}
+
+/// Radiated power as far as a fit can be trusted: above this the transform and the port
+/// disagree, and the number says more about them than about the antenna.
+pub const MAX_EFFICIENCY: f64 = 1.05;
+
+impl AntennaResult {
+    /// Gain (dB) to add to directivity for the planner, or why it has none to give.
+    pub fn efficiency_db(&self) -> Result<f64, String> {
+        match self.efficiency {
+            Some(e) if e > 0.0 && e <= MAX_EFFICIENCY => Ok(10.0 * e.min(1.0).log10()),
+            Some(e) => Err(format!("its efficiency came out at {:.0} %, which isn't physical: check the run before using it", e * 100.0)),
+            None => Err("this run has no efficiency to give".to_string()),
+        }
+    }
+
+    /// What the planner adds to a link, by direction: directivity is what a lossless
+    /// antenna would do, so its losses come off here.
+    pub fn planner_gain(&self) -> Result<Vec<Vec<f32>>, String> {
+        let p = self.pattern.as_ref().ok_or("this run has no pattern")?;
+        let loss = self.efficiency_db()?;
+        Ok(p.d.iter().map(|row| row.iter().map(|v| (*v + loss) as f32).collect()).collect())
+    }
 }
 
 pub struct RegionResult {
@@ -88,6 +123,8 @@ pub struct RegionResult {
     pub slice: Option<Slice>,
     /// Every field plane of the run (slice, vertical cut, levels), on one colour scale.
     pub planes: Vec<Slice>,
+    /// Either run hit the step limit before its energy had decayed.
+    pub truncated: bool,
     pub cells: u64,
     pub seconds: f64,
     pub dir: PathBuf,
@@ -102,6 +139,8 @@ pub struct ScenePreview {
     pub txs: usize,
     /// Of those, how many an earlier run already covers (no re-simulation).
     pub reused: usize,
+    /// Why this scene can't be run at all.
+    pub problem: Option<String>,
 }
 
 #[derive(Default)]
@@ -219,7 +258,7 @@ impl Fdtd {
             let t0 = Instant::now();
             let sim = design.sim();
             let dir = job_dir("antenna")?;
-            run(ctx, &exe, &dir, &sim, "Antenna")?;
+            let end = run(ctx, &exe, &dir, &sim, "Antenna")?;
             ctx.set(Status::Busy("S-parameters…".into(), -1.0));
             let (fa, fb) = design.band.sweep();
             let sweep = Sweep::read(&dir, [design.port_ohm(), 50.0], false, post::linspace(fa, fb, 301))?;
@@ -233,7 +272,9 @@ impl Fdtd {
                 }
             };
             let slice = read_slice(&dir, f).inspect_err(|e| ctx.log(format!("No field slice: {e:#}"))).ok();
-            let res = AntennaResult { design, sweep, pattern, slice, cells: sim.cells(), seconds: t0.elapsed().as_secs_f64(), dir };
+            let accepted = post::port_accepted_power(&dir, 1, design.port_ohm(), &[f])?[0];
+            let efficiency = pattern.as_ref().map(|p| p.p_rad / accepted).filter(|e| e.is_finite());
+            let res = AntennaResult { design, sweep, pattern, slice, efficiency, run: end, cells: sim.cells(), seconds: t0.elapsed().as_secs_f64(), dir };
             ctx.shared.lock().unwrap().antenna = Some(Arc::new(res));
             Ok(())
         });
@@ -249,8 +290,8 @@ impl Fdtd {
             let dir = job_dir("s21")?;
             let free_dir = dir.join("free");
             std::fs::create_dir_all(&free_dir)?;
-            run(ctx, &exe, &dir, &with, "Through the object (1/2)")?;
-            run(ctx, &exe, &free_dir, &free, "Free space (2/2)")?;
+            let end_with = run(ctx, &exe, &dir, &with, "Through the object (1/2)")?;
+            let end_free = run(ctx, &exe, &free_dir, &free, "Free space (2/2)")?;
             ctx.set(Status::Busy("S-parameters…".into(), -1.0));
             let f0 = req.band.center();
             let freqs = post::linspace(f0 * 0.85, f0 * 1.15, 201);
@@ -266,6 +307,7 @@ impl Fdtd {
                 free: free_s,
                 slice,
                 planes,
+                truncated: end_with.truncated || end_free.truncated,
                 cells: with.cells(),
                 seconds: t0.elapsed().as_secs_f64(),
                 dir,
@@ -313,9 +355,9 @@ impl Fdtd {
                 }
                 let d = dir.join(format!("tx{i}"));
                 std::fs::create_dir_all(&d)?;
-                run(ctx, &exe, &d, sim, &format!("{} ({}/{n})", tx.name, i + 1))?;
+                let end = run(ctx, &exe, &d, sim, &format!("{} ({}/{n})", tx.name, i + 1))?;
                 ctx.set(Status::Busy(format!("{}: field planes…", tx.name), -1.0));
-                per_tx.push(scene::read_tx(&d, &plan, req.band, tx.clone(), key)?);
+                per_tx.push(scene::TxField { run: end, ..scene::read_tx(&d, &plan, req.band, tx.clone(), key)? });
                 simulated += 1;
             }
             let res = scene::SceneResult {
@@ -444,9 +486,19 @@ fn install(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// openEMS says this on stderr when it runs out of steps before the end criterion.
+fn says_truncated(stderr: &str) -> bool {
+    stderr.contains("Max. number of timesteps was reached")
+}
+
+/// The dB figure at the end of a progress line: "... Energy: ~3.7e-20 (-12.34dB)".
+fn energy_db_of(line: &str) -> Option<f64> {
+    line.rsplit('(').next()?.trim_end_matches(')').trim_end_matches("dB").replace(' ', "").parse().ok()
+}
+
 /// Writes `sim.xml` into `dir` and runs openEMS there, reporting progress from
 /// its energy decay towards the end criterion.
-fn run(ctx: &Ctx, exe: &Path, dir: &Path, sim: &csx::Sim, label: &str) -> Result<()> {
+fn run(ctx: &Ctx, exe: &Path, dir: &Path, sim: &csx::Sim, label: &str) -> Result<RunEnd> {
     std::fs::write(dir.join("sim.xml"), sim.to_xml())?;
     let target_db = -10.0 * sim.end_criteria.log10();
     ctx.log(format!("{label}: {} cells, est. {:.0} s", sim.cells(), sim.estimate_s()));
@@ -461,26 +513,29 @@ fn run(ctx: &Ctx, exe: &Path, dir: &Path, sim: &csx::Sim, label: &str) -> Result
     let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("no stdout"))?;
     let stderr = child.stderr.take();
     *ctx.child.lock().unwrap() = Some(child);
-    if let Some(mut e) = stderr {
-        let shared = ctx.shared.clone();
+    // Read to the end on the side, so a full pipe can't stall the solver. Joined below.
+    let stderr = stderr.map(|mut e| {
         std::thread::spawn(move || {
             let mut s = String::new();
             let _ = e.read_to_string(&mut s);
-            if !s.trim().is_empty() {
-                shared.lock().unwrap().log.push_back(s.trim().to_string());
-            }
-        });
-    }
+            s
+        })
+    });
     let mut last_err = String::new();
+    let mut energy_db = None;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         let l = line.trim();
         if l.contains("Timestep:") {
             // "[@ 12s] Timestep: 117 || Speed: 44.2 MC/s (…) || Energy: ~3.7e-20 (-12.34dB)"
-            let db = l.rsplit('(').next().and_then(|s| s.trim_end_matches(')').trim_end_matches("dB").replace(' ', "").parse::<f64>().ok()).unwrap_or(0.0);
+            let db = energy_db_of(l);
+            energy_db = db.or(energy_db);
+            let db = db.unwrap_or(0.0);
             let step = l.split("Timestep:").nth(1).and_then(|s| s.split("||").next()).map(|s| s.trim().to_string()).unwrap_or_default();
             let speed = l.split("Speed:").nth(1).and_then(|s| s.split('(').next()).map(|s| s.trim().to_string()).unwrap_or_default();
-            let p = (-db / target_db).clamp(0.0, 1.0) as f32;
+            // The run ends on the energy or the step limit, whichever comes first.
+            let steps_done = step.parse::<f64>().map_or(0.0, |s| s / sim.max_timesteps.max(1) as f64);
+            let p = (-db / target_db).max(steps_done).clamp(0.0, 1.0) as f32;
             ctx.set(Status::Busy(format!("{label}: timestep {step} · {speed} · energy {db:.0} of -{target_db:.0} dB"), p));
         } else if l.to_ascii_lowercase().contains("error") {
             last_err = l.to_string();
@@ -490,11 +545,20 @@ fn run(ctx: &Ctx, exe: &Path, dir: &Path, sim: &csx::Sim, label: &str) -> Result
         }
     }
     let status = ctx.child.lock().unwrap().take().map(|mut c| c.wait());
+    let errors = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
+    let errors = errors.trim();
+    if !errors.is_empty() {
+        ctx.log(format!("{label}: {errors}"));
+    }
     if ctx.cancelled() {
         bail!("cancelled");
     }
+    let truncated = says_truncated(errors);
+    if truncated {
+        ctx.log(format!("{label}: stopped at the step limit of {} before the energy reached -{target_db:.0} dB", sim.max_timesteps));
+    }
     match status {
-        Some(Ok(s)) if s.success() => Ok(()),
+        Some(Ok(s)) if s.success() => Ok(RunEnd { truncated, energy_db }),
         Some(Ok(s)) => bail!("openEMS exited with {s}{}", if last_err.is_empty() { String::new() } else { format!(": {last_err}") }),
         Some(Err(e)) => Err(e.into()),
         None => bail!("openEMS was stopped"),
@@ -751,6 +815,12 @@ fn world_bounds(o: &crate::scene::PlacedObject, t: &Transform) -> (Vec3, Vec3) {
     })
 }
 
+/// What radio sees an object as: what someone stated first (a BIM file, `site_set_material`),
+/// then the guess from its asset name. The same lookup as the ray model's.
+fn radio_of(name: &str, asset: &Path) -> (crate::rtls::radio::Material, f32) {
+    crate::rtls::radio::object_material(name).unwrap_or_else(|| crate::rtls::radio::obstruction_of_asset(asset))
+}
+
 type ObjectQuery<'w, 's> = Query<'w, 's, (Entity, &'static crate::scene::PlacedObject, &'static Transform)>;
 type PartQuery<'w, 's> = Query<'w, 's, (&'static crate::scene::PartOf, &'static crate::scene::PartBvh, &'static GlobalTransform)>;
 
@@ -760,8 +830,13 @@ fn scene_objects(objects: &ObjectQuery, parts: &PartQuery, with_parts: bool) -> 
         .iter()
         .map(|(_, o, t)| {
             let (min, max) = world_bounds(o, t);
-            let (material, weight) = crate::rtls::radio::obstruction_of_asset(&o.asset);
-            region::SceneObj { name: o.name.clone(), material, weight, parts: Vec::new(), min, max }
+            let (material, weight) = radio_of(&o.name, &o.asset);
+            // Same id and bays as the ray model, so the same bays are empty in both.
+            let fill = crate::rtls::radio::SiteConditions::current().rack_fill;
+            let is_rack = material == crate::rtls::radio::Material::Metal && crate::rtls::radio::is_rack(&o.asset);
+            let edge = min - Vec3::splat(0.02);
+            let rack = is_rack.then_some((edge.x.to_bits() as u64 ^ ((edge.z.to_bits() as u64) << 32), fill));
+            region::SceneObj { name: o.name.clone(), material, weight, parts: Vec::new(), min, max, rack }
         })
         .collect();
     if with_parts {
@@ -775,26 +850,41 @@ fn scene_objects(objects: &ObjectQuery, parts: &PartQuery, with_parts: bool) -> 
     objs
 }
 
+/// dB the floor map charges a typical wall on this band's technology.
+fn wall_db_of(band: antenna::Band, profiles: &crate::rtls::device::Profiles) -> f32 {
+    match ui::band_tech(band) {
+        // `radio::uwb_rx_power`.
+        Tech::Uwb => 6.0,
+        t => profiles.default_for(t.infra()).map_or(6.0, |p| p.wall_loss_db),
+    }
+}
+
 /// Builds the S21 job from the scene once the UI asked for it.
-pub fn collect_region(mut fdtd: ResMut<Fdtd>, objects: ObjectQuery, parts: PartQuery) {
+pub fn collect_region(mut fdtd: ResMut<Fdtd>, objects: ObjectQuery, parts: PartQuery, profiles: Res<crate::rtls::device::Profiles>) {
     let Some((band, quality, target)) = fdtd.region_requested.take() else { return };
     let Ok((_, tobj, tt)) = objects.get(target) else {
         fdtd.shared.lock().unwrap().status = Some(Status::Failed("Select a scene object (wall, rack, door…) first".into()));
         return;
     };
     let (tmin, tmax) = world_bounds(tobj, tt);
-    let req = region::Request { band, quality, target: tobj.name.clone(), target_min: tmin, target_max: tmax, objects: scene_objects(&objects, &parts, true) };
+    let req = region::Request { band, quality, target: tobj.name.clone(), target_min: tmin, target_max: tmax, objects: scene_objects(&objects, &parts, true), wall_db: wall_db_of(band, &profiles) };
     fdtd.run_region(req);
 }
 
-/// The band a technology's infrastructure transmits on (UWB: its channel).
-fn band_of(tech: Tech, prof: Option<&crate::rtls::device::Profile>) -> antenna::Band {
-    match tech {
-        Tech::Uwb if prof.is_some_and(|p| p.freq_mhz > 7200.0) => antenna::Band::Uwb9,
-        Tech::Uwb => antenna::Band::Uwb5,
-        Tech::Ble => antenna::Band::Ble,
-        Tech::Rfid => antenna::Band::Rfid,
-    }
+/// The band a device transmits on, from its profile. A run at another frequency would
+/// get every number in the map wrong, so one outside every band isn't run.
+fn band_of(tech: Tech, prof: Option<&crate::rtls::device::Profile>) -> Result<antenna::Band, String> {
+    let Some(p) = prof else {
+        return Ok(match tech {
+            Tech::Uwb => antenna::Band::Uwb5,
+            Tech::Ble | Tech::Wifi => antenna::Band::Ble,
+            Tech::Rfid => antenna::Band::Rfid,
+        });
+    };
+    antenna::Band::at_mhz(p.freq_mhz).ok_or_else(|| {
+        let known: Vec<&str> = antenna::Band::ALL.iter().map(|b| b.label()).collect();
+        format!("{} at {:.3} GHz: no simulated band covers it (only {})", tech.label(), p.freq_mhz / 1000.0, known.join(", "))
+    })
 }
 
 /// Builds the whole-scene job once the UI asked for it, and while the
@@ -822,7 +912,7 @@ pub fn collect_scene(
     let tag = crate::rtls::planning::tag_profile(&profiles, tech);
     let tag_gain = ants.tag_gain_unaimed(None, &tag);
     let mut txs = Vec::new();
-    let mut band_prof = None;
+    let mut bands: Vec<Result<antenna::Band, String>> = Vec::new();
     for (e, d, t) in &devices {
         if !d.enabled || d.kind != tech.infra() {
             continue;
@@ -846,16 +936,26 @@ pub fn collect_scene(
         let rx_offset_db = crate::rtls::planning::fdtd_rx_dbm(tech, &prof, &tag, tag_gain, gain_fix_db);
         let (wall_db, exponent) = match tech {
             Tech::Uwb => (6.0, None),
-            Tech::Ble => (prof.wall_loss_db, Some(prof.path_loss_exp)),
+            Tech::Ble | Tech::Wifi => (prof.wall_loss_db, Some(prof.path_loss_exp)),
             Tech::Rfid => (prof.wall_loss_db, None),
         };
-        txs.push(scene::Tx { entity: e, name: d.id.clone(), pos: t.translation, fwd, directional, gain_fix_db, rx_offset_db, wall_db, exponent });
-        band_prof.get_or_insert(prof);
+        // The pattern only when it's about to be used: this runs every second for the estimate.
+        let gain_fix = requested.is_some().then(|| Arc::new(scene::GainFix::sample(|dir| ants.gain(choice, tech, true, &prof, fwd, dir), directional, fwd)));
+        txs.push(scene::Tx { entity: e, name: d.id.clone(), pos: t.translation, fwd, directional, gain_fix_db, gain_fix, rx_offset_db, wall_db, exponent });
+        bands.push(band_of(tech, Some(&prof)));
     }
+    if bands.is_empty() {
+        bands.push(band_of(tech, None));
+    }
+    let band = bands.iter().find_map(|b| b.as_ref().ok().copied()).unwrap_or(antenna::Band::Ble);
+    // One run is one band: every transmitter must be on it.
+    let band_problem = bands.iter().find_map(|b| b.as_ref().err().cloned()).or_else(|| {
+        bands.iter().flatten().any(|b| *b != band).then(|| format!("these {} use more than one band: one run simulates one, so give them the same band", tech.label()))
+    });
     let (lo, hi) = crate::rtls::planning::area(&placed, &devices);
     let req = scene::SceneRequest {
         tech,
-        band: band_of(tech, band_prof.as_ref()),
+        band,
         quality,
         tag_height,
         lo,
@@ -864,16 +964,20 @@ pub fn collect_scene(
         txs,
     };
     if requested.is_some() {
-        fdtd.run_scene(req);
+        match band_problem {
+            Some(why) => fdtd.shared.lock().unwrap().status = Some(Status::Failed(why)),
+            None => fdtd.run_scene(req),
+        }
         return;
     }
     *next_preview = time.elapsed_secs_f64() + 1.0;
     let plan = scene::plan(&req);
+    let problem = band_problem.or_else(|| scene::tx_problem(&req, &plan));
     // Unchanged transmitters of the last run are reused; a moved one is not.
     let reused = fdtd.scene(tech).map_or(0, |s| {
         req.txs.iter().filter(|t| s.plan.f_sim == plan.f_sim && s.plan.lo == plan.lo && s.plan.hi == plan.hi && s.per_tx.iter().any(|f| (f.tx.pos - t.pos).length() < 0.01 && f.tx.directional == t.directional)).count()
     });
-    fdtd.scene_preview = Some(ScenePreview { tech, band: req.band, plan, txs: req.txs.len(), reused });
+    fdtd.scene_preview = Some(ScenePreview { tech, band: req.band, plan, txs: req.txs.len(), reused, problem });
 }
 
 /// Fits the ray model's material losses to each new whole-scene result:
@@ -919,7 +1023,8 @@ pub fn fit_scene(fdtd: Res<Fdtd>, parts: crate::rtls::sim::OccluderParts, object
                 }
             }
         }
-        let current = crate::rtls::radio::Material::ALL.map(|m| crate::rtls::radio::MaterialCal::scales(m).0);
+        let band = crate::rtls::radio::CalBand::of_mhz(f_mhz as f32);
+        let current = crate::rtls::radio::Material::ALL.map(|m| crate::rtls::radio::MaterialCal::scales_in(m, band).0);
         let fit = scene::fit_calibration(&samples, current).map(Arc::new);
         fdtd.shared.lock().unwrap().fits.push((res.dir.clone(), fit));
     }
@@ -928,6 +1033,71 @@ pub fn fit_scene(fdtd: Res<Fdtd>, parts: crate::rtls::sim::OccluderParts, object
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stated_materials_reach_the_solver() {
+        let asset = std::path::Path::new("C:/SenseSim/structures/wall/4.00x3.00x0.20/wall.usda");
+        crate::rtls::radio::set_object_material("fdtd_test_partition", Some((crate::rtls::radio::Material::Thin, 0.15)));
+        let got = radio_of("fdtd_test_partition", asset);
+        crate::rtls::radio::set_object_material("fdtd_test_partition", None);
+        assert_eq!(got, (crate::rtls::radio::Material::Thin, 0.15));
+        assert_eq!(radio_of("fdtd_test_other", asset).0, crate::rtls::radio::Material::Concrete);
+    }
+
+    #[test]
+    fn wifi_at_5_ghz_is_not_simulated_at_2_ghz() {
+        let at = |t: Tech, f: f32| band_of(t, Some(&crate::rtls::device::Profile { freq_mhz: f, ..Default::default() }));
+        let b = at(Tech::Wifi, 5180.0).unwrap();
+        assert_eq!(b, antenna::Band::Wifi5);
+        assert!((b.center() / 5.18e9 - 1.0).abs() < 0.015);
+        assert_eq!(at(Tech::Wifi, 2437.0).unwrap(), antenna::Band::Ble);
+        assert_eq!(at(Tech::Uwb, 6489.6).unwrap(), antenna::Band::Uwb5);
+        assert_eq!(at(Tech::Uwb, 7987.2).unwrap(), antenna::Band::Uwb9);
+        assert_eq!(at(Tech::Rfid, 920.5).unwrap(), antenna::Band::Rfid);
+        // Nothing here simulates these, so they're refused rather than moved.
+        assert!(at(Tech::Uwb, 3993.6).unwrap_err().contains("no simulated band"));
+        assert!(at(Tech::Wifi, 5825.0).is_err());
+        assert_eq!(band_of(Tech::Wifi, None).unwrap(), antenna::Band::Ble);
+    }
+
+    #[test]
+    fn every_infrastructure_profile_shipped_has_a_band() {
+        let list: Vec<crate::rtls::device::Profile> = serde_json::from_str(include_str!("../../../assets/devices/generic.json")).unwrap();
+        for t in Tech::ALL {
+            for p in list.iter().filter(|p| p.kind == t.infra()) {
+                assert!(band_of(t, Some(p)).is_ok(), "{t:?} at {}", p.freq_mhz);
+            }
+        }
+    }
+
+    #[test]
+    fn a_step_limit_is_read_from_stderr() {
+        // As the openEMS v0.37 binary prints it.
+        assert!(says_truncated("RunFDTD: Warning: Max. number of timesteps was reached before the end-criteria of -50dB was reached... \nYou may want to choose a higher number of max. timesteps... "));
+        assert!(!says_truncated("RunFDTD: end-criteria of -50dB reached"));
+        assert!(!says_truncated(""));
+    }
+
+    #[test]
+    fn the_energy_is_read_from_a_progress_line() {
+        assert_eq!(energy_db_of("[@ 12s] Timestep: 117 || Speed: 44.2 MC/s (2.1e-3 s/TS) || Energy: ~3.7e-20 (-12.34dB)"), Some(-12.34));
+        assert_eq!(energy_db_of("no figure here"), None);
+    }
+
+    #[test]
+    fn an_impossible_efficiency_gives_the_planner_nothing() {
+        let with = |e: Option<f64>| AntennaResult { design: Design::tuned(antenna::Kind::Patch, antenna::Band::Ble, antenna::Quality::Fast), sweep: Default::default(), pattern: None, slice: None, efficiency: e, run: Default::default(), cells: 0, seconds: 0.0, dir: Default::default() };
+        // The README's patch: 44 % takes 3.6 dB off its 5.75 dBi.
+        assert!((with(Some(0.44)).efficiency_db().unwrap() + 3.57).abs() < 0.01);
+        assert_eq!(with(Some(1.03)).efficiency_db().unwrap(), 0.0, "numerics, not gain from nowhere");
+        assert!(with(Some(1.4)).efficiency_db().is_err());
+        assert!(with(Some(0.0)).efficiency_db().is_err());
+        assert!(with(None).efficiency_db().is_err());
+        // What the planner ends up adding to a link, not the lossless figure.
+        let patch = AntennaResult { pattern: Some(Pattern { d: vec![vec![5.75]], ..Default::default() }), ..with(Some(0.44)) };
+        assert!((patch.planner_gain().unwrap()[0][0] - 2.18).abs() < 0.01);
+        assert!(AntennaResult { pattern: Some(Pattern::default()), ..with(Some(1.4)) }.planner_gain().is_err());
+    }
 
     /// Runs the real solver (needs openEMS installed): `cargo test --release -- --ignored fdtd`.
     /// S21 through a 20 cm concrete wall at UHF RFID (needs openEMS): the
@@ -946,8 +1116,9 @@ mod tests {
             parts: vec![(Arc::new(crate::bvh::Bvh::new(&pos, &idx)), bevy::math::Affine3A::IDENTITY)],
             min: a,
             max: b,
+            rack: None,
         };
-        let req = region::Request { band: antenna::Band::Rfid, quality: antenna::Quality::Fast, target: "wall_1".into(), target_min: a, target_max: b, objects: vec![wall] };
+        let req = region::Request { band: antenna::Band::Rfid, quality: antenna::Quality::Fast, target: "wall_1".into(), target_min: a, target_max: b, objects: vec![wall], wall_db: 8.0 };
         let mut f = Fdtd::default();
         f.run_region(req);
         let t0 = Instant::now();
@@ -965,6 +1136,100 @@ mod tests {
         assert!(res.layout.region_max.y > 2.5 && res.layout.region_min.y < 0.05, "{:?} {:?}", res.layout.region_min, res.layout.region_max);
         assert_eq!(res.planes.len(), res.layout.planes.len(), "{:?}", f.log_tail(10));
         assert!(res.planes.iter().any(|p| p.du.y.abs() > 1.0 || p.dv.y.abs() > 1.0), "no vertical plane");
+        assert!(!res.truncated, "{:?}", f.log_tail(10));
+    }
+
+    /// S21 through 20 cm of concrete at UWB, the case the audit suspected reads the patch's
+    /// edges instead of the wall (needs openEMS): the same region with its cut edges inside
+    /// the domain and carried on through the absorbing boundary, against P.2040's slab.
+    #[test]
+    #[ignore]
+    fn fdtd_wall_uwb_edge_study() {
+        use crate::rtls::radio::Material;
+        let exe = exe().expect("openEMS installed");
+        let base = std::env::temp_dir().join(format!("sensesim_edge_study_{}", std::process::id()));
+        let w = solid("wall", Vec3::new(-2.0, 0.0, -0.1), Vec3::new(2.0, 3.0, 0.1), Material::Concrete);
+        let req = region::Request { band: antenna::Band::Uwb5, quality: antenna::Quality::Fast, target: w.name.clone(), target_min: w.min, target_max: w.max, objects: vec![w], wall_db: 6.0 };
+        let (with, free, l) = region::build(&req).unwrap();
+        assert!(l.shrunk);
+        let (lo, hi): (csx::P3, csx::P3) = {
+            let (a, b) = (region::to_sim(l.region_min), region::to_sim(l.region_max));
+            (std::array::from_fn(|k| a[k].min(b[k])), std::array::from_fn(|k| a[k].max(b[k])))
+        };
+        // The wall as it was: cut off at the region's edge, inside the domain.
+        let mut cut = with.clone();
+        for d in &mut cut.dielectrics {
+            for b in &mut d.boxes {
+                for k in 0..3 {
+                    b.min[k] = b.min[k].max(lo[k]);
+                    b.max[k] = b.max[k].min(hi[k] + l.cell);
+                }
+            }
+        }
+        let ctx = Ctx { shared: Arc::new(Mutex::new(Shared::default())), cancel: Arc::new(AtomicBool::new(false)), child: Arc::new(Mutex::new(None)) };
+        let f0 = req.band.center();
+        let freqs = post::linspace(f0 * 0.95, f0 * 1.05, 21);
+        let mut go = |name: &str, sim: &csx::Sim| {
+            let d = base.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            let t0 = Instant::now();
+            let end = run(&ctx, &exe, &d, sim, name).unwrap();
+            let s = Sweep::read(&d, [73.0, 73.0], true, freqs.clone()).unwrap();
+            let s21 = s.s21.unwrap();
+            let db: f64 = s21.iter().map(|v| Sweep::db(*v)).sum::<f64>() / s21.len() as f64;
+            eprintln!("{name}: {:.2} M cells, {:.0} s, truncated {}, S21 {db:.2} dB over the channel", sim.cells() as f64 / 1e6, t0.elapsed().as_secs_f64(), end.truncated);
+            db
+        };
+        let free_db = go("free", &free);
+        let cut_db = go("cut", &cut);
+        let onward_db = go("onward", &with);
+        let _ = std::fs::remove_dir_all(&base);
+        // Normal incidence on a lossy slab: attenuation plus the two interfaces.
+        let (eps, kappa) = region::electrical(Material::Concrete, f0).unwrap();
+        let alpha = kappa * 376.73 / (2.0 * eps.sqrt());
+        let slab = 8.686 * alpha * 0.2 + 20.0 * ((1.0 + eps.sqrt()).powi(2) / (4.0 * eps.sqrt())).log10();
+        eprintln!("cell {:.2} mm, region {:.3} × {:.3} m: loss with cut edges {:.1} dB, carried through {:.1} dB, slab estimate {slab:.1} dB", l.cell * 1e3, hi[0] - lo[0], hi[2] - lo[2], free_db - cut_db, free_db - onward_db);
+    }
+
+    /// The simulated reflector source against the pattern `GainFix` takes out (needs
+    /// openEMS): front, side and back at a few metres in an empty room.
+    #[test]
+    #[ignore]
+    fn fdtd_reflector_pattern_study() {
+        let at = Vec3::new(0.0, 1.2, 0.0);
+        let t = scene::Tx { directional: true, ..study_tx(at) };
+        let req = scene::SceneRequest { tech: Tech::Rfid, band: antenna::Band::Rfid, quality: antenna::Quality::Fast, tag_height: 1.2, lo: Vec2::new(-2.5, -2.5), hi: Vec2::new(2.5, 2.5), objects: Vec::new(), txs: vec![t.clone()] };
+        let mut f = Fdtd::default();
+        f.run_scene(req);
+        wait(&f, 3600);
+        let res = f.scene(Tech::Rfid).unwrap_or_else(|| panic!("no result: {:?} {:?}", f.status(), f.log_tail(10)));
+        let fr = res.plan.f_real / 1e6;
+        for (name, dir) in [("front", Vec3::X), ("45°", Vec3::new(0.707, 0.0, 0.707)), ("side", Vec3::Z), ("other side", Vec3::NEG_Z), ("back", Vec3::NEG_X)] {
+            let d = 2.0;
+            let l = res.link_db_at(0, at + dir * d).unwrap();
+            let gain = l + crate::rtls::solver::fspl_db(d as f64, fr) as f32;
+            eprintln!("{name}: {gain:.1} dBi from the field, {:.1} dBi modelled", scene::simulated_gain_db(true, t.fwd, dir));
+        }
+    }
+
+    /// The Positioning tab's FDTD patch (needs openEMS): what its substrate loss costs.
+    #[test]
+    #[ignore]
+    fn fdtd_patch_efficiency_end_to_end() {
+        let design = Design::tuned(antenna::Kind::Patch, antenna::Band::Ble, antenna::Quality::Fast);
+        let mut f = Fdtd::default();
+        f.run_antenna(design);
+        wait(&f, 1800);
+        let res = f.antenna().unwrap_or_else(|| panic!("no result: {:?} {:?}", f.status(), f.log_tail(10)));
+        let p = res.pattern.as_ref().expect("pattern");
+        let e = res.efficiency.expect("efficiency");
+        let db = res.efficiency_db().unwrap();
+        eprintln!("patch: directivity {:.2} dBi, efficiency {:.0} %, gain {:.2} dBi, {:.0} s, truncated {}", p.max_dbi, e * 100.0, p.max_dbi + db, res.seconds, res.run.truncated);
+        assert!(!res.run.truncated);
+        // A thin FR-4 patch loses most of its power in the substrate, and the gain the
+        // planner gets has to show it.
+        assert!((0.2..0.8).contains(&e), "efficiency {e}");
+        assert!(p.max_dbi + db < p.max_dbi - 1.0);
     }
 
     #[test]
@@ -988,6 +1253,10 @@ mod tests {
         // A dipole along z radiates broadside (θ ≈ 90°).
         assert!((p.max_dir.0 - 90.0).abs() <= 15.0, "max at {:?}", p.max_dir);
         assert!(res.slice.as_ref().is_some_and(|s| s.nu > 10 && s.nv > 10 && !s.frames.is_empty()));
+        // Nothing lossy in a metal dipole: the port's power should all come out as radiation.
+        let e = res.efficiency.expect("efficiency");
+        eprintln!("efficiency {:.1} %", e * 100.0);
+        assert!((0.9..1.1).contains(&e), "efficiency {e}");
     }
 
     fn wait(f: &Fdtd, secs: u64) {
@@ -995,6 +1264,128 @@ mod tests {
         while f.busy() && t0.elapsed().as_secs() < secs {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
+    }
+
+    fn solid(name: &str, a: Vec3, b: Vec3, m: crate::rtls::radio::Material) -> region::SceneObj {
+        let v = |x: bool, y: bool, z: bool| [if x { b.x } else { a.x }, if y { b.y } else { a.y }, if z { b.z } else { a.z }];
+        let pos: Vec<[f32; 3]> = (0..8).map(|i| v(i & 1 != 0, i & 2 != 0, i & 4 != 0)).collect();
+        let idx = [0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0, 6, 4, 1, 5, 7, 1, 7, 3];
+        region::SceneObj { name: name.into(), material: m, weight: m.weight(), parts: vec![(Arc::new(crate::bvh::Bvh::new(&pos, &idx)), bevy::math::Affine3A::IDENTITY)], min: a, max: b, rack: None }
+    }
+
+    fn study_tx(p: Vec3) -> scene::Tx {
+        scene::Tx { entity: Entity::PLACEHOLDER, name: "r1".into(), pos: p, fwd: Vec3::X, directional: false, gain_fix_db: 0.0, gain_fix: None, rx_offset_db: 0.0, wall_db: 8.0, exponent: None }
+    }
+
+    /// The stop level against a small room, for the trade-off in the report: how far each
+    /// level moves the floor map from a run that uses the whole planned window, what it
+    /// costs, and when the last probe sample falls. `needs openEMS`, tens of minutes:
+    /// `cargo test --bin SenseSim fdtd_scene_stop_study -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn fdtd_scene_stop_study() {
+        use crate::rtls::radio::Material;
+        let exe = exe().expect("openEMS installed");
+        let base = std::env::temp_dir().join(format!("sensesim_stop_study_{}", std::process::id()));
+        let shell = |lo: Vec2, hi: Vec2, h: f32, m: Material| {
+            vec![
+                solid("n", Vec3::new(lo.x, 0.0, lo.y), Vec3::new(hi.x, h, lo.y + 0.15), m),
+                solid("s", Vec3::new(lo.x, 0.0, hi.y - 0.15), Vec3::new(hi.x, h, hi.y), m),
+                solid("w", Vec3::new(lo.x, 0.0, lo.y), Vec3::new(lo.x + 0.15, h, hi.y), m),
+                solid("e", Vec3::new(hi.x - 0.15, 0.0, lo.y), Vec3::new(hi.x, h, hi.y), m),
+                solid("roof", Vec3::new(lo.x, h, lo.y), Vec3::new(hi.x, h + 0.15, hi.y), m),
+            ]
+        };
+        let small = (Vec2::new(-1.8, -1.5), Vec2::new(1.8, 1.5), Vec3::new(-1.1, 1.2, -0.6));
+        let long = (Vec2::new(-5.0, -2.0), Vec2::new(5.0, 2.0), Vec3::new(-4.5, 1.2, -1.5));
+        let divider = |a: Vec2, b: Vec2| solid("divider", Vec3::new(-0.1, 0.0, a.y), Vec3::new(0.1, 2.0, b.y), Material::Concrete);
+        let with_shell = |r: (Vec2, Vec2, Vec3), m: Material| {
+            let mut v = shell(r.0, r.1, 2.2, m);
+            v.push(divider(r.0, r.1));
+            v.push(solid("rack", Vec3::new(r.2.x + 0.5, 0.0, r.1.y - 0.8), Vec3::new(r.2.x + 0.9, 1.9, r.1.y - 0.3), Material::Metal));
+            v
+        };
+        // Open: the walls are the boundary. Closed: concrete all round, a slab and some steel
+        // keep energy in. Steel: the worst case for reverberation. Long: the audit's far corner.
+        let rooms = [
+            ("open", small, vec![divider(small.0, small.1)]),
+            ("closed", small, with_shell(small, Material::Concrete)),
+            ("steel", small, with_shell(small, Material::Metal)),
+            ("long", long, vec![divider(long.0, long.1)]),
+            ("long_closed", long, with_shell(long, Material::Concrete)),
+        ];
+        let only = std::env::var("STOP_STUDY_ROOMS").unwrap_or_default();
+        let levels = [1e-3, 1e-4, 1e-5, 1e-6, 1e-9];
+        for (room, (lo, hi, at), objects) in rooms {
+            if !only.is_empty() && !only.split(',').any(|r| r == room) {
+                continue;
+            }
+            let req = scene::SceneRequest {
+                tech: Tech::Rfid,
+                band: antenna::Band::Rfid,
+                quality: antenna::Quality::Fast,
+                tag_height: 1.2,
+                lo,
+                hi,
+                objects,
+                txs: vec![study_tx(at)],
+            };
+            let plan = scene::plan(&req);
+            let (sims, _) = scene::build(&req, &plan).unwrap();
+            let lambda_dt = plan.cell / (csx::C0 * 3f64.sqrt());
+            eprintln!("\n{room}: {:.2} M cells, cell {:.1} mm, planned window {:.1} ns, step cap {} ({:.1} ns)", plan.cells as f64 / 1e6, plan.cell * 1e3, plan.steps as f64 * lambda_dt * 1e9, sims[0].max_timesteps, sims[0].max_timesteps as f64 * lambda_dt * 1e9);
+            let mut results: Vec<(f64, f64, f64, scene::TxField)> = Vec::new();
+            for level in levels {
+                let dir = base.join(format!("{room}_{level:e}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                let mut sim = sims[0].clone();
+                sim.end_criteria = level;
+                let ctx = Ctx { shared: Arc::new(Mutex::new(Shared::default())), cancel: Arc::new(AtomicBool::new(false)), child: Arc::new(Mutex::new(None)) };
+                let t0 = Instant::now();
+                let end = run(&ctx, &exe, &dir, &sim, "study").unwrap();
+                let secs = t0.elapsed().as_secs_f64();
+                let (t, _) = post::read_probe(&dir.join("port_ut1")).unwrap();
+                let last = t[t.len() - 1];
+                let f = scene::read_tx(&dir, &plan, req.band, req.txs[0].clone(), 0).unwrap();
+                eprintln!("  stop {level:e}: {secs:.0} s, last probe {:.1} ns (needs {:.1}), {:.1} Gcell-steps, hit the step limit: {}", last * 1e9, plan.min_window_s() * 1e9, plan.cells as f64 * (last / lambda_dt) / 1e9, end.truncated);
+                results.push((level, secs, last, f));
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            let k = plan.levels.iter().enumerate().min_by(|a, b| (a.1 - 1.2).abs().total_cmp(&(b.1 - 1.2).abs())).unwrap().0;
+            let reference = results.last().unwrap().3.levels[k].clone();
+            // Past the divider, against everything in the room.
+            let behind = |i: usize| reference.u0 + i as f64 * reference.step > 0.15;
+            eprintln!("  vs the longest run (dB moved at tag height): stop | all floor mean/p95/max | behind the wall mean/p95/max | signed mean behind");
+            for (level, secs, last, f) in &results {
+                let pl = &f.levels[k];
+                let mut all = Vec::new();
+                let mut back = Vec::new();
+                let mut signed = 0.0f64;
+                for j in 0..pl.nv {
+                    for i in 0..pl.nu {
+                        let (a, b) = (pl.db[i + pl.nu * j], reference.db[i + pl.nu * j]);
+                        if !(a.is_finite() && b.is_finite()) {
+                            continue;
+                        }
+                        let d = (a - b) as f64;
+                        all.push(d.abs());
+                        if behind(i) {
+                            back.push(d.abs());
+                            signed += d;
+                        }
+                    }
+                }
+                let stat = |v: &mut Vec<f64>| {
+                    v.sort_by(f64::total_cmp);
+                    (v.iter().sum::<f64>() / v.len().max(1) as f64, v[(v.len() as f64 * 0.95) as usize], v[v.len() - 1])
+                };
+                let (am, ap, ax) = stat(&mut all);
+                let n = back.len().max(1) as f64;
+                let (bm, bp, bx) = stat(&mut back);
+                eprintln!("  {level:e} | {am:.2}/{ap:.2}/{ax:.2} | {bm:.2}/{bp:.2}/{bx:.2} | {:+.2} | {secs:.0} s, last {:.1} ns", signed / n, last * 1e9);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Whole scene at UHF RFID (needs openEMS): a 6 × 5 m room split by a
@@ -1015,6 +1406,7 @@ mod tests {
             parts: vec![(Arc::new(crate::bvh::Bvh::new(&pos, &idx)), bevy::math::Affine3A::IDENTITY)],
             min: a,
             max: b,
+            rack: None,
         };
         let tx = |name: &str, p: Vec3| scene::Tx {
             entity: Entity::PLACEHOLDER,
@@ -1023,6 +1415,7 @@ mod tests {
             fwd: Vec3::X,
             directional: false,
             gain_fix_db: 0.0,
+            gain_fix: None,
             rx_offset_db: 0.0,
             wall_db: 6.0,
             exponent: None,

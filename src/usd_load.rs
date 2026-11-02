@@ -697,7 +697,92 @@ fn build_mesh_parts(
     Ok(())
 }
 
+/// A recolored variant of an asset: `<variant>.usda` references the source for
+/// other USD tools, and this sidecar holds the look. Loading the variant loads
+/// the source and applies it.
+pub struct Overrides {
+    pub source: PathBuf,
+    color: Option<[f32; 3]>,
+    roughness: Option<f32>,
+    metallic: Option<f32>,
+    opacity: Option<f32>,
+    keep_texture: bool,
+}
+
+impl Overrides {
+    fn sidecar(path: &Path) -> PathBuf {
+        path.with_extension("look.json")
+    }
+
+    pub fn write(path: &Path, body: &serde_json::Value) -> std::io::Result<()> {
+        std::fs::write(Self::sidecar(path), body.to_string())
+    }
+
+    pub fn read(path: &Path) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(Self::sidecar(path)).ok()?).ok()?;
+        let num = |k: &str| v[k].as_f64().map(|x| x as f32);
+        let color = v["color"].as_array().filter(|a| a.len() == 3).map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.0) as f32));
+        Some(Self {
+            source: PathBuf::from(v["source"].as_str()?),
+            color,
+            roughness: num("roughness"),
+            metallic: num("metallic"),
+            opacity: num("opacity"),
+            keep_texture: v["keep_texture"].as_bool().unwrap_or(false),
+        })
+    }
+
+    fn apply(&self, l: &mut LoadedUsd) {
+        // Meshes with only display colors get a material to carry the look.
+        if l.parts.iter().any(|p| p.material.is_none()) {
+            let i = l.materials.len();
+            let first = l.parts.iter().find(|p| p.material.is_none()).and_then(|p| p.colors.as_ref()).and_then(|c| c.first());
+            let mut m = MaterialData { name: "look".into(), ..Default::default() };
+            if let Some(c) = first {
+                m.base_color = [c[0], c[1], c[2]];
+            }
+            l.materials.push(m);
+            for p in l.parts.iter_mut().filter(|p| p.material.is_none()) {
+                p.material = Some(i);
+                p.colors = None;
+            }
+        }
+        for m in &mut l.materials {
+            if let Some(c) = self.color {
+                if self.keep_texture && m.base_color_tex.is_some() {
+                    m.base_color = [0, 1, 2].map(|i| m.base_color[i] * c[i]);
+                } else {
+                    m.base_color = c;
+                    m.base_color_tex = None;
+                }
+            }
+            if let Some(r) = self.roughness {
+                m.roughness = r;
+                m.roughness_tex = None;
+            }
+            if let Some(v) = self.metallic {
+                m.metallic = v;
+                m.metallic_tex = None;
+            }
+            if let Some(o) = self.opacity {
+                m.opacity = o;
+                m.opacity_tex = None;
+                m.opacity_threshold = 0.0;
+            }
+        }
+    }
+}
+
 pub fn load(path: &Path) -> Result<LoadedUsd> {
+    if let Some(o) = Overrides::read(path) {
+        let mut l = load_stage(&o.source).with_context(|| format!("loading the source of {}", path.display()))?;
+        o.apply(&mut l);
+        return Ok(l);
+    }
+    load_stage(path)
+}
+
+fn load_stage(path: &Path) -> Result<LoadedUsd> {
     let path_str = path.to_string_lossy().replace('\\', "/");
     let stage = usd::Stage::builder()
         .schema_registry(openusd_schemas::schema_registry())

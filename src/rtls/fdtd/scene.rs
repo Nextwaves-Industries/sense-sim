@@ -9,11 +9,14 @@
 //! frequency that fits the cell budget, with the materials' εr and σ taken at
 //! the real band. Wall attenuation per metre (≈ σ·η/2 in low-loss media) does
 //! not depend on frequency and received power uses the real wavelength, so
-//! shadowing and the local-mean level hold; fading and diffraction happen at
-//! the simulated wavelength, which is why the link gain is averaged over a
-//! wavelength and over the channel.
+//! the local-mean level behind a wall roughly holds. Fading and diffraction
+//! happen at the simulated wavelength: the link gain is averaged over it and
+//! over the channel, but a shadow behind an edge comes out too strong
+//! (`ScenePlan::shadow_error_db`), so a run scaled too far can't feed the floor
+//! map or a calibration (`MAX_USABLE_SCALE`).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use bevy::math::{Vec2, Vec3};
@@ -23,7 +26,7 @@ use super::Slice;
 use super::antenna::{Band, Quality};
 use super::csx::{Bx, C0, Dielectric, Dump, DumpKind, P3, Sim, auto_mesh};
 use super::post;
-use super::region::{SceneObj, Voxels, electrical, to_sim, to_world, voxelise};
+use super::region::{SceneObj, Voxels, electrical, grid_dipole, to_sim, to_world, voxelise, worst_cells};
 use crate::rtls::planning::Tech;
 use crate::rtls::radio::Material;
 
@@ -37,6 +40,68 @@ pub const REFLECTOR_DBI: f32 = 7.0;
 const PAD_CELLS: usize = 10;
 /// Frequencies sampled over the channel, averaged (frequency diversity).
 const N_FREQS: usize = 5;
+/// Energy left when a run stops. See `fdtd_scene_stop_study`.
+pub const STOP_ENERGY: f64 = 1e-5;
+/// The most a run can be frequency-scaled and still feed the floor map or a calibration.
+/// A shadow reads 10·log10(scale) dB too strong per edge, so ×2 costs up to 3 dB: half
+/// a typical 6 dB wall per edge, and within the 4-6 dB shadowing the planner already
+/// allows for. Nothing above it has been benchmarked against an unscaled run.
+pub const MAX_USABLE_SCALE: f64 = 2.0;
+/// Scene height: above this a run costs too much and the source would leave the mesh.
+const MAX_TOP_M: f32 = 6.0;
+/// Under this inside a material the numerical phase error starts to matter.
+pub const MIN_CELLS_PER_LAMBDA: f64 = 10.0;
+/// A run that hit its step limit is fine with this much of its energy left (dB).
+const TRUNCATED_ENERGY_DB: f64 = -30.0;
+
+/// The device's antenna gain minus the simulated source's (dB) by direction, on a grid
+/// in the world: θ from +Y in 5° steps, φ around it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GainFix {
+    rows: Vec<Vec<f32>>,
+}
+
+impl GainFix {
+    pub fn sample(mut device_gain: impl FnMut(Vec3) -> f32, directional: bool, fwd: Vec3) -> Self {
+        let rows = (0..=36)
+            .map(|i| {
+                let th = (i as f32 * 5.0).to_radians();
+                (0..72)
+                    .map(|j| {
+                        let ph = (j as f32 * 5.0).to_radians();
+                        let d = Vec3::new(th.sin() * ph.cos(), th.cos(), th.sin() * ph.sin());
+                        device_gain(d) - simulated_gain_db(directional, fwd, d)
+                    })
+                    .collect()
+            })
+            .collect();
+        Self { rows }
+    }
+
+    pub fn at(&self, dir: Vec3) -> f32 {
+        let d = dir.normalize_or_zero();
+        let i = ((d.y.clamp(-1.0, 1.0).acos().to_degrees() / 5.0).round() as usize).min(self.rows.len() - 1);
+        let j = (d.z.atan2(d.x).to_degrees().rem_euclid(360.0) / 5.0).round() as usize % 72;
+        self.rows[i][j]
+    }
+}
+
+/// Gain (dBi) of the simulated source towards `dir`, for taking its pattern out of the
+/// field: a dipole, floored at -10 dB off its peak so the correction can't explode in its
+/// nulls, where multipath fills the field anyway. With a reflector, the image's array
+/// factor in front, down to what the small reflector really does at the sides and back:
+/// 7.0, -1.5 and -2.9 dBi in `fdtd_reflector_pattern_study`.
+pub fn simulated_gain_db(directional: bool, fwd: Vec3, dir: Vec3) -> f32 {
+    let d = dir.normalize_or_zero();
+    let element = 10.0 * (1.0 - d.y * d.y).max(0.1).log10();
+    if !directional {
+        return DIPOLE_DBI + element;
+    }
+    let (axis, sign) = facing(fwd);
+    let c = to_sim(d)[axis] as f32 * sign as f32;
+    let image = if c > 0.0 { 10.0 * (std::f32::consts::FRAC_PI_2 * c).sin().powi(2).max(0.14).log10() } else { -8.5 + 1.4 * c };
+    REFLECTOR_DBI + image + element
+}
 
 /// One transmitter of the run.
 #[derive(Clone, Debug)]
@@ -49,12 +114,23 @@ pub struct Tx {
     pub directional: bool,
     /// The device's real antenna peak gain minus the simulated one (dB).
     pub gain_fix_db: f32,
-    /// Added to the link gain (dB) to get the received power at the tag (dBm).
+    /// That difference by direction, when the device's pattern is known.
+    pub gain_fix: Option<Arc<GainFix>>,
+    /// Added to the link gain (dB) to get the received power at the tag (dBm),
+    /// with the peak's `gain_fix_db` included.
     pub rx_offset_db: f32,
     /// Ray model of this device, for the calibration fit: dB per typical
     /// wall, and the BLE path-loss exponent (`None`: free-space loss).
     pub wall_db: f32,
     pub exponent: Option<f32>,
+}
+
+impl Tx {
+    /// Device gain over simulated gain (dB) towards `dir`. Applied along the straight
+    /// line to a point, so it's an estimate where the field arrived by another way.
+    pub fn fix_towards(&self, dir: Vec3) -> f32 {
+        self.gain_fix.as_ref().map_or(self.gain_fix_db, |g| g.at(dir))
+    }
 }
 
 #[derive(Clone)]
@@ -89,6 +165,10 @@ pub struct ScenePlan {
     /// Heights of the horizontal field planes (world y).
     pub levels: Vec<f32>,
     pub budget: f64,
+    /// The material the mesh resolves worst, and its cells per wavelength.
+    pub worst: Option<(Material, f64)>,
+    /// Top of the highest object, when the run stops below it.
+    pub clipped_above: Option<f32>,
 }
 
 impl ScenePlan {
@@ -103,6 +183,51 @@ impl ScenePlan {
     pub fn lambda_sim(&self) -> f64 {
         C0 / self.f_sim
     }
+
+    /// How much too strong a shadow behind one edge can read at this scale (dB). Deep in
+    /// a shadow knife-edge loss goes as 20·log10(v), and v goes as 1/√λ.
+    pub fn shadow_error_db(&self) -> f64 {
+        10.0 * self.scale.log10()
+    }
+
+    /// Why this run may not feed the floor map or a calibration, if so.
+    pub fn scale_block(&self) -> Option<String> {
+        (self.scale > MAX_USABLE_SCALE).then(|| {
+            format!(
+                "it's scaled ×{:.1}, so shadows can read {:.0} dB too strong per edge (the limit is ×{MAX_USABLE_SCALE:.0}, {:.0} dB)",
+                self.scale,
+                self.shadow_error_db(),
+                10.0 * MAX_USABLE_SCALE.log10()
+            )
+        })
+    }
+
+    /// Time for the whole pulse to reach the far corner (s): the shortest run that has
+    /// seen even the direct path everywhere. openEMS' Gaussian lasts 18 / (2π·fc).
+    pub fn min_window_s(&self) -> f64 {
+        let diag = (0..3).map(|k| (self.hi[k] - self.lo[k]).powi(2)).sum::<f64>().sqrt();
+        18.0 / (2.0 * std::f64::consts::PI * 0.15 * self.f_sim) + diag / C0
+    }
+
+    /// What to say about this plan, before and after it runs.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some((m, cells)) = self.worst.filter(|w| w.1 < MIN_CELLS_PER_LAMBDA) {
+            out.push(format!("{} gets {cells:.1} cells per wavelength inside it, under the {MIN_CELLS_PER_LAMBDA:.0} a field solver wants: waves in it run slow and its loss is less reliable", m.name()));
+        }
+        if let Some(h) = self.clipped_above {
+            out.push(format!("Objects reach {h:.1} m, but the run stops at {:.1} m: nothing above that is simulated", self.hi[2]));
+        }
+        out
+    }
+}
+
+/// Knife-edge diffraction loss (dB) for the ITU-R P.526 parameter `v`.
+pub fn knife_edge_db(v: f64) -> f64 {
+    if v <= -0.78 {
+        return 0.0;
+    }
+    6.9 + 20.0 * (((v - 0.1).powi(2) + 1.0).sqrt() + v - 0.1).log10()
 }
 
 fn cells_per_lambda(q: Quality) -> f64 {
@@ -127,7 +252,7 @@ fn top_of(req: &SceneRequest) -> f32 {
     let inside = |o: &SceneObj| o.max.x > req.lo.x && o.min.x < req.hi.x && o.max.z > req.lo.y && o.min.z < req.hi.y;
     let objs = req.objects.iter().filter(|o| inside(o)).map(|o| o.max.y).fold(0.0f32, f32::max);
     let txs = req.txs.iter().map(|t| t.pos.y).fold(0.0f32, f32::max);
-    (objs.max(txs).max(req.tag_height) + 0.5).clamp(2.0, 6.0)
+    (objs.max(txs).max(req.tag_height) + 0.5).clamp(2.0, MAX_TOP_M)
 }
 
 const FLOOR_BOTTOM: f32 = -0.15;
@@ -164,7 +289,13 @@ pub fn plan(req: &SceneRequest) -> ScenePlan {
         levels.push(req.tag_height);
         levels.sort_by(f32::total_cmp);
     }
+    let in_area = |o: &&SceneObj| o.max.x > req.lo.x && o.min.x < req.hi.x && o.max.z > req.lo.y && o.min.z < req.hi.y;
+    // The floor slab is always there. Materials are at the real band, the wavelength at the simulated one.
+    let worst = worst_cells(req.objects.iter().filter(in_area).map(|o| o.material).chain([Material::Concrete]), f_real, n);
+    let highest = req.objects.iter().filter(in_area).map(|o| o.max.y).fold(0.0f32, f32::max);
     ScenePlan {
+        worst,
+        clipped_above: (highest > top).then_some(highest),
         f_real,
         f_sim,
         scale: f_real / f_sim,
@@ -233,24 +364,10 @@ fn source(plan: &ScenePlan, tx: &Tx) -> (Vec<Bx>, super::csx::Port, Bx) {
     let (ax, sign) = facing(tx.fwd);
     // Strip across the facing direction, in the plane through the device.
     let w_axis = 1 - ax;
-    let x0 = snap(plan, w_axis, p[w_axis] - c);
-    let sheet = snap(plan, ax, p[ax]);
-    let z_gap = snap(plan, 2, p[2] - c);
-    let arm = ((0.47 * lambda - 2.0 * c) / 2.0 / c).round().max(1.0) * c;
-    let bx = |z0: f64, z1: f64| {
-        let mut a = [0.0; 3];
-        let mut b = [0.0; 3];
-        a[w_axis] = x0;
-        b[w_axis] = x0 + 2.0 * c;
-        a[ax] = sheet;
-        b[ax] = sheet;
-        a[2] = z0;
-        b[2] = z1;
-        Bx::new(a, b)
-    };
-    let mut metal = vec![bx(z_gap + 2.0 * c, z_gap + 2.0 * c + arm), bx(z_gap - arm, z_gap)];
-    let port = super::csx::Port { nr: 1, gap: bx(z_gap, z_gap + 2.0 * c), dir: 2, r_ohm: 73.0, excite: true };
-    let mut keep = bx(z_gap - arm, z_gap + 2.0 * c + arm);
+    let (mut metal, port) = grid_dipole(plan.lo, c, p, lambda, w_axis, 1, true);
+    let x0 = port.gap.min[w_axis];
+    let z_gap = port.gap.min[2];
+    let mut keep = Bx { min: metal[1].min, max: metal[0].max };
     let margin = (lambda / 10.0).max(c);
     for k in 0..3 {
         keep.min[k] -= margin;
@@ -283,10 +400,21 @@ fn domain(plan: &ScenePlan) -> Bx {
     Bx::new(plan.lo.map(|v| v - pad), plan.hi.map(|v| v + pad))
 }
 
+/// A transmitter the run can't include: its dipole would stick out of the mesh, or
+/// its port would have nothing to sit on.
+pub fn tx_problem(req: &SceneRequest, plan: &ScenePlan) -> Option<String> {
+    let top = plan.hi[2] as f32;
+    let arm = (plan.lambda_sim() / 4.0) as f32;
+    req.txs.iter().find(|t| t.pos.y + arm > top).map(|t| format!("{} is at {:.1} m, above the {:.1} m this run can simulate: the most is {MAX_TOP_M:.0} m of height", t.name, t.pos.y, top - arm))
+}
+
 /// Voxelises the room once and makes one simulation per transmitter.
 pub fn build(req: &SceneRequest, plan: &ScenePlan) -> Result<(Vec<Sim>, Voxels)> {
     if req.txs.is_empty() {
         bail!("no {} placed: add some first", req.tech.infra().label());
+    }
+    if let Some(why) = tx_problem(req, plan) {
+        bail!("{why}");
     }
     let (wlo, whi) = {
         let (a, b) = (to_world(plan.lo), to_world(plan.hi));
@@ -302,7 +430,7 @@ pub fn build(req: &SceneRequest, plan: &ScenePlan) -> Result<(Vec<Sim>, Voxels)>
     let mut sims = Vec::with_capacity(req.txs.len());
     for tx in &req.txs {
         let (arms, port, keep) = source(plan, tx);
-        let mut sim = Sim { f0: f, fc: 0.15 * f, end_criteria: 1e-3, max_timesteps: steps.max(5000), ..Default::default() };
+        let mut sim = Sim { f0: f, fc: 0.15 * f, end_criteria: STOP_ENERGY, max_timesteps: steps.max(5000), ..Default::default() };
         sim.metal = carve(&vox.metal, &keep);
         sim.metal.extend(arms);
         sim.dielectrics = vox.dielectrics.iter().map(|d| Dielectric { boxes: carve(&d.boxes, &keep), ..d.clone() }).collect();
@@ -336,6 +464,7 @@ pub fn tx_key(geometry: u64, plan: &ScenePlan, tx: &Tx) -> u64 {
     plan.levels.iter().map(|v| v.to_bits()).collect::<Vec<_>>().hash(&mut h);
     to_sim(tx.pos).map(|v| (v / plan.cell * 4.0).round() as i64).hash(&mut h);
     tx.directional.hash(&mut h);
+    STOP_ENERGY.to_bits().hash(&mut h);
     if tx.directional {
         let (a, s) = facing(tx.fwd);
         (a, s > 0.0).hash(&mut h);
@@ -375,6 +504,15 @@ impl Plane2 {
         let g = |a: usize, b: usize| self.db[a + self.nu * b];
         let v = g(i, j) * (1.0 - fx) * (1.0 - fy) + g(i + 1, j) * fx * (1.0 - fy) + g(i, j + 1) * (1.0 - fx) * fy + g(i + 1, j + 1) * fx * fy;
         v.is_finite().then_some(v)
+    }
+
+    /// Where sample `n` of `db` is, in the world.
+    fn world_at(&self, n: usize) -> Vec3 {
+        let mut c = [0.0; 3];
+        c[self.axes[0]] = self.u0 + (n % self.nu) as f64 * self.step;
+        c[self.axes[1]] = self.v0 + (n / self.nu) as f64 * self.step;
+        c[3 - self.axes[0] - self.axes[1]] = self.fixed;
+        to_world(c)
     }
 
     /// As a viewport slice; `value` maps link gain (dB) to the 0..1 colour scale.
@@ -467,6 +605,10 @@ pub fn read_link_plane(dir: &Path, name: &str, freqs: &[f64], p_acc: &[f64], pla
     for (f, p) in freqs.iter().zip(p_acc) {
         let g = post::read_vtr(&post::fd_file(dir, name, *f, "abs"))?;
         let e2: Vec<f64> = (0..g.len()).map(|k| g.at(k).iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / p.max(1e-300)).collect();
+        // A NaN would read as "no signal here": the run diverged, and nothing in it counts.
+        if e2.iter().any(|v| !v.is_finite()) {
+            bail!("{name}: the field has values that aren't finite, so the solver diverged");
+        }
         match &mut acc {
             Some((g0, sum)) if g0.len() == g.len() => sum.iter_mut().zip(e2).for_each(|(s, v)| *s += v),
             Some(_) => bail!("{name}: planes differ between frequencies"),
@@ -488,6 +630,17 @@ pub fn read_link_plane(dir: &Path, name: &str, freqs: &[f64], p_acc: &[f64], pla
     Ok(local_mean_plane([axes[0], axes[1]], fixed, coords[axes[0]], coords[axes[1]], &power, plan.cell, window))
 }
 
+impl TxField {
+    /// `Tx::rx_offset_db` with the device's pattern towards sample `n` of `plane`.
+    fn rx_offset_at(&self, plane: &Plane2, n: usize) -> f32 {
+        let tx = &self.tx;
+        if tx.gain_fix.is_none() {
+            return tx.rx_offset_db;
+        }
+        tx.rx_offset_db - tx.gain_fix_db + tx.fix_towards(plane.world_at(n) - tx.pos)
+    }
+}
+
 /// One transmitter's field.
 #[derive(Clone, Debug)]
 pub struct TxField {
@@ -497,6 +650,9 @@ pub struct TxField {
     pub levels: Vec<Plane2>,
     /// Vertical cuts through the transmitter.
     pub cuts: Vec<Plane2>,
+    /// When its last sample was taken (s), and how the solver ended.
+    pub last_probe_s: f64,
+    pub run: super::RunEnd,
 }
 
 pub struct SceneResult {
@@ -533,6 +689,34 @@ impl SceneResult {
         self.per_tx.iter().position(|t| t.tx.entity == e)
     }
 
+    /// Propagation (dB) from transmitter `i` to an isotropic receiver at `p`, with the
+    /// device's own antenna in place of the simulated one.
+    pub fn propagation_db(&self, i: usize, p: Vec3) -> Option<f32> {
+        let tx = &self.per_tx.get(i)?.tx;
+        Some(self.link_db_at(i, p)? + tx.fix_towards(p - tx.pos))
+    }
+
+    /// Why this run may not feed the floor map or a calibration, if so.
+    pub fn use_block(&self) -> Option<String> {
+        if let Some(why) = self.plan.scale_block() {
+            return Some(why);
+        }
+        let need = self.plan.min_window_s();
+        self.per_tx.iter().find(|t| t.last_probe_s < need).map(|t| {
+            format!("{} stopped {:.1} ns in, before the pulse had crossed the room ({:.1} ns): even the direct path is short at the far corner", t.tx.name, t.last_probe_s * 1e9, need * 1e9)
+        })
+    }
+
+    /// What to say next to this run's numbers, whether or not they may be used.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = self.plan.warnings();
+        out.extend(self.per_tx.iter().filter(|t| t.run.truncated && t.run.energy_db.is_some_and(|e| e > TRUNCATED_ENERGY_DB)).map(|t| {
+            format!("{} hit the step limit with {:.0} dB of its energy still in the room: late reflections are missing", t.tx.name, t.run.energy_db.unwrap_or(0.0))
+        }));
+        out.extend(self.voxels.thickness.iter().filter_map(|t| t.problem()));
+        out
+    }
+
     /// Received power (dBm) planes for the viewport: every level (or only the
     /// one nearest the tag height) and the vertical cuts, for one transmitter
     /// or the strongest of all; `value` maps dBm to the colour scale.
@@ -550,16 +734,18 @@ impl SceneResult {
             }
             // Strongest received power over the transmitters shown.
             let mut p = first.levels[k].clone();
-            for (n, v) in p.db.iter_mut().enumerate() {
-                *v = pick.iter().filter_map(|t| t.levels.get(k).and_then(|l| l.db.get(n)).map(|d| d + t.tx.rx_offset_db)).fold(f32::NEG_INFINITY, f32::max);
+            for n in 0..p.db.len() {
+                p.db[n] = pick.iter().filter_map(|t| t.levels.get(k).and_then(|l| l.db.get(n).map(|d| d + t.rx_offset_at(l, n)))).fold(f32::NEG_INFINITY, f32::max);
             }
             out.push(p.to_slice(value));
         }
         for t in &pick {
             for c in &t.cuts {
-                let mut c = c.clone();
-                c.db.iter_mut().for_each(|d| *d += t.tx.rx_offset_db);
-                out.push(c.to_slice(value));
+                let mut shown = c.clone();
+                for n in 0..shown.db.len() {
+                    shown.db[n] += t.rx_offset_at(c, n);
+                }
+                out.push(shown.to_slice(value));
             }
         }
         out
@@ -573,6 +759,8 @@ pub fn read_tx(dir: &Path, plan: &ScenePlan, band: Band, tx: Tx, key: u64) -> Re
     if p_acc.iter().any(|p| !(*p > 0.0)) {
         bail!("{}: no power accepted by the source", tx.name);
     }
+    let (times, _) = post::read_probe(&dir.join("port_ut1"))?;
+    let last_probe_s = times[times.len() - 1];
     let mut levels = Vec::new();
     for i in 0..plan.levels.len() {
         levels.push(read_link_plane(dir, &format!("level{i}"), &freqs, &p_acc, plan)?);
@@ -589,7 +777,7 @@ pub fn read_tx(dir: &Path, plan: &ScenePlan, band: Band, tx: Tx, key: u64) -> Re
             }
         }
     }
-    Ok(TxField { tx, key, levels, cuts })
+    Ok(TxField { tx, key, levels, cuts, last_probe_s, run: Default::default() })
 }
 
 // ---------------------------------------------------------------------------
@@ -747,11 +935,139 @@ mod tests {
         let v = |x: bool, y: bool, z: bool| [if x { b.x } else { a.x }, if y { b.y } else { a.y }, if z { b.z } else { a.z }];
         let pos: Vec<[f32; 3]> = (0..8).map(|i| v(i & 1 != 0, i & 2 != 0, i & 4 != 0)).collect();
         let idx = [0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0, 6, 4, 1, 5, 7, 1, 7, 3];
-        SceneObj { name: "wall".into(), material: m, weight: m.weight(), parts: vec![(Arc::new(crate::bvh::Bvh::new(&pos, &idx)), bevy::math::Affine3A::IDENTITY)], min: a, max: b }
+        SceneObj { name: "wall".into(), material: m, weight: m.weight(), parts: vec![(Arc::new(crate::bvh::Bvh::new(&pos, &idx)), bevy::math::Affine3A::IDENTITY)], min: a, max: b, rack: None }
     }
 
     fn tx(pos: Vec3) -> Tx {
-        Tx { entity: Entity::PLACEHOLDER, name: "a1".into(), pos, fwd: Vec3::NEG_Z, directional: false, gain_fix_db: 0.0, rx_offset_db: 0.0, wall_db: 6.0, exponent: None }
+        Tx { entity: Entity::PLACEHOLDER, name: "a1".into(), pos, fwd: Vec3::NEG_Z, directional: false, gain_fix_db: 0.0, gain_fix: None, rx_offset_db: 0.0, wall_db: 6.0, exponent: None }
+    }
+
+    /// A field dump as openEMS writes it, uncompressed: 2 × 2 points in a plane.
+    fn write_dump(path: &Path, values: [f32; 12]) {
+        use base64::Engine;
+        let array = |name: &str, comps: usize, data: &[f32]| {
+            let mut raw = ((data.len() * 4) as u32).to_le_bytes().to_vec();
+            data.iter().for_each(|v| raw.extend(v.to_le_bytes()));
+            format!(r#"<DataArray type="Float32" Name="{name}" NumberOfComponents="{comps}" format="binary">{}</DataArray>"#, base64::engine::general_purpose::STANDARD.encode(&raw))
+        };
+        let text = [array("E", 3, &values), array("x", 1, &[0.0, 1.0]), array("y", 1, &[0.0, 1.0]), array("z", 1, &[0.0])].join("\n");
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_field_that_diverged_is_refused() {
+        let d = std::env::temp_dir().join(format!("sensesim_nan_field_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = ScenePlan { f_real: 1e9, f_sim: 1e9, scale: 1.0, cell: 1.0, ..Default::default() };
+        let file = d.join("level0_f=1000000000_abs.vtr");
+        write_dump(&file, [1.0; 12]);
+        assert!(read_link_plane(&d, "level0", &[1e9], &[1.0], &p).is_ok());
+        let mut bad = [1.0; 12];
+        bad[4] = f32::NAN;
+        write_dump(&file, bad);
+        let r = read_link_plane(&d, "level0", &[1e9], &[1.0], &p);
+        let _ = std::fs::remove_dir_all(&d);
+        // It used to read as "no signal here", which looks like a shadow.
+        assert!(r.unwrap_err().to_string().contains("diverged"));
+    }
+
+    #[test]
+    fn the_shadow_error_is_what_a_knife_edge_says() {
+        // The audit's figures: d1 = d2 = 5 m, at UWB's real λ against ×17 and BLE against ×6.3.
+        let v = |h: f64, f: f64| h * (2.0 * 10.0 / (C0 / f * 25.0)).sqrt();
+        for (f, scale, h) in [(6.4896e9, 17.0, 1.5), (6.4896e9, 17.0, 0.5), (2.44e9, 6.3, 1.5)] {
+            let real = knife_edge_db(v(h, f));
+            let simulated = knife_edge_db(v(h, f / scale));
+            let plan = ScenePlan { scale, ..Default::default() };
+            let shown = plan.shadow_error_db();
+            assert!(real - simulated > 0.7 * shown && real - simulated < 1.05 * shown, "{f} {h}: {real} vs {simulated}, shown {shown}");
+        }
+        assert!((knife_edge_db(v(1.5, 6.4896e9)) - 28.7).abs() < 0.2);
+    }
+
+    #[test]
+    fn a_run_scaled_past_the_limit_cant_be_used() {
+        let at = |scale: f64| ScenePlan { scale, ..Default::default() };
+        assert!(at(1.0).scale_block().is_none());
+        assert!(at(MAX_USABLE_SCALE).scale_block().is_none());
+        let why = at(4.6).scale_block().unwrap();
+        assert!(why.contains("×4.6") && why.contains("7 dB"), "{why}");
+        // A hall at UWB can't be simulated at anything near its real frequency.
+        let hall = plan(&request(Band::Uwb5, Vec2::new(-20.0, -14.0), Vec2::new(20.0, 14.0)));
+        assert!(hall.scale > 10.0 && hall.scale_block().is_some(), "{}", hall.scale);
+        // A small room at UHF runs as it is.
+        assert!(plan(&request(Band::Rfid, Vec2::new(-4.0, -3.5), Vec2::new(4.0, 3.5))).scale_block().is_none());
+    }
+
+    /// A finished run, as `fit_scene` and the UI see it.
+    fn finished(plan: ScenePlan, last_probe_s: f64, run: super::super::RunEnd) -> SceneResult {
+        let f = TxField { tx: tx(Vec3::ZERO), key: 0, levels: Vec::new(), cuts: Vec::new(), last_probe_s, run };
+        SceneResult { tech: Tech::Rfid, band: Band::Rfid, quality: Quality::Fast, plan, tag_height: 1.2, per_tx: vec![f], voxels: Voxels::default(), simulated: 1, seconds: 1.0, dir: Default::default() }
+    }
+
+    #[test]
+    fn a_run_stopped_before_the_pulse_crossed_the_room_cant_be_used() {
+        let p = plan(&request(Band::Rfid, Vec2::new(-5.0, -2.0), Vec2::new(5.0, 2.0)));
+        // The audit's run: pulse 20.9 ns + about 36 ns across, stopped at 45.65 ns.
+        let need = p.min_window_s();
+        assert!((need - 57e-9).abs() < 3e-9, "{need}");
+        let short = finished(p.clone(), 45.65e-9, Default::default());
+        assert!(short.use_block().is_some_and(|w| w.contains("before the pulse had crossed")), "{:?}", short.use_block());
+        assert!(finished(p, need * 1.01, Default::default()).use_block().is_none());
+    }
+
+    #[test]
+    fn a_run_that_hit_the_step_limit_with_energy_left_says_so() {
+        let p = plan(&request(Band::Rfid, Vec2::new(-3.0, -2.0), Vec2::new(3.0, 2.0)));
+        let late = |db: f64| finished(p.clone(), 1e-6, super::super::RunEnd { truncated: true, energy_db: Some(db) }).warnings().join(" ");
+        assert!(late(-12.0).contains("step limit"), "{}", late(-12.0));
+        assert!(!late(-45.0).contains("step limit"));
+    }
+
+    #[test]
+    fn the_worst_material_and_a_clipped_top_are_reported() {
+        // Concrete floor at the real band: 10 / √5.24 = 4.37 cells per λ, the audit's figure.
+        let p = plan(&request(Band::Rfid, Vec2::new(-3.0, -3.0), Vec2::new(3.0, 3.0)));
+        let (m, cells) = p.worst.unwrap();
+        assert_eq!(m, Material::Concrete);
+        assert!((cells - 4.37).abs() < 0.01, "{cells}");
+        assert!(p.clipped_above.is_none());
+        assert!(p.warnings().iter().any(|w| w.contains("4.4 cells")), "{:?}", p.warnings());
+        let mut tall = request(Band::Rfid, Vec2::new(-3.0, -3.0), Vec2::new(3.0, 3.0));
+        tall.objects = vec![wall(-0.1, 0.1, -3.0, 3.0, 9.0, Material::Concrete)];
+        let p = plan(&tall);
+        assert_eq!(p.clipped_above, Some(9.0));
+        assert!(p.warnings().iter().any(|w| w.contains("nothing above that")), "{:?}", p.warnings());
+        // Liquid in the room is worse than the floor: 1.18 cells per λ.
+        let mut wet = request(Band::Rfid, Vec2::new(-3.0, -3.0), Vec2::new(3.0, 3.0));
+        wet.objects = vec![wall(-0.1, 0.1, -3.0, 3.0, 3.0, Material::Liquid)];
+        let (m, cells) = plan(&wet).worst.unwrap();
+        assert_eq!(m, Material::Liquid);
+        assert!((cells - 1.18).abs() < 0.01, "{cells}");
+    }
+
+    #[test]
+    fn the_device_pattern_replaces_the_peak_offset_by_direction() {
+        // A 12 dBi portal with a 60° beam, facing +X, as the planner models it.
+        let fwd = Vec3::X;
+        let portal = |d: Vec3| crate::rtls::radio::antenna_gain(12.0, 60.0, d.angle_between(fwd));
+        let fix = GainFix::sample(portal, true, fwd);
+        let t = Tx { gain_fix_db: 12.0 - REFLECTOR_DBI, gain_fix: Some(Arc::new(fix)), directional: true, fwd, ..tx(Vec3::ZERO) };
+        // On the axis: the peak difference.
+        assert!((t.fix_towards(Vec3::X) - 5.0).abs() < 0.3, "{}", t.fix_towards(Vec3::X));
+        // Well off it: the portal falls away faster than the wide simulated source.
+        let off = t.fix_towards(Vec3::new(0.5, 0.0, 0.866));
+        assert!(off < 0.0, "at 60° the device is weaker than the source: {off}");
+        // Behind it: a -20 dB floor against about -15 dB, so no +5 dB left over.
+        let back = t.fix_towards(Vec3::NEG_X);
+        assert!(back < 1.0, "{back}");
+        // Without a known pattern it's the old single offset.
+        let plain = Tx { gain_fix_db: 5.0, ..tx(Vec3::ZERO) };
+        assert_eq!(plain.fix_towards(Vec3::NEG_X), 5.0);
+        // An omni device over the dipole: the correction is capped in the dipole's null.
+        let omni = GainFix::sample(|_| 2.15, false, fwd);
+        assert!(omni.at(Vec3::X).abs() < 1e-3);
+        assert!((omni.at(Vec3::Y) - 10.0).abs() < 1e-3, "{}", omni.at(Vec3::Y));
     }
 
     fn request(band: Band, lo: Vec2, hi: Vec2) -> SceneRequest {
@@ -802,6 +1118,23 @@ mod tests {
         assert!(s.dumps.iter().all(|d| d.freqs.len() == N_FREQS));
         assert!(s.to_xml().contains("<FD_Samples>"));
         assert_eq!(s.ports.len(), 1);
+    }
+
+    #[test]
+    fn a_whole_scene_run_is_not_stopped_early() {
+        let req = request(Band::Rfid, Vec2::new(-3.0, -3.0), Vec2::new(3.0, 3.0));
+        let p = plan(&req);
+        let (sims, _) = build(&req, &p).unwrap();
+        // -30 dB ends the run before the far corner hears the pulse.
+        assert!(sims[0].end_criteria < 1e-3, "{}", sims[0].end_criteria);
+    }
+
+    #[test]
+    fn a_transmitter_above_the_simulated_height_is_refused() {
+        let mut req = request(Band::Rfid, Vec2::new(-3.0, -3.0), Vec2::new(3.0, 3.0));
+        req.txs = vec![tx(Vec3::new(-2.0, 8.0, 0.0))];
+        let p = plan(&req);
+        assert!(build(&req, &p).is_err(), "port would be off the mesh");
     }
 
     #[test]

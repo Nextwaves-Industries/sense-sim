@@ -24,13 +24,23 @@ pub fn defs() -> Vec<ToolDef> {
     vec![
         def(
             "rtls_auto_deploy",
-            "ONE-SHOT: design and place a complete positioning system for the current scene (the fewest UWB anchors that cover the floor and every zone at the target accuracy, or the best placement within max_anchors, BLE beacons, one RFID reader per zone, UWB tags on vehicles, RFID tags on goods, workers walking the aisles), mounted on ceiling/walls/columns when the scene has them, then simulate it and report accuracy. Replaces devices from a previous auto deploy; keeps manual ones.",
-            json!({ "type": "object", "properties": { "uwb": { "type": "boolean" }, "ble": { "type": "boolean" }, "rfid": { "type": "boolean" }, "target_cm": { "type": "number", "description": "p95 position error target, default 30" }, "anchor_tx_dbm_mhz": { "type": "number", "description": "UWB anchor transmit power in dBm/MHz (max -41.3). Lower = shorter range; placement is planned with it." }, "max_anchors": { "type": "integer","description": "Cap on UWB anchors in the scene (existing ones included). Omit for the fewest anchors that meet the target on the floor and in every zone." },"workers": { "type": "integer" }, "test_s": { "type": "number" } } }),
+            "ONE-SHOT: design and place a complete positioning system for the current scene (the fewest UWB anchors that cover the floor and every zone at the target accuracy, or the best placement within max_anchors, BLE beacons, BLE AoA locators, WiFi APs, RFID readers aimed at shelves and zones with portal pairs on doorways, UWB tags on vehicles, RFID tags on goods, workers walking the aisles), mounted on ceiling/walls/columns when the scene has them, then simulate it and report accuracy. Replaces devices from a previous auto deploy; keeps manual ones.",
+            json!({ "type": "object", "properties": { "uwb": { "type": "boolean" }, "ble": { "type": "boolean" }, "rfid": { "type": "boolean" }, "ble_aoa": { "type": "boolean", "description": "BLE with direction-finding locators instead of RSSI beacons" }, "wifi": { "type": "boolean", "description": "WiFi access points with RTT" }, "heights": { "type": "array", "items": { "type": "number" }, "description": "More tag heights to plan for (m), e.g. [0.3, 1.8]" }, "dim3": { "type": "boolean", "description": "Plan for full 3D fixes" }, "redundancy": { "type": "boolean", "description": "Keep the target with any one device failed" }, "min_spacing_m": { "type": "number" }, "cost_weight": { "type": "number", "description": "Weight of install cost against coverage (default 0.0005)" }, "head_end": vec3, "refine": { "type": "boolean", "description": "Fine-tune positions along the mounting surface (default true)" }, "colocate": { "type": "boolean", "description": "Let technologies share a mount at lower cost" }, "target_cm": { "type": "number", "description": "p95 position error target, default 30" }, "anchor_tx_dbm_mhz": { "type": "number", "description": "UWB anchor transmit power in dBm/MHz (max -41.3). Lower = shorter range; placement is planned with it." }, "max_anchors": { "type": "integer","description": "Cap on UWB anchors in the scene (existing ones included). Omit for the fewest anchors that meet the target on the floor and in every zone." },"workers": { "type": "integer" }, "test_s": { "type": "number" } } }),
         ),
         def(
             "rtls_openems",
             "Manage the local OpenEMS Edge that Sense Sim installs and runs itself (portable Java + official openems-edge.jar + the Rtls.SenseSim component). action=start installs on first use (~120 MB download), starts it and connects the simulator; stop; status.",
             json!({ "type": "object", "properties": { "action": { "type": "string", "enum": ["start", "stop", "status"] } }, "required": ["action"] }),
+        ),
+        def(
+            "rtls_list_regions",
+            "List the regulatory regions: for each country the legal UWB channels and power and the UHF RFID band and power, how well each rule is verified, and the active region.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        def(
+            "rtls_set_region",
+            "Set the regulatory region of the deployment. Profiles, simulation, coverage and auto deploy then use legal values: UWB moves to an allowed channel and RFID readers are capped to the EIRP limit. Set it before planning. Returns what changed and any warnings. Rules not verified for a country change nothing and are reported.",
+            json!({ "type": "object", "properties": { "region": { "type": "string", "description": "Region id from rtls_list_regions, e.g. 'vn'; 'none' removes it" } }, "required": ["region"] }),
         ),
         def(
             "rtls_list_profiles",
@@ -39,7 +49,7 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "rtls_add_device",
-            "Place a simulated positioning device. Y is up (metres); anchors and readers are usually mounted 2-3 m high, tags about 1-1.2 m. RFID readers face their yaw direction.",
+            "Place a simulated positioning device. Y is up (metres); anchors and readers are usually mounted 2-3 m high, tags about 1-1.2 m. RFID readers face their yaw direction, aimed up or down by tilt_deg.",
             json!({
                 "type": "object",
                 "properties": {
@@ -47,6 +57,8 @@ pub fn defs() -> Vec<ToolDef> {
                     "id": { "type": "string", "description": "Optional device id (default: next free, e.g. A3)" },
                     "position": vec3,
                     "yaw_deg": { "type": "number" },
+                    "tilt_deg": { "type": "number", "description": "Aim up (+) or down (-); -90 points straight down" },
+                    "roll_deg": { "type": "number", "description": "Turn around the facing direction" },
                     "motion": motion,
                     "address": { "type": "string", "description": "RFID EPC or hardware address" }
                 },
@@ -55,13 +67,15 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "rtls_update_device",
-            "Change a device: position, yaw, enabled (false simulates an offline/failed device), profile, motion or address.",
+            "Change a device: position, yaw, tilt, roll (angles not given are kept), enabled (false simulates an offline/failed device), profile, motion or address.",
             json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
                     "position": vec3,
                     "yaw_deg": { "type": "number" },
+                    "tilt_deg": { "type": "number", "description": "Aim up (+) or down (-); -90 points straight down" },
+                    "roll_deg": { "type": "number", "description": "Turn around the facing direction" },
                     "enabled": { "type": "boolean" },
                     "profile": { "type": "string" },
                     "motion": motion,
@@ -89,8 +103,8 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "rtls_run",
-            "Run the simulation for N simulated seconds right now and return accuracy metrics (RMSE, CEP50/95), per-tag fix rates, RFID read rate, alarms and output status.",
-            json!({ "type": "object", "properties": { "seconds": { "type": "number" }, "reset": { "type": "boolean", "description": "Restart time and statistics first (default true)" } }, "required": ["seconds"] }),
+            "Run the simulation for N simulated seconds right now and return accuracy metrics over the whole run (RMSE, CEP50/95, sample count, availability; moving and parked tags apart; null with no fixes), per-tag fix rates, RFID reads and read chance, alarms and output status. Simulated results, not measurements.",
+            json!({ "type": "object", "properties": { "seconds": { "type": "number" }, "reset": { "type": "boolean", "description": "Restart time and statistics first, and put the tags back where they started afterwards, so the same seed reproduces the run (default true)" } }, "required": ["seconds"] }),
         ),
         def("rtls_status", "Current live metrics, the latest snapshot sent to outputs, active alarms, output connection status and values read back from OpenEMS/MQTT.", json!({ "type": "object", "properties": {} })),
         def(
@@ -110,13 +124,13 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "rtls_coverage",
-            "Compute the coverage heatmap for UWB, BLE or RFID at a tag height: share of the floor with a position fix and predicted error (ray cast against the scene). Shows it in the viewport.",
-            json!({ "type": "object", "properties": { "tech": { "type": "string", "enum": ["uwb", "ble", "rfid"] }, "height": { "type": "number" }, "cell": { "type": "number" } }, "required": ["tech"] }),
+            "Compute the coverage heatmap for UWB, BLE, RFID or WiFi at a tag height: share of the floor with a position fix and predicted RMS error (ray cast against the scene; 95 % of readings land within 1.73 times that). RFID has no position: its error fields are null and read_margin_db holds the link margin. Shows it in the viewport.",
+            json!({ "type": "object", "properties": { "tech": { "type": "string", "enum": ["uwb", "ble", "rfid", "wifi"] }, "height": { "type": "number" }, "cell": { "type": "number" } }, "required": ["tech"] }),
         ),
         def(
             "rtls_optimize_anchors",
-            "Suggest where to add N more anchors/beacons/readers to maximise line-of-sight coverage and geometry. With apply=true they are placed.",
-            json!({ "type": "object", "properties": { "tech": { "type": "string", "enum": ["uwb", "ble", "rfid"] }, "count": { "type": "integer", "description": "Most devices to add" }, "height": { "type": "number" }, "target_coverage": { "type": "number", "description": "Stop once this share of the floor is covered (0..1)" }, "mount": { "type": "string", "enum": ["grid", "structure"], "description": "grid (default): room perimeter + grid; structure: ceiling/walls/columns from add_structure" }, "apply": { "type": "boolean" } }, "required": ["tech", "count"] }),
+            "Suggest where to add N more anchors/beacons/readers/access points, scored with the simulation's link model (noise, NLOS, dropouts, read chance, geometry) and install cost, with aims for directional readers. With apply=true they are placed.",
+            json!({ "type": "object", "properties": { "profile": { "type": "string", "description": "Infrastructure profile, e.g. ble-aoa-locator, wifi-ap-rssi" }, "heights": { "type": "array", "items": { "type": "number" } }, "dim3": { "type": "boolean" }, "redundancy": { "type": "boolean" }, "min_spacing_m": { "type": "number" }, "cost_weight": { "type": "number" }, "head_end": vec3, "refine": { "type": "boolean" }, "target_p95_m": { "type": "number" }, "tech": { "type": "string", "enum": ["uwb", "ble", "rfid", "wifi"] }, "count": { "type": "integer", "description": "Most devices to add" }, "height": { "type": "number" }, "target_coverage": { "type": "number", "description": "Stop once this share of the floor is covered (0..1)" }, "mount": { "type": "string", "enum": ["grid", "structure"], "description": "grid (default): room perimeter + grid; structure: ceiling/walls/columns from add_structure" }, "apply": { "type": "boolean" } }, "required": ["tech", "count"] }),
         ),
         def(
             "rtls_configure_outputs",
@@ -129,6 +143,11 @@ pub fn defs() -> Vec<ToolDef> {
 fn vec3(v: &Value) -> Option<Vec3> {
     let a = v.as_array()?;
     (a.len() == 3).then(|| Vec3::new(a[0].as_f64().unwrap_or(0.0) as f32, a[1].as_f64().unwrap_or(0.0) as f32, a[2].as_f64().unwrap_or(0.0) as f32))
+}
+
+/// A JSON array of numbers (empty when it isn't one).
+fn floats(v: &Value) -> Vec<f32> {
+    v.as_array().map_or(Vec::new(), |a| a.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect())
 }
 
 fn r2(v: f32) -> f64 {
@@ -146,7 +165,7 @@ fn parse_motion(v: &Value) -> Result<Motion, String> {
 
 fn device_json(world: &World, e: Entity, d: &Device, t: &Transform) -> Value {
     let st = world.resource::<RtlsState>();
-    let (yaw, _, _) = t.rotation.to_euler(EulerRot::YXZ);
+    let (yaw, tilt, roll) = t.rotation.to_euler(EulerRot::YXZ);
     let mut v = json!({
         "id": d.id,
         "kind": d.kind.label(),
@@ -154,6 +173,8 @@ fn device_json(world: &World, e: Entity, d: &Device, t: &Transform) -> Value {
         "enabled": d.enabled,
         "position": [r2(t.translation.x), r2(t.translation.y), r2(t.translation.z)],
         "yaw_deg": r2(yaw.to_degrees()),
+        "tilt_deg": r2(tilt.to_degrees()),
+        "roll_deg": r2(roll.to_degrees()),
         "motion": d.motion,
     });
     if !d.address.is_empty() {
@@ -188,6 +209,58 @@ fn merge(a: &mut Value, b: &Value) {
     }
 }
 
+/// The active region, or a reminder that results assume no local limits.
+fn region_json(world: &World) -> Value {
+    match &world.resource::<Profiles>().1.active {
+        Some(r) => json!({ "id": r.id, "name": r.name, "warnings": r.warnings() }),
+        None => json!({ "id": Value::Null, "warning": "No region set: profile values may exceed local limits. Use rtls_set_region." }),
+    }
+}
+
+/// A figure, or null where it isn't one (no position, or not enough of them).
+fn finite(v: f32) -> Value {
+    if v.is_finite() { json!(r2(v)) } else { Value::Null }
+}
+
+fn class_json(c: &super::deploy::ClassResult) -> Value {
+    json!({
+        "tags": c.tags,
+        "updates": c.attempts,
+        "with_a_fix": c.fixes,
+        "availability": c.availability().map(r2),
+        "rmse_m": c.rmse_m.map(r2),
+        "p95_counting_no_fix_m": c.p95_m.map(finite),
+        "p95_of_fixes_m": c.fix_p95_m.map(r2),
+    })
+}
+
+/// What a coverage scan found. RFID has no position to predict an error for: its cells carry a
+/// link margin in dB, reported under its own name.
+fn coverage_json(cov: &Coverage) -> Value {
+    let (covered, mean, p95) = cov.stats();
+    let q = cov.quality;
+    let (near_only, worst) = cov.proximity_only();
+    let mut v = json!({
+        "summary": cov.summary, "covered_fraction": covered, "cells": cov.cells.len(), "cell_m": cov.cell,
+        // Share of the floor heard by too few for a position: no fix, however close.
+        "proximity_only_fraction": near_only, "proximity_only_worst_m": worst,
+        "mean_predicted_error_m": Value::Null, "p95_predicted_error_m": Value::Null,
+        // Share of the floor where >= min_share of readings land within target_m.
+        "quality": { "pass_fraction": Value::Null, "target_m": q.target_m, "min_share": q.min_share },
+    });
+    if cov.tech == Tech::Rfid {
+        v["read_margin_db"] = json!({ "mean": mean, "p95": p95, "note": "Best link margin where the read chance per round is over 90 %" });
+    } else if covered > 0.0 {
+        // These are RMS: 95 % of readings land within 1.73 times as far.
+        v["mean_predicted_error_m"] = json!(mean);
+        v["p95_predicted_error_m"] = json!(p95);
+        v["quality"]["pass_fraction"] = json!(cov.quality_share());
+    } else {
+        v["quality"]["pass_fraction"] = json!(0.0);
+    }
+    v
+}
+
 pub fn status_json(world: &mut World) -> Value {
     let hub = world.resource::<Hub>();
     let outputs: Vec<Value> = hub
@@ -203,12 +276,34 @@ pub fn status_json(world: &mut World) -> Value {
     report["outputs"] = json!(outputs);
     report["read_back"] = json!(feedback);
     report["running"] = json!(world.resource::<RtlsConfig>().settings.running);
+    report["region"] = region_json(world);
     report
 }
 
 /// Handles an `rtls_*` tool. `None` if the name is not ours.
 pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
     Some(match name {
+        "rtls_list_regions" => {
+            let p = world.resource::<Profiles>();
+            let list: Vec<Value> = p.1.regions.iter().map(|r| r.json()).collect();
+            ToolOutput::ok(json!({ "active": p.1.active.as_ref().map(|r| r.id.clone()), "regions": list, "note": "Design inputs, not legal advice: confirm with the national regulator. Countries not listed can be added as JSON in the regions folder." }))
+        }
+        "rtls_set_region" => {
+            let id = i["region"].as_str().unwrap_or("");
+            let mut p = world.resource_mut::<Profiles>();
+            if let Err(e) = p.set_region(id) {
+                return Some(ToolOutput::err(e));
+            }
+            let out = match &p.1.active {
+                Some(r) => json!({ "region": r.json(), "changes": r.changes(&p.1.base), "antenna_note": super::region::PATTERN_NOTE, "next": "Existing devices now use these values. Re-run rtls_coverage or rtls_auto_deploy: the layout may no longer meet its target." }),
+                None => json!({ "region": Value::Null, "next": "Profile values restored." }),
+            };
+            let stored = p.1.active.as_ref().map(|r| r.id.clone()).unwrap_or_default();
+            let mut cfg = world.resource_mut::<RtlsConfig>();
+            cfg.settings.region = stored;
+            cfg.save();
+            ToolOutput::ok(out)
+        }
         "rtls_list_profiles" => {
             let p = world.resource::<Profiles>();
             ToolOutput::ok(json!(p.0))
@@ -241,8 +336,9 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                 _ => Motion::Static,
             };
             let address = i["address"].as_str().map(str::to_string).unwrap_or_else(|| if prof.kind == DeviceKind::RfidTag { epc_for(&id) } else { String::new() });
-            let yaw = i["yaw_deg"].as_f64().unwrap_or(0.0) as f32;
-            let t = Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw.to_radians()));
+            let angle = |key: &str| (i[key].as_f64().unwrap_or(0.0) as f32).to_radians();
+            let rotation = Quat::from_euler(EulerRot::YXZ, angle("yaw_deg"), angle("tilt_deg"), angle("roll_deg"));
+            let t = Transform::from_translation(pos).with_rotation(rotation);
             let d = Device { id: id.clone(), kind: prof.kind, profile: prof.id.clone(), enabled: true, motion, address, auto: false, radio: Default::default() };
             world.spawn((Name::new(format!("{} {}", prof.kind.label(), id)), d, t));
             ToolOutput::text(format!("Placed {} '{id}' ({}) at [{:.2}, {:.2}, {:.2}]", prof.kind.label(), prof.name, pos.x, pos.y, pos.z))
@@ -263,8 +359,17 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                 if let Some(p) = vec3(&i["position"]) {
                     t.translation = p;
                 }
-                if let Some(y) = i["yaw_deg"].as_f64() {
-                    t.rotation = Quat::from_rotation_y((y as f32).to_radians());
+                // Turn by the difference, so setting one angle keeps the others.
+                let (yaw, tilt, roll) = t.rotation.to_euler(EulerRot::YXZ);
+                let delta = |key: &str, now: f32| i[key].as_f64().map(|v| (v as f32).to_radians() - now);
+                if let Some(d) = delta("yaw_deg", yaw) {
+                    t.rotate_y(d);
+                }
+                if let Some(d) = delta("tilt_deg", tilt) {
+                    t.rotate_local_x(d);
+                }
+                if let Some(d) = delta("roll_deg", roll) {
+                    t.rotate_local_z(d);
                 }
             }
             let mut d = em.get_mut::<Device>().unwrap();
@@ -328,13 +433,21 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
         }
         "rtls_run" => {
             let secs = i["seconds"].as_f64().unwrap_or(30.0).clamp(0.1, 3600.0);
-            if i["reset"].as_bool().unwrap_or(true) {
+            let reset = i["reset"].as_bool().unwrap_or(true);
+            let start = reset.then(|| sim::RunStart::take(world));
+            if reset {
                 let seed = world.resource::<RtlsConfig>().settings.seed;
                 world.resource_mut::<RtlsState>().restart(seed);
             }
             let ticks = sim::run_for(world, secs);
             let mut r = sim::report_json(world);
             r["ticks"] = json!(ticks);
+            if let Some(start) = start {
+                start.restore(world);
+            }
+            if world.resource::<RtlsConfig>().settings.running {
+                r["note"] = json!("The live simulation is running, so moving tags start wherever it has taken them. Pause it to reproduce a run exactly.");
+            }
             ToolOutput::ok(r)
         }
         "rtls_status" => ToolOutput::ok(status_json(world)),
@@ -367,14 +480,9 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             let tech = i["tech"].as_str().and_then(Tech::parse).unwrap_or_default();
             let req = CoverageRequest { tech, height: i["height"].as_f64().unwrap_or(1.2) as f32, cell: i["cell"].as_f64().unwrap_or(0.5) as f32 };
             let _ = world.run_system_cached_with(planning::compute, req);
-            let cov = world.resource::<Coverage>();
-            let (covered, mean, p95) = cov.stats();
-            let q = cov.quality;
-            ToolOutput::ok(json!({
-                "summary": cov.summary, "covered_fraction": covered, "mean_predicted_error_m": mean, "p95_predicted_error_m": p95, "cells": cov.cells.len(), "cell_m": cov.cell,
-                // Share of the floor where >= min_share of readings land within target_m.
-                "quality": { "pass_fraction": cov.quality_share(), "target_m": q.target_m, "min_share": q.min_share },
-            }))
+            let mut out = coverage_json(world.resource::<Coverage>());
+            out["region"] = region_json(world);
+            ToolOutput::ok(out)
         }
         "rtls_optimize_anchors" => {
             let tech = i["tech"].as_str().and_then(Tech::parse).unwrap_or_default();
@@ -398,15 +506,29 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                 height: i["height"].as_f64().unwrap_or(1.2) as f32,
                 candidates,
                 target_coverage: i["target_coverage"].as_f64().map(|x| x as f32),
+                target_p95_m: i["target_p95_m"].as_f64().map(|x| x as f32),
+                profile: i["profile"].as_str().map(str::to_string),
+                heights: floats(&i["heights"]),
+                dim3: i["dim3"].as_bool().unwrap_or(false),
+                redundancy: i["redundancy"].as_bool().unwrap_or(false),
+                min_spacing_m: i["min_spacing_m"].as_f64().map(|x| x as f32),
+                cost_weight: i["cost_weight"].as_f64().map(|x| x as f32),
+                head_end: vec3(&i["head_end"]),
+                refine: i["refine"].as_bool().unwrap_or(true),
+                expand_heights: true,
                 ..Default::default()
             };
-            let _ = world.run_system_cached_with(planning::optimize, req);
+            let profile = req.profile.clone();
+            let result = world.run_system_cached_with(planning::optimize, req).unwrap_or_default();
             let (sugg, facing, note) = {
                 let c = world.resource::<Coverage>();
                 (c.suggestions.clone(), c.suggestion_facing.clone(), c.suggestion_note.clone())
             };
             if i["apply"].as_bool().unwrap_or(false) {
-                let prof = world.resource::<Profiles>().default_for(tech.infra()).cloned();
+                let prof = {
+                    let all = world.resource::<Profiles>();
+                    profile.as_deref().and_then(|id| all.get(id)).filter(|p| p.kind == tech.infra()).or_else(|| all.default_for(tech.infra())).cloned()
+                };
                 if let Some(prof) = prof {
                     for (k, p) in sugg.iter().enumerate() {
                         let dir = facing.get(k).copied().unwrap_or(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
@@ -419,7 +541,7 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                 }
                 world.resource_mut::<Coverage>().suggestions.clear();
             }
-            ToolOutput::ok(json!({ "note": note, "positions": sugg.iter().map(|p| [r2(p.x), r2(p.y), r2(p.z)]).collect::<Vec<_>>(), "applied": i["apply"].as_bool().unwrap_or(false) }))
+            ToolOutput::ok(json!({ "note": note, "positions": sugg.iter().map(|p| [r2(p.x), r2(p.y), r2(p.z)]).collect::<Vec<_>>(), "applied": i["apply"].as_bool().unwrap_or(false), "targets_met": result.targets_met, "floor_coverage": r2(result.coverage_after), "reachable_coverage": r2(result.reachable_coverage) }))
         }
         "rtls_configure_outputs" => {
             let patch = i.get("outputs").unwrap_or(i);
@@ -440,6 +562,16 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                 uwb: i["uwb"].as_bool().unwrap_or(d.uwb),
                 ble: i["ble"].as_bool().unwrap_or(d.ble),
                 rfid: i["rfid"].as_bool().unwrap_or(d.rfid),
+                ble_aoa: i["ble_aoa"].as_bool().unwrap_or(d.ble_aoa),
+                wifi: i["wifi"].as_bool().unwrap_or(d.wifi),
+                heights: floats(&i["heights"]),
+                dim3: i["dim3"].as_bool().unwrap_or(d.dim3),
+                redundancy: i["redundancy"].as_bool().unwrap_or(d.redundancy),
+                min_spacing_m: i["min_spacing_m"].as_f64().map(|v| v as f32),
+                cost_weight: i["cost_weight"].as_f64().map(|v| v as f32),
+                head_end: vec3(&i["head_end"]),
+                refine: i["refine"].as_bool().unwrap_or(d.refine),
+                colocate: i["colocate"].as_bool().unwrap_or(d.colocate),
                 target_m: i["target_cm"].as_f64().map(|c| c as f32 / 100.0).unwrap_or(d.target_m),
                 workers: i["workers"].as_u64().map(|w| w as usize).unwrap_or(d.workers),
                 test_s: i["test_s"].as_f64().unwrap_or(d.test_s),
@@ -449,18 +581,38 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             };
             let r = super::deploy::auto_deploy(world, &req);
             world.resource_mut::<super::ui::DeployState>().last = Some(r.clone());
+            let (_, verdict) = r.verdict();
             ToolOutput::ok(json!({
                 "placed": r.headline(),
+                "verdict": verdict,
                 "zones_created": r.zones_created,
                 "floor_coverage": r2(r.coverage),
-                "zones_fully_covered": format!("{}/{}", r.zones_covered, r.zones_total),
-                "predicted_p95_m": r2(r.predicted_p95_m),
+                "reachable_coverage": r2(r.reachable_coverage),
+                "zones_meeting_coverage": format!("{}/{}", r.zones_covered, r.zones_total),
+                "predicted_p95_m": finite(r.predicted_p95_m),
                 "targets_met": r.targets_met,
-                "test": { "uwb_rmse_m": r2(r.uwb_rmse_m), "uwb_cep95_m": r2(r.uwb_cep95_m), "all_tech_rmse_m": r2(r.rmse_m), "located": r.located, "tags": r.total_tags },
-                "target_applies_to": "UWB p95 (simulated)",
+                "plans": r.plans.iter().map(|p| json!({ "tech": p.tech, "devices": p.devices, "coverage": r2(p.coverage), "reachable_coverage": r2(p.reachable_coverage), "predicted_p95_m": finite(p.p95_m), "install_cost": r2(p.cost), "targets_met": p.targets_met })).collect::<Vec<_>>(),
+                "feedback_added": r.feedback_added,
+                "test": {
+                    "simulated": true,
+                    "seconds": r.test_s,
+                    "uwb_rmse_m": r2(r.uwb_rmse_m),
+                    // Null when more than 5 % of updates had no fix.
+                    "uwb_cep95_m": finite(r.uwb_cep95_m),
+                    "cep95_m": finite(r.cep95_m),
+                    "all_tech_rmse_m": r2(r.rmse_m),
+                    "found": r.found,
+                    "located": r.located,
+                    "tags": r.total_tags,
+                    "accuracy": r.accuracy.iter().map(|a| json!({ "tech": a.tech, "target_m": a.target_m, "passed": a.passed(), "moving": class_json(&a.moving), "parked": class_json(&a.parked) })).collect::<Vec<_>>(),
+                    "rfid_tags": r.rfid_tags,
+                    "rfid_mean_read_chance_per_round": r2(r.rfid_read_chance),
+                },
+                "target_applies_to": "each technology's simulated p95, moving and parked tags apart, an update with no fix counting as a miss",
                 "rfid_unread": r.rfid_unread,
                 "alarms": r.alarms,
                 "notes": r.notes,
+                "region": region_json(world),
             }))
         }
         "rtls_openems" => {

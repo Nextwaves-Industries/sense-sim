@@ -17,11 +17,15 @@ pub enum DeviceKind {
     BleTag,
     RfidReader,
     RfidTag,
+    /// Fixed WiFi access point (RTT/FTM responder or RSSI reference).
+    WifiAp,
+    /// Mobile WiFi client.
+    WifiClient,
 }
 
 impl DeviceKind {
-    pub const ALL: [DeviceKind; 6] =
-        [Self::UwbAnchor, Self::UwbTag, Self::BleNode, Self::BleTag, Self::RfidReader, Self::RfidTag];
+    pub const ALL: [DeviceKind; 8] =
+        [Self::UwbAnchor, Self::UwbTag, Self::BleNode, Self::BleTag, Self::RfidReader, Self::RfidTag, Self::WifiAp, Self::WifiClient];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -31,6 +35,8 @@ impl DeviceKind {
             Self::BleTag => "BLE tag",
             Self::RfidReader => "RFID reader",
             Self::RfidTag => "RFID tag",
+            Self::WifiAp => "WiFi access point",
+            Self::WifiClient => "WiFi client",
         }
     }
 
@@ -42,12 +48,14 @@ impl DeviceKind {
             Self::BleTag => "BT",
             Self::RfidReader => "R",
             Self::RfidTag => "E",
+            Self::WifiAp => "W",
+            Self::WifiClient => "WC",
         }
     }
 
     /// Infrastructure (fixed) vs things being tracked.
     pub fn is_mobile(self) -> bool {
-        matches!(self, Self::UwbTag | Self::BleTag | Self::RfidTag)
+        matches!(self, Self::UwbTag | Self::BleTag | Self::RfidTag | Self::WifiClient)
     }
 
     pub fn tech(self) -> &'static str {
@@ -55,6 +63,7 @@ impl DeviceKind {
             Self::UwbAnchor | Self::UwbTag => "uwb",
             Self::BleNode | Self::BleTag => "ble",
             Self::RfidReader | Self::RfidTag => "rfid",
+            Self::WifiAp | Self::WifiClient => "wifi",
         }
     }
 
@@ -66,6 +75,8 @@ impl DeviceKind {
             Self::BleTag => Color::srgb(0.8, 0.6, 1.0),
             Self::RfidReader => Color::srgb(0.25, 0.85, 0.45),
             Self::RfidTag => Color::srgb(0.75, 1.0, 0.5),
+            Self::WifiAp => Color::srgb(1.0, 0.4, 0.6),
+            Self::WifiClient => Color::srgb(1.0, 0.7, 0.8),
         }
     }
 }
@@ -78,9 +89,22 @@ pub enum UwbMode {
     Tdoa,
 }
 
+/// How a BLE or WiFi reference node measures a tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioMethod {
+    /// Signal strength turned into a distance (log-distance model).
+    #[default]
+    Rssi,
+    /// Angle of arrival from an antenna array (BLE direction finding).
+    Aoa,
+    /// Round-trip time (WiFi FTM / 802.11mc).
+    Rtt,
+}
+
 /// Radio and hardware parameters. Every field has a sensible default so a
 /// vendor profile only needs to list what differs.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
     pub id: String,
@@ -104,11 +128,21 @@ pub struct Profile {
     pub sync_sigma_ns: f32,
     pub update_hz: f32,
     pub mode: UwbMode,
+    /// How a BLE/WiFi node measures: RSSI, angle of arrival or round-trip time.
+    pub method: RadioMethod,
+    /// Angle-of-arrival noise per axis (LOS), degrees.
+    pub aoa_sigma_deg: f32,
+    /// Extra angle error per typical wall crossed, degrees.
+    pub aoa_nlos_deg: f32,
+    /// Field of view of an AoA array around its boresight, degrees (full angle).
+    pub aoa_fov_deg: f32,
+    /// RFID: conducted reader power. BLE and WiFi: what a transmitter adds to `rssi_at_1m`.
     pub tx_power_dbm: f32,
     /// UWB transmit power as spectral density, dBm/MHz (−41.3 = the FCC/ETSI
     /// limit, what chips like the DW3000 run at full power). Lower it to
     /// shorten the link range; the planner and the simulation both follow it.
     pub uwb_tx_dbm_mhz: f32,
+    /// RSSI 1 m from this device when it transmits at 0 dBm, through its real antenna and case.
     pub rssi_at_1m: f32,
     pub path_loss_exp: f32,
     pub shadow_sigma_db: f32,
@@ -142,6 +176,10 @@ impl Default for Profile {
             sync_sigma_ns: 0.15,
             update_hz: 10.0,
             mode: UwbMode::Twr,
+            method: RadioMethod::Rssi,
+            aoa_sigma_deg: 3.0,
+            aoa_nlos_deg: 10.0,
+            aoa_fov_deg: 140.0,
             tx_power_dbm: 0.0,
             uwb_tx_dbm_mhz: super::radio::UWB_MAX_DBM_MHZ,
             rssi_at_1m: -59.0,
@@ -160,8 +198,9 @@ impl Default for Profile {
     }
 }
 
+/// The profiles in use (with the active region's rules applied) and the region state.
 #[derive(Resource)]
-pub struct Profiles(pub Vec<Profile>);
+pub struct Profiles(pub Vec<Profile>, pub super::region::RegionState);
 
 impl Profiles {
     pub fn get(&self, id: &str) -> Option<&Profile> {
@@ -182,7 +221,46 @@ impl Profiles {
         if let Some(tx) = d.radio.uwb_tx_dbm_mhz {
             p.uwb_tx_dbm_mhz = tx.min(super::radio::UWB_MAX_DBM_MHZ);
         }
+        // Its own antenna changes the EIRP. Saved patterns have no single gain
+        // here, so those are not capped (see `region::PATTERN_NOTE`).
+        if let Some(r) = &self.1.active {
+            p.uwb_tx_dbm_mhz = r.uwb_tx(p.uwb_tx_dbm_mhz);
+            if d.kind == DeviceKind::RfidReader
+                && let Some(super::antenna::AntennaChoice::Omni { gain_dbi } | super::antenna::AntennaChoice::Directional { gain_dbi, .. }) = &d.radio.antenna
+            {
+                let base = self.1.base.iter().find(|b| b.id == p.id).map_or(p.tx_power_dbm, |b| b.tx_power_dbm);
+                p.tx_power_dbm = r.rfid_tx(base, *gain_dbi);
+            }
+        }
         p
+    }
+
+    /// Applies a regulatory region by id; empty or "none" removes it. Power the
+    /// user lowered since the last change is kept.
+    pub fn set_region(&mut self, id: &str) -> Result<(), String> {
+        let id = id.trim();
+        let next = if id.is_empty() || id.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            let found = self.1.regions.iter().find(|r| r.id.eq_ignore_ascii_case(id) || r.name.eq_ignore_ascii_case(id)).cloned();
+            let Some(found) = found else {
+                let ids: Vec<&str> = self.1.regions.iter().map(|r| r.id.as_str()).collect();
+                return Err(format!("unknown region '{id}'. Regions: {}", ids.join(", ")));
+            };
+            Some(found)
+        };
+        let old = self.1.active.take();
+        for b in &mut self.1.base {
+            let applied = old.as_ref().map_or(b.uwb_tx_dbm_mhz, |r| r.uwb_tx(b.uwb_tx_dbm_mhz));
+            if let Some(cur) = self.0.iter().find(|p| p.id == b.id)
+                && cur.uwb_tx_dbm_mhz != applied
+            {
+                b.uwb_tx_dbm_mhz = cur.uwb_tx_dbm_mhz;
+            }
+        }
+        self.0 = self.1.base.iter().map(|p| next.as_ref().map_or_else(|| p.clone(), |r| r.constrain(p))).collect();
+        self.1.active = next;
+        Ok(())
     }
 
     pub fn default_for(&self, kind: DeviceKind) -> Option<&Profile> {
@@ -214,7 +292,10 @@ impl Profiles {
                 let Ok(txt) = std::fs::read_to_string(&p) else { continue };
                 let parsed: Vec<Profile> = serde_json::from_str(&txt)
                     .or_else(|_| serde_json::from_str::<Profile>(&txt).map(|p| vec![p]))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|err| {
+                        warn!("device profiles in {}: {err}. Using the built-in ones.", p.display());
+                        Vec::new()
+                    });
                 for prof in parsed {
                     // User profiles override built-ins with the same id.
                     list.retain(|x| x.id != prof.id);
@@ -222,7 +303,8 @@ impl Profiles {
                 }
             }
         }
-        Self(list)
+        let state = super::region::RegionState { regions: super::region::load(), active: None, base: list.clone() };
+        Self(list, state)
     }
 }
 
@@ -284,6 +366,9 @@ pub struct RadioOverride {
     /// Its own antenna (`None` = the profile's, or the FDTD antenna applied to its technology).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub antenna: Option<super::antenna::AntennaChoice>,
+    /// A tag worn on someone's chest: their body shadows whatever's behind them.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub worn: bool,
 }
 
 impl RadioOverride {
@@ -353,4 +438,26 @@ pub fn epc_for(id: &str) -> String {
         h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
     }
     format!("3034{:016X}{:04X}", h, (h >> 48) as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_2_4_ghz_nodes_say_so() {
+        // A missing `freq_mhz` falls back to UWB's 6489.6 MHz, 8.5 dB off in the FDTD map.
+        let list: Vec<Profile> = serde_json::from_str(include_str!("../../assets/devices/generic.json")).unwrap();
+        for id in ["ble-beacon", "ble-aoa-locator", "esl-gateway"] {
+            let p = list.iter().find(|p| p.id == id).unwrap();
+            assert_eq!(p.freq_mhz, 2440.0, "{id}");
+        }
+    }
+
+    #[test]
+    fn rfid_wall_loss_does_not_fall_below_ble_with_frequency() {
+        let list: Vec<Profile> = serde_json::from_str(include_str!("../../assets/devices/generic.json")).unwrap();
+        let loss = |id: &str| list.iter().find(|p| p.id == id).unwrap().wall_loss_db;
+        assert!(loss("rfid-reader") < loss("ble-beacon"), "loss rises with frequency");
+    }
 }

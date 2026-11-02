@@ -131,6 +131,9 @@ pub struct AgentConfig {
     pub mcp_servers: BTreeMap<String, McpServerCfg>,
     #[serde(default = "default_steps")]
     pub max_steps: usize,
+    /// Attach clearly relevant knowledge base passages to each message.
+    #[serde(default = "yes")]
+    pub knowledge_auto: bool,
 }
 
 fn default_effort() -> String {
@@ -157,6 +160,7 @@ impl Default for AgentConfig {
             mcp_port: default_port(),
             mcp_servers: BTreeMap::new(),
             max_steps: default_steps(),
+            knowledge_auto: true,
         }
     }
 }

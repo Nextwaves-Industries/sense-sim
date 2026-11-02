@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Align2, RichText, vec2};
-use bevy_egui::{EguiContexts, egui::Color32};
+use bevy_egui::EguiContexts;
 
 use super::connect::{Links, PortRef};
 use super::ports::Role;
@@ -18,18 +18,24 @@ pub fn plant_ui(
     camera: Single<(&Camera, &GlobalTransform), With<OrbitCamera>>,
     window: Single<&Window, With<bevy::window::PrimaryWindow>>,
     hide: Res<crate::ui::HideOverlays>,
+    mut slot: ResMut<crate::ui::LeftPanelSlot>,
     mut plant: ResMut<Plant>,
     mut links: ResMut<Links>,
     selection: Res<Selection>,
     objects: Query<(Entity, &PlacedObject, &Transform)>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
-    if hide.0 > 0 {
+    if hide.0 > 0 || slot.canvas_taken() {
         return Ok(());
     }
     let model = Model::build(objects.iter());
     let has_plant = !links.0.is_empty() || model.objs.iter().any(|o| o.role != Role::Other);
-    if !has_plant {
+    if std::mem::take(&mut slot.plant_toggle) {
+        plant.running = !plant.running;
+    }
+    slot.plant = has_plant.then_some(plant.running);
+    // The plant keeps running elsewhere; its controls live in its own workbench.
+    if !has_plant || slot.bench.current != crate::ui::Workbench::Plant {
         return Ok(());
     }
     let (cam, cam_gt) = *camera;
@@ -46,7 +52,7 @@ pub fn plant_ui(
         .unwrap_or(ctx.content_rect());
 
     // Port labels.
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("plant_labels"))).with_clip_rect(vp);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("plant_labels"))).with_clip_rect(vp);
     for o in &model.objs {
         let selected = selection.selected == Some(o.entity);
         if !(plant.show_ports || selected) {
@@ -59,20 +65,22 @@ pub fn plant_ui(
             let col = if linked { theme::SUCCESS } else { theme::TEXT };
             let galley = painter.layout_no_wrap(p.id.clone(), egui::FontId::proportional(11.0), col);
             let r = egui::Rect::from_center_size(egui::pos2(s.x, s.y), galley.size() + vec2(8.0, 2.0));
-            painter.rect_filled(r, 3.0, Color32::from_black_alpha(150));
+            theme::viewport_chip(&painter, r);
             painter.galley(r.min + vec2(4.0, 1.0), galley, col);
         }
     }
+
+    let between = slot.between.unwrap_or(vp);
 
     // ---- Bottom strip
     let running_n = plant.live.omega.values().filter(|w| w.abs() > 1e-3).count();
     let pumped: f32 = plant.live.flow.pumps.values().map(|p| p.0.max(0.0)).sum();
     let alarms = plant.live.alarms.clone();
     egui::Area::new(egui::Id::new("plant_strip"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .pivot(Align2::CENTER_BOTTOM)
-        .fixed_pos(egui::pos2(vp.center().x, vp.bottom() - 12.0))
-        .constrain_to(vp)
+        .fixed_pos(egui::pos2(between.center().x, vp.bottom() - 52.0))
+        .constrain_to(between)
         .show(&ctx, |ui| {
             theme::floating_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -106,9 +114,9 @@ pub fn plant_ui(
     }
     let name = o.name.clone();
     egui::Area::new(egui::Id::new("plant_card"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .pivot(Align2::LEFT_BOTTOM)
-        .fixed_pos(egui::pos2(vp.left() + 12.0, vp.bottom() - 64.0))
+        .fixed_pos(egui::pos2(between.left(), vp.bottom() - 12.0))
         .constrain_to(vp)
         .show(&ctx, |ui| {
             theme::floating_frame().inner_margin(egui::Margin::same(10)).show(ui, |ui| {
@@ -155,12 +163,29 @@ pub fn plant_ui(
                         }
                     }
                     let q = plant.live.flow.element_flow.get(&name).copied().unwrap_or(0.0);
-                    ui.label(RichText::new(format!("Flow {:.2} l/s", q * 1000.0)).small().color(theme::WEAK));
+                    let ang = sim::valve_angle(o, &plant.controls);
+                    let state = match sim::valve_k(ang) {
+                        None => "shut".to_string(),
+                        Some(_) if ang < 5.0 => "fully open".to_string(),
+                        Some(k) => format!("throttling · K {k:.0}"),
+                    };
+                    ui.label(RichText::new(format!("Lever {ang:.0}° (0° open, 90° shut) · {state}")).small().color(theme::WEAK));
+                    let head = |p: &str| plant.live.flow.port_head.get(&PortRef::new(&name, p)).copied();
+                    let rho = sim::fluids(&model, &links, &plant.controls).get(&name).map_or(998.0, |f| f.rho);
+                    let dp = match (head("a"), head("b")) {
+                        (Some(a), Some(b)) => format!(" · Δp {:.1} kPa", (a - b).abs() * rho * 9.81 / 1000.0),
+                        _ => String::new(),
+                    };
+                    ui.label(RichText::new(format!("Flow {:.2} l/s{dp}", q * 1000.0)).small().color(theme::WEAK));
                 }
                 if o.role == Role::Pump
                     && let Some((q, h)) = plant.live.flow.pumps.get(&name)
                 {
                     ui.label(RichText::new(format!("{:.2} l/s at {:.1} m head", q * 1000.0, h)).small().color(theme::WEAK));
+                    if let Some((a, r)) = plant.live.flow.npsh.get(&name) {
+                        let col = if a < r { theme::DANGER } else { theme::WEAK };
+                        ui.label(RichText::new(format!("Suction NPSH {a:.1} m available, {r:.1} m needed")).small().color(col));
+                    }
                 }
                 if o.role == Role::Tank {
                     let g = sim::tank_geom(o);

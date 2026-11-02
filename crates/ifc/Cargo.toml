@@ -1,0 +1,15 @@
+[package]
+name = "ifc"
+version = "0.1.0"
+edition = "2024"
+description = "Reads buildings from IFC2x3 and IFC4 STEP files: walls, slabs, columns, doors and windows as oriented boxes with materials and storeys, for radio coverage prediction. Pure Rust, no UI and no game-engine dependency, so its tests build in seconds."
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[profile.test]
+opt-level = 3

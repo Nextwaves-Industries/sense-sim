@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::catalog::{self, Catalog};
 use super::llm::{Block, ToolDef};
-use super::{Agent, ChatItem, Question, images};
+use super::{Agent, ChatItem, Question, assetgen, images, photocheck, toolmaker};
 use crate::library::Library;
 use crate::prototype::{ProtoState, PrototypeCache};
 use crate::scene::{Action, Actions, NameCounter, OrbitCamera, PlacedObject, spawn_object};
@@ -79,6 +79,11 @@ impl Default for ToolBridge {
 
 /// Blocking call from a worker thread. Returns early if `cancel` is set.
 pub fn call(tx: &Sender<ToolJob>, name: &str, input: Value, from_mcp: bool, cancel: Option<&AtomicBool>) -> ToolOutput {
+    // Waiting has to happen on this thread, not in the app's update loop.
+    #[cfg(feature = "antenna-studio")]
+    if name == crate::antenna::assist::WAIT {
+        return crate::antenna::assist::wait(tx, &input, cancel);
+    }
     let (rtx, rrx) = unbounded();
     if tx.send(ToolJob { name: name.into(), input, reply: rtx, from_mcp }).is_err() {
         return ToolOutput::err("viewer is shutting down");
@@ -105,6 +110,51 @@ fn def(name: &str, description: &str, schema: Value) -> ToolDef {
 /// Tools for the in-app assistant. `mcp` adds the tools only external clients need.
 pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
     let vec3 = json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+    let material = json!({
+        "description": "A preset name, or an object. Fields on top of a preset: color, emissive, roughness, metallic, opacity, tile_m. texture is an image file; photo {image_id, box: [x0,y0,x1,y1]} (or {image_id, id} for a detection) textures with that crop of the photo, or samples its color with as: \"color\".",
+        "oneOf": [
+            { "type": "string", "enum": assetgen::PRESETS },
+            {
+                "type": "object",
+                "properties": {
+                    "preset": { "type": "string", "enum": assetgen::PRESETS },
+                    "color": { "description": "#rrggbb or [r, g, b] 0-1, sRGB" },
+                    "emissive": { "description": "#rrggbb or [r, g, b] 0-1, sRGB" },
+                    "roughness": { "type": "number" }, "metallic": { "type": "number" }, "opacity": { "type": "number" },
+                    "texture": { "type": "string" },
+                    "tile_m": { "type": "number", "description": "real size of one texture repeat" },
+                    "photo": { "type": "object" }
+                }
+            }
+        ]
+    });
+    let layout_camera = json!({
+        "type": "object",
+        "description": "your reading of the camera from the photo. The horizon is at eye level, where parallel floor and ceiling lines converge; a tilted photo has different left and right values.",
+        "properties": {
+            "height_m": { "type": "number", "description": "camera height above the floor" },
+            "horizon_v": { "type": "number", "description": "normalized row of the horizon, 0 at the top, for a level photo" },
+            "horizon_left_v": { "type": "number", "description": "row where the horizon meets the left edge" },
+            "horizon_right_v": { "type": "number", "description": "row where the horizon meets the right edge" }
+        },
+        "required": ["height_m"]
+    });
+    let layout_objects = json!({
+        "type": "array",
+        "description": "your estimates per detection. An object whose box reaches the floor needs none to be placed, but sizes check your camera. Hanging things and things with a hidden base need one.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer" },
+                "height_m": { "type": "number", "description": "real height, from what it is" },
+                "width_m": { "type": "number", "description": "real width across the view" },
+                "base_y": { "type": "number", "description": "height of its underside: on a shelf, or hanging" },
+                "at_xz": { "type": "array", "items": { "type": "number" }, "description": "floor position [x, z], when you know better than perspective" },
+                "yaw_deg": { "type": "number", "description": "which way it faces" }
+            },
+            "required": ["id"]
+        }
+    });
     let mut v = vec![
         def(
             "list_asset_categories",
@@ -186,7 +236,7 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ),
         def(
             "update_object",
-            "Move, rotate, rescale or rename a placed object. Omitted fields stay unchanged.",
+            "Move, rotate, rescale or rename a placed object. Omitted fields stay unchanged. An object the user locked (\"locked\": true in get_scene) can only be renamed.",
             json!({
                 "type": "object",
                 "properties": {
@@ -200,10 +250,24 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ),
         def(
             "delete_objects",
-            "Delete placed objects by name.",
+            "Delete placed objects by name. Objects the user locked are kept and listed in locked_not_deleted.",
             json!({ "type": "object", "properties": { "names": { "type": "array", "items": { "type": "string" } } }, "required": ["names"] }),
         ),
         def("clear_scene", "Remove every placed object.", json!({ "type": "object", "properties": {} })),
+        def(
+            "load_template",
+            &format!(
+                "Replace the scene with a ready-made starting scene (room, objects, RTLS devices, zones, moving tags) in one call. \
+                 When the request resembles a template, load it first and adapt it (update_object / delete_objects / place_objects / rtls_*) \
+                 instead of building from scratch. Missing assets download automatically. Templates:\n{}",
+                crate::samples::TEMPLATES.iter().map(|(id, s)| format!("- {id}: {}", s.blurb)).collect::<Vec<_>>().join("\n")
+            ),
+            json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "enum": crate::samples::TEMPLATES.iter().map(|(id, _)| *id).collect::<Vec<_>>() } },
+                "required": ["name"]
+            }),
+        ),
         def(
             "verify_scene",
             "Measure the scene for physical problems: objects floating above or sunk into what is below them, and solid objects intersecting each other. Call it after placing or moving things and fix every issue it reports; the harness also runs it automatically before you finish.",
@@ -250,6 +314,45 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
             json!({ "type": "object", "properties": {} }),
         ),
         def(
+            "set_photo_layout",
+            "State or revise your reading of a photo, instantly and without running a model: the camera (height and horizon), field of view, building axis, and per detection a size, a base height, a position or a yaw. Everything is recomputed by perspective and returned, with the overlay. Only what you pass changes. Read each object's checks: where its size and floor contact disagree, or implied_camera_height_m differs from your camera, something you stated is wrong.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "image_id": { "type": "string" },
+                    "camera": layout_camera,
+                    "hfov_deg": { "type": "number" },
+                    "building_axis_deg": { "type": "number", "description": "which way the building runs relative to the camera: 0 means its walls and aisles are square to the view" },
+                    "objects": layout_objects
+                },
+                "required": ["image_id"]
+            }),
+        ),
+        def(
+            "check_against_depth",
+            "Verification only: reads the photo's depth with a vision model and reports where your finished layout disagrees with it. Changes nothing. Depth compresses with distance and misjudges glass and dense shelves, so a disagreement is a reason to look at the photo again, not an answer.",
+            json!({ "type": "object", "properties": { "image_id": { "type": "string" } }, "required": ["image_id"] }),
+        ),
+        def(
+            "add_photo_backdrop",
+            "Put a region of the photo in the scene as a flat picture at a distance you estimate, sized so that from the photo camera it covers exactly that region of the view. For what you can't rebuild as objects: the far end of the store past the last modeled shelf, a mezzanine, a wall of signs. It looks right from the photo's viewpoint and flat from anywhere else, and it isn't solid to simulation, so say which parts of the scene are backdrops.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "image_id": { "type": "string" },
+                    "box": { "type": "array", "items": { "type": "number" }, "description": "normalized [x0, y0, x1, y1]" },
+                    "distance_m": { "type": "number", "description": "your estimate of how far away this part of the photo is" },
+                    "name": { "type": "string" }
+                },
+                "required": ["image_id", "box", "distance_m"]
+            }),
+        ),
+        def(
+            "compare_to_photo",
+            "Verify your work: renders the scene from the photo's camera and returns the real photo beside it, with a blend and a difference map, plus measured color_match, detail_match (0-1) and the regions that differ most. Look at it and believe it over your expectations. Moves the camera to the photo's viewpoint.",
+            json!({ "type": "object", "properties": { "image_id": { "type": "string" } }, "required": ["image_id"] }),
+        ),
+        def(
             "ask_user",
             "Ask the user a question and wait for the answer. Use for missing scale/dimensions, choosing between candidate assets (candidate_assets shows clickable thumbnails), what to do when no matching asset exists, and whether to refine after a review. Keep questions short; offer options when possible.",
             json!({
@@ -265,7 +368,7 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ),
         def(
             "perceive_photo",
-            "Measure a reference photo with on-device vision models (metric depth + open-vocabulary detection): recovers the photo camera pose, finds every instance of the given labels, and measures each object's floor position, width, height and orientation in meters, plus walls and the visible floor area. Returns numbered detections and an overlay image (green numbered boxes). Labels should be short concrete nouns the detector knows, e.g. [\"pallet rack\", \"pallet\", \"cardboard box\", \"forklift\", \"column\", \"conveyor\", \"workbench\"]. Add extra_boxes for objects the detector misses. Re-run with known_size once you know a real dimension.",
+            "Find the objects in a reference photo (open-vocabulary detection): returns numbered boxes and an overlay image with your horizon drawn on it. This does not know where things are: positions follow from the camera you state, by perspective, so give camera and objects here or with set_photo_layout. Labels should be short concrete nouns, e.g. [\"shelf\", \"pallet\", \"forklift\", \"column\", \"hanging sign\"]. Add extra_boxes for what the detector misses.",
             json!({
                 "type": "object",
                 "properties": {
@@ -284,13 +387,9 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
                         },
                         "description": "normalized [0,1] boxes (top-left x0,y0 to bottom-right x1,y1) reaching down to where the object touches the floor"
                     },
-                    "hfov_deg": { "type": "number", "description": "horizontal field of view if known; otherwise EXIF or the configured default is used" },
-                    "known_size": {
-                        "type": "object",
-                        "properties": { "id": { "type": "integer" }, "width_m": { "type": "number" }, "height_m": { "type": "number" } },
-                        "required": ["id"],
-                        "description": "a detection whose real width or height you know; rescales all distances"
-                    },
+                    "camera": layout_camera.clone(),
+                    "hfov_deg": { "type": "number", "description": "your estimate of the horizontal field of view; otherwise EXIF, or the configured default" },
+                    "objects": layout_objects.clone(),
                     "threshold": { "type": "number", "description": "detection confidence, default 0.2" }
                 },
                 "required": ["image_id", "labels"]
@@ -328,7 +427,7 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ),
         def(
             "add_structure",
-            "Add building structure that isn't in the asset library: floor slab, walls, columns, ceiling, roof beams or plain blocks. Either give one piece (kind, size_m = [length, height, depth], x, z, yaw_deg), or from_photo = image_id to build the room shell measured by perceive_photo (visible floor, fitted walls, detected columns, ceiling). A ceiling without size_m covers the whole scene at height_m (default: tallest object + 1 m); with_beams adds roof trusses under it. Ceilings are see-through from above and are the main mounting surface for RTLS anchors.",
+            "Add building structure that isn't in the asset library: floor slab, walls, columns, ceiling, roof beams or plain blocks. Either give one piece (kind, size_m = [length, height, depth], x, z, yaw_deg, material), or from_photo = image_id to build the room shell you estimated: floor, walls, columns and always a ceiling, painted with the photo. Give it room and height_m, your estimates; refine it with materials; pass ceiling false only for an outdoor photo. A ceiling without size_m covers the whole scene at height_m (default: tallest object + 1 m); with_beams adds roof trusses under it. Ceilings are see-through from above and are the main mounting surface for RTLS anchors.",
             json!({
                 "type": "object",
                 "properties": {
@@ -340,9 +439,102 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
                     "with_beams": { "type": "boolean" },
                     "beam_spacing_m": { "type": "number", "description": "default 6" },
                     "yaw_deg": { "type": "number" },
-                    "name": { "type": "string" }
+                    "name": { "type": "string" },
+                    "material": material.clone(),
+                    "materials": {
+                        "type": "object",
+                        "description": "from_photo: per-surface materials on top of the sampled colors, e.g. {\"ceiling\": {\"preset\": \"ceiling_tile\"}, \"floor\": {\"preset\": \"vinyl_tile\", \"color\": \"#c9c4b8\"}}",
+                        "properties": { "floor": material.clone(), "wall": material.clone(), "column": material.clone(), "ceiling": material.clone() }
+                    },
+                    "ceiling": { "type": "boolean", "description": "from_photo: false when the photo is outdoors. Default true." },
+                    "project_photo": { "type": "boolean", "description": "from_photo: paint the photo onto the floor, ceiling and assumed walls, so they look right from its camera. Default true. A surface given in materials keeps that material instead." },
+                    "room": {
+                        "type": "object",
+                        "description": "from_photo, required the first time: your estimate of the whole room from the camera, including what's out of view: meters to the left and right walls and to the far wall. Sticks for later calls.",
+                        "properties": { "left_m": { "type": "number" }, "right_m": { "type": "number" }, "depth_m": { "type": "number" } },
+                        "required": ["left_m", "right_m", "depth_m"]
+                    }
                 }
             }),
+        ),
+        def(
+            "create_asset",
+            "Make a new asset when the library has nothing that looks right, then place it like any other (place_objects or place_from_photo, by name; search_assets finds it from now on). Compose it from parts, or pass from_detection to get a stand-in with the measured size and the photo crop on its front, which looks exactly like the real object from the photo camera. parts may use ${expression} and {\"$repeat\": n, \"as\": \"i\", \"item\": {...}} for rows of shelves and the like. Meters; Y up; the finished asset's origin is moved to its bottom center. Re-using a name replaces that asset.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "mount": { "type": "string", "enum": ["floor", "ceiling", "wall"], "description": "ceiling or wall for lights, signs and anything else that hangs, so it stays up; default floor" },
+                    "parts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "shape": { "type": "string", "enum": ["box", "cylinder", "cone", "sphere", "panel"], "description": "panel: one quad facing +Z, for signs, screens and glass; default box" },
+                                "size": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] extent in m; panel uses [width, height, any]" },
+                                "at": { "type": "array", "items": { "type": "number" }, "description": "center [x, y, z]; default origin" },
+                                "rotate_deg": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z]" },
+                                "top_scale": { "type": "number", "description": "cylinder: top end relative to the bottom (tapers)" },
+                                "material": material.clone()
+                            },
+                            "required": ["size"]
+                        }
+                    },
+                    "from_detection": {
+                        "type": "object",
+                        "properties": {
+                            "image_id": { "type": "string" }, "id": { "type": "integer" },
+                            "depth_m": { "type": "number", "description": "depth along the view, which a photo can't measure" },
+                            "width_m": { "type": "number", "description": "your estimate, if better than the measured width" },
+                            "height_m": { "type": "number", "description": "your estimate, if better than the measured height" }
+                        },
+                        "required": ["image_id", "id"]
+                    }
+                },
+                "required": ["name"]
+            }),
+        ),
+        def(
+            "set_object_material",
+            "Change the look of a placed object: any library asset or generated piece. Recolors all of it, replacing its base texture unless keep_texture (which tints it instead). Use the color perceive_photo measured for that object. Saved layouts keep it; USDA export to other tools shows the original look of library assets.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "placed object" },
+                    "preset": { "type": "string", "enum": assetgen::PRESETS },
+                    "color": { "type": "string", "description": "#rrggbb" },
+                    "roughness": { "type": "number" }, "metallic": { "type": "number" }, "opacity": { "type": "number" },
+                    "keep_texture": { "type": "boolean" }
+                },
+                "required": ["name"]
+            }),
+        ),
+        def(
+            "define_tool",
+            "Make a new tool for yourself when you would otherwise repeat a sequence of calls, or need a builder the app lacks. It is saved across sessions and offered as custom_<name> from your next turn. It runs steps in order, each an existing tool call; inputs may use ${parameter}, ${expression} (+ - * / %, min max floor ceil round abs sqrt sin cos), and {\"$repeat\": n, \"as\": \"i\", \"item\": {...}} inside arrays. Parameters without a default are required.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string", "description": "when to use it and what it does" },
+                    "parameters": { "type": "object", "description": "name -> {type, description, default}" },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "tool": { "type": "string" }, "input": { "type": "object" } },
+                            "required": ["tool", "input"]
+                        }
+                    }
+                },
+                "required": ["name", "description", "steps"]
+            }),
+        ),
+        def(
+            "delete_tool",
+            "Delete a tool saved with define_tool.",
+            json!({ "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }),
         ),
         def(
             "save_layout",
@@ -363,7 +555,13 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ));
     }
     v.extend(crate::rtls::tools::defs());
+    v.extend(crate::outcomes::tools::defs());
+    v.push(bim_tool_def());
     v.extend(crate::plant::tools::defs());
+    v.extend(toolmaker::defs());
+    #[cfg(feature = "antenna-studio")]
+    v.extend(crate::antenna::tools::defs());
+    v.extend(super::knowledge::tool_defs());
     v
 }
 
@@ -431,7 +629,8 @@ enum Wait {
     After { usds: Vec<PathBuf>, then: Box<dyn FnOnce(&mut World) -> Started + Send + Sync>, reply: Sender<ToolOutput>, started: Instant },
     AssetInfo { usd: PathBuf, thumb: bool, reply: Sender<ToolOutput>, started: Instant },
     /// `slot` is `None` until loads settle and the capture is requested.
-    Screenshot { slot: Option<Arc<Mutex<Option<Image>>>>, settled: u32, reply: Sender<ToolOutput>, started: Instant },
+    /// `compare`: the photo to set the capture against.
+    Screenshot { slot: Option<Arc<Mutex<Option<Image>>>>, settled: u32, reply: Sender<ToolOutput>, started: Instant, compare: Option<String> },
     Download { folders: Vec<String>, reply: Sender<ToolOutput>, started: Instant },
 }
 
@@ -524,14 +723,23 @@ pub(crate) fn r2(v: f32) -> f64 {
 pub(crate) fn object_json(o: &PlacedObject, t: &Transform) -> Value {
     let (mn, mx) = world_bounds(o, t);
     let (yaw, _, _) = t.rotation.to_euler(EulerRot::YXZ);
-    json!({
+    let mut v = json!({
         "name": o.name,
         "asset": o.asset.to_string_lossy().replace('\\', "/"),
         "position": [r2(t.translation.x), r2(t.translation.y), r2(t.translation.z)],
         "yaw_deg": r2(yaw.to_degrees()),
         "scale": r2(t.scale.x),
         "world_size_m": [r2(mx.x - mn.x), r2(mx.y - mn.y), r2(mx.z - mn.z)],
-    })
+    });
+    if o.locked {
+        v["locked"] = json!(true);
+    }
+    v
+}
+
+/// The user locked this object: tools leave its placement alone.
+fn is_locked(world: &World, e: Entity) -> bool {
+    world.get::<PlacedObject>(e).is_some_and(|o| o.locked)
 }
 
 /// Thumbnail of a library asset as a small PNG, from disk.
@@ -590,7 +798,7 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             let list: Vec<Value> = hits.iter().map(|h| catalog::entry_json(lib, cat, h.index)).collect();
             let mut out = ToolOutput::ok(json!({ "query": query, "results": list }));
             if list.is_empty() {
-                out = ToolOutput::text(format!("No assets match '{query}'. Try other words or list_asset_categories."));
+                out = ToolOutput::text(format!("No assets match '{query}'. Try other words or list_asset_categories. If the library really has none, make it with create_asset (or a custom_ tool) rather than leaving it out."));
             } else if i["show_thumbnails"].as_bool().unwrap_or(false) {
                 for h in hits.iter().take(6) {
                     let e = &lib.entries[h.index];
@@ -691,6 +899,9 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             let name = i["name"].as_str().unwrap_or("");
             match find_object(world, name) {
                 None => ToolOutput::err(format!("no object named '{name}'")),
+                Some(e) if is_locked(world, e) && ["x", "y", "z", "yaw_deg", "scale"].iter().any(|k| f(i, k).is_some()) => {
+                    ToolOutput::err(format!("'{name}' is locked: ask the user to unlock it before moving it"))
+                }
                 Some(e) => {
                     let mut em = world.entity_mut(e);
                     if let Some(mut t) = em.get_mut::<Transform>() {
@@ -724,8 +935,10 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
         "delete_objects" => {
             let mut done = Vec::new();
             let mut missing = Vec::new();
+            let mut locked = Vec::new();
             for n in i["names"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
                 match find_object(world, n) {
+                    Some(e) if is_locked(world, e) => locked.push(n.to_string()),
                     Some(e) => {
                         world.resource_mut::<Actions>().0.push(Action::Delete(e));
                         done.push(n.to_string());
@@ -733,11 +946,33 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
                     None => missing.push(n.to_string()),
                 }
             }
-            ToolOutput::ok(json!({ "deleted": done, "not_found": missing }))
+            ToolOutput::ok(json!({ "deleted": done, "not_found": missing, "locked_not_deleted": locked }))
         }
         "clear_scene" => {
             world.resource_mut::<Actions>().0.push(Action::ClearScene);
             ToolOutput::text("scene cleared")
+        }
+        "load_template" => {
+            let id = i["name"].as_str().unwrap_or_default();
+            match crate::samples::write_template(id, world.resource::<Library>()) {
+                Ok((path, downloading)) => {
+                    let doc: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+                    let names: Vec<&str> = doc["objects"].as_array().into_iter().flatten().filter_map(|o| o["name"].as_str()).collect();
+                    let devices: Vec<&str> = doc["rtls"]["devices"].as_array().into_iter().flatten().filter_map(|d| d["id"].as_str()).collect();
+                    let zones: Vec<&str> = doc["rtls"]["zones"].as_array().into_iter().flatten().filter_map(|z| z["name"].as_str()).collect();
+                    let out = json!({
+                        "loaded": id,
+                        "objects": names,
+                        "rtls_devices": devices,
+                        "zones": zones,
+                        "downloading": downloading,
+                        "note": "objects spawn over the next frames; call get_scene before moving them",
+                    });
+                    world.resource_mut::<Actions>().0.push(Action::LoadLayout(path));
+                    ToolOutput::ok(out)
+                }
+                Err(e) => ToolOutput::err(format!("{e:#}")),
+            }
         }
         "verify_scene" => {
             let v = super::verify::verify_scene(world);
@@ -767,7 +1002,20 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             }
             _ => ToolOutput::err("eye and target must be two different [x, y, z] points"),
         },
-        "screenshot" => return defer(world, Wait::Screenshot { slot: None, settled: 0, reply, started: Instant::now() }),
+        "screenshot" => return defer(world, Wait::Screenshot { slot: None, settled: 0, reply, started: Instant::now(), compare: None }),
+        "compare_to_photo" => {
+            let id = i["image_id"].as_str().unwrap_or("").to_string();
+            let cam = super::vision::perceive::scenes().lock().unwrap().get(&id).map(|sc| (sc.camera.eye(), sc.camera.forward(), sc.hfov_deg, sc.width as f32 / sc.height.max(1) as f32));
+            let Some((eye, forward, hfov, photo_aspect)) = cam else {
+                return Some(ToolOutput::err(format!("no perceive_photo result for '{id}'")));
+            };
+            let view_aspect = {
+                let mut q = world.query::<(&Camera, &OrbitCamera)>();
+                q.iter(world).next().and_then(|(c, _)| c.logical_viewport_size()).map(|s| s.x / s.y.max(1.0)).unwrap_or(16.0 / 9.0)
+            };
+            set_camera(world, eye, eye + forward * 10.0, Some(photocheck::fit_hfov(hfov, photo_aspect, view_aspect)));
+            return defer(world, Wait::Screenshot { slot: None, settled: 0, reply, started: Instant::now(), compare: Some(id) });
+        }
         "ask_user" => {
             let q = Question {
                 text: i["question"].as_str().unwrap_or("?").to_string(),
@@ -827,6 +1075,18 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             }
             let mut items = Vec::new();
             let mut errors = Vec::new();
+            // Nothing gets a made-up position.
+            {
+                let scenes = super::vision::perceive::scenes().lock().unwrap();
+                if let Some(sc) = scenes.get(&image) {
+                    for it in i["items"].as_array().into_iter().flatten() {
+                        let det = it["id"].as_u64().unwrap_or(u64::MAX) as usize;
+                        if sc.objects.get(det).is_some_and(|o| o.footprint.is_none()) {
+                            errors.push(format!("detection {det} has no position yet: give it height_m, width_m, base_y or at_xz with set_photo_layout"));
+                        }
+                    }
+                }
+            }
             {
                 let lib = world.resource::<Library>();
                 for it in i["items"].as_array().into_iter().flatten() {
@@ -858,9 +1118,65 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
         }
         "add_structure" => {
             use super::structures::{self, Kind, Piece};
+            let mut extra = Value::Null;
             let pieces: Vec<Piece> = if let Some(img) = i["from_photo"].as_str() {
-                match super::vision::perceive::scenes().lock().unwrap().get(img) {
-                    Some(sc) => structures::shell_from_photo(sc),
+                match super::vision::perceive::scenes().lock().unwrap().get_mut(img) {
+                    Some(sc) => {
+                        if let Some(c) = i["ceiling"].as_bool() {
+                            sc.no_ceiling = !c;
+                        }
+                        if let (Some(l), Some(r), Some(d)) = (f(&i["room"], "left_m"), f(&i["room"], "right_m"), f(&i["room"], "depth_m")) {
+                            sc.room = Some([-l.abs(), -d.abs(), r.abs(), 0.0]);
+                        }
+                        // The room is an estimate to make, not something to read off the photo.
+                        if sc.room.is_none() {
+                            return Some(ToolOutput::err("give room {left_m, right_m, depth_m}: your estimate of the whole room from the camera"));
+                        }
+                        // A stated height beats anything measured from the photo.
+                        let stated = f(i, "height_m");
+                        if let Some(h) = stated {
+                            sc.ceiling_y = Some(h);
+                        }
+                        let mut shell = structures::shell_from_photo(sc);
+                        // The photo itself, projected onto floor, ceiling and walls.
+                        if i["project_photo"].as_bool().unwrap_or(true)
+                            && let Some(photo) = images::get(img).and_then(|(d, _)| image::load_from_memory(&d).ok()).map(|d| d.to_rgb8())
+                        {
+                            for (n, p) in shell.iter_mut().enumerate() {
+                                if !matches!(p.kind, Kind::Floor | Kind::Ceiling | Kind::Wall) || !i["materials"][p.kind.name()].is_null() {
+                                    continue;
+                                }
+                                let fill = match p.kind {
+                                    Kind::Floor => sc.colors.floor,
+                                    Kind::Ceiling => sc.colors.ceiling,
+                                    _ => sc.colors.walls,
+                                }
+                                .unwrap_or([180, 180, 180]);
+                                if let Some(tex) = structures::project_photo(sc, &photo, p, fill)
+                                    && let Ok(m) = structures::projected_material(&tex, &format!("{img}_{n}_{}x{}x{:.2}", tex.width(), tex.height(), p.base_y))
+                                {
+                                    p.material = Some(m);
+                                }
+                            }
+                        }
+                        if i["with_beams"].as_bool().unwrap_or(false) {
+                            shell.extend(structures::beams_for_photo(sc, f(i, "beam_spacing_m").unwrap_or(6.0)));
+                        }
+                        for p in &mut shell {
+                            let spec = &i["materials"][p.kind.name()];
+                            if !spec.is_null() {
+                                match assetgen::Mat::parse(spec, p.material.clone().unwrap_or_default()) {
+                                    Ok(m) => p.material = Some(m),
+                                    Err(e) => return Some(ToolOutput::err(format!("materials.{}: {e:#}", p.kind.name()))),
+                                }
+                            }
+                        }
+                        if !sc.no_ceiling {
+                            let (h, source) = structures::ceiling_height(sc);
+                            extra = json!({ "ceiling_height_m": r2(h), "ceiling_source": if stated.is_some() { "as you said" } else { source } });
+                        }
+                        shell
+                    }
                     None => return Some(ToolOutput::err(format!("no perceive_photo result for '{img}'"))),
                 }
             } else if i["kind"].as_str().and_then(Kind::parse) == Some(Kind::Ceiling) && vec3(&i["size_m"]).is_none() {
@@ -904,14 +1220,31 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
                         _ => 0.0,
                     }),
                     yaw: f(i, "yaw_deg").unwrap_or(0.0).to_radians(),
+                    material: None,
                 }]
             };
+            // A material on a single call applies to what that call makes.
+            let mut pieces = pieces;
+            if !i["material"].is_null() {
+                match assetgen::Mat::parse(&i["material"], assetgen::Mat::default()) {
+                    Ok(m) => {
+                        for p in pieces.iter_mut().filter(|p| p.kind != Kind::Beam) {
+                            p.material = Some(m.clone());
+                        }
+                    }
+                    Err(e) => return Some(ToolOutput::err(format!("material: {e:#}"))),
+                }
+            }
             if pieces.is_empty() {
-                return Some(ToolOutput::text("the photo shows no floor, walls or columns to build"));
+                return Some(ToolOutput::text("nothing to build"));
             }
             let mut items = Vec::new();
             for p in &pieces {
-                match structures::usd_for(p.kind, p.size) {
+                let usd = match &p.material {
+                    Some(m) => structures::usd_with_material(p.kind, p.size, m),
+                    None => structures::usd_for(p.kind, p.size),
+                };
+                match usd {
                     Ok(usd) => items.push(PlaceItem {
                         usd,
                         transform: Transform::from_xyz(p.center.x, p.base_y, p.center.y).with_rotation(Quat::from_rotation_y(p.yaw)),
@@ -927,8 +1260,142 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             for it in &items {
                 cache.request(&it.usd);
             }
-            return defer(world, Wait::Place { items, reply, started: Instant::now(), extra: Value::Null });
+            return defer(world, Wait::Place { items, reply, started: Instant::now(), extra });
         }
+        "create_asset" => match assetgen::create(i) {
+            Ok(c) => {
+                if c.replaced {
+                    world.resource_mut::<PrototypeCache>().states.remove(&c.path);
+                }
+                let key = c.path.to_string_lossy().replace('\\', "/");
+                world.resource_mut::<Catalog>().dims.insert(key.clone(), c.size.to_array());
+                world.resource_mut::<Library>().rescan();
+                let mut v = json!({
+                    "asset": c.slug,
+                    "path": key,
+                    "size_m": [r2(c.size.x), r2(c.size.y), r2(c.size.z)],
+                    "parts": c.parts,
+                });
+                if c.replaced {
+                    v["note"] = json!("replaced the earlier asset of this name; copies already placed keep the old look until the layout reloads");
+                }
+                ToolOutput::ok(v)
+            }
+            Err(e) => ToolOutput::err(format!("{e:#}")),
+        },
+        "set_object_material" => {
+            let name = i["name"].as_str().unwrap_or("");
+            let Some(e) = find_object(world, name) else {
+                return Some(ToolOutput::err(format!("no object named '{name}'")));
+            };
+            // A new material means replacing the object.
+            if is_locked(world, e) {
+                return Some(ToolOutput::err(format!("'{name}' is locked: ask the user to unlock it first")));
+            }
+            let (asset, transform) = {
+                let em = world.entity(e);
+                (em.get::<PlacedObject>().unwrap().asset.clone(), *em.get::<Transform>().unwrap())
+            };
+            match assetgen::reskin(&asset, i) {
+                Ok(usd) => {
+                    world.resource_mut::<Actions>().0.push(Action::Delete(e));
+                    world.resource_mut::<PrototypeCache>().request(&usd);
+                    let items = vec![PlaceItem { usd, transform, name: Some(name.to_string()), ..Default::default() }];
+                    return defer(world, Wait::Place { items, reply, started: Instant::now(), extra: Value::Null });
+                }
+                Err(e) => ToolOutput::err(format!("{e:#}")),
+            }
+        }
+        "set_photo_layout" => {
+            let id = i["image_id"].as_str().unwrap_or("").to_string();
+            let Some((data, _)) = images::get(&id) else {
+                return Some(ToolOutput::err(format!("unknown image_id '{id}'")));
+            };
+            match super::vision::perceive::set_layout(&id, &data, &layout_guess(i)) {
+                Ok(scene) => photo_scene_output(&scene, &data),
+                Err(e) => ToolOutput::err(format!("{e:#}")),
+            }
+        }
+        "check_against_depth" => {
+            let id = i["image_id"].as_str().unwrap_or("").to_string();
+            let Some((data, _)) = images::get(&id) else {
+                return Some(ToolOutput::err(format!("unknown image_id '{id}'")));
+            };
+            let Some(sc) = super::vision::perceive::scenes().lock().unwrap().get(&id).cloned() else {
+                return Some(ToolOutput::err(format!("no perceive_photo result for '{id}'")));
+            };
+            let (eye, forward) = (sc.camera.eye(), sc.camera.forward());
+            let mut q = world.query::<(&PlacedObject, &Transform)>();
+            let items: Vec<super::vision::perceive::LayoutItem> = q
+                .iter(world)
+                .filter_map(|(o, t)| {
+                    let det = sc.objects.get(*sc.placed.get(&o.name)?)?;
+                    let (mn, mx) = world_bounds(o, t);
+                    // The nearest face is what the depth model sees.
+                    let distance_m = [mn.x, mx.x]
+                        .iter()
+                        .flat_map(|x| [mn.z, mx.z].map(|z| (Vec3::new(*x, eye.y, z) - eye).dot(forward)))
+                        .fold(f32::MAX, f32::min);
+                    Some(super::vision::perceive::LayoutItem { name: o.name.clone(), bbox: det.bbox, distance_m })
+                })
+                .collect();
+            // Inference takes seconds.
+            std::thread::spawn(move || {
+                let out = match super::vision::perceive::check_depth(&id, &data, &items) {
+                    Ok(v) => ToolOutput::ok(v),
+                    Err(e) => ToolOutput::err(format!("depth check unavailable: {e:#}")),
+                };
+                let _ = reply.send(out);
+            });
+            return None;
+        }
+        "add_photo_backdrop" => {
+            let image = i["image_id"].as_str().unwrap_or("");
+            let b: Vec<f32> = i["box"].as_array().into_iter().flatten().filter_map(|v| v.as_f64().map(|x| x as f32)).collect();
+            let Some(distance) = f(i, "distance_m").filter(|d| *d > 0.1) else {
+                return Some(ToolOutput::err("distance_m must be positive"));
+            };
+            if b.len() != 4 || b[2] <= b[0] || b[3] <= b[1] {
+                return Some(ToolOutput::err("box must be [x0, y0, x1, y1] with x1 > x0 and y1 > y0"));
+            }
+            let spot = super::vision::perceive::scenes().lock().unwrap().get(image).map(|sc| super::placer::backdrop(sc, [b[0], b[1], b[2], b[3]], distance));
+            let Some(spot) = spot else {
+                return Some(ToolOutput::err(format!("no perceive_photo result for '{image}'")));
+            };
+            let name = i["name"].as_str().filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| format!("backdrop_{image}_{}", (b[0] * 100.0) as u32 * 1000 + (b[1] * 100.0) as u32));
+            let spec = json!({
+                "name": name,
+                "mount": "wall",
+                "description": "photo backdrop",
+                "parts": [{ "shape": "panel", "size": [spot.width, spot.height, 0.001], "material": { "photo": { "image_id": image, "box": b } } }]
+            });
+            match assetgen::create(&spec) {
+                Ok(c) => {
+                    if c.replaced {
+                        world.resource_mut::<PrototypeCache>().states.remove(&c.path);
+                    }
+                    world.resource_mut::<Library>().rescan();
+                    world.resource_mut::<PrototypeCache>().request(&c.path);
+                    let base = Vec3::new(spot.center.x, spot.center.y - spot.height * 0.5, spot.center.z);
+                    let items = vec![PlaceItem {
+                        usd: c.path,
+                        transform: Transform::from_translation(base).with_rotation(Quat::from_rotation_y(spot.yaw)),
+                        name: Some(c.slug),
+                        ..Default::default()
+                    }];
+                    return defer(world, Wait::Place { items, reply, started: Instant::now(), extra: json!({ "width_m": r2(spot.width), "height_m": r2(spot.height) }) });
+                }
+                Err(e) => ToolOutput::err(format!("{e:#}")),
+            }
+        }
+        "define_tool" => match toolmaker::define(i, &tool_defs(false)) {
+            Ok(n) => ToolOutput::text(format!("saved; call it as {n} from your next turn")),
+            Err(e) => ToolOutput::err(format!("{e:#}")),
+        },
+        "delete_tool" => match toolmaker::delete(i["name"].as_str().unwrap_or("")) {
+            Ok(()) => ToolOutput::text("deleted"),
+            Err(e) => ToolOutput::err(format!("{e:#}")),
+        },
         "optimize_layout" => {
             let image = i["image_id"].as_str().unwrap_or("").to_string();
             match super::verify::optimize_photo_layout(world, &image) {
@@ -952,6 +1419,19 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             },
             Err(e) => ToolOutput::err(e),
         },
+        other if other.starts_with(toolmaker::PREFIX) => {
+            // Its steps come back through this bridge, so it can't block the frame.
+            let (name, input, tx) = (other.to_string(), i.clone(), world.resource::<ToolBridge>().tx.clone());
+            std::thread::spawn(move || {
+                let _ = reply.send(toolmaker::run(&name, &input, tx));
+            });
+            return None;
+        }
+        "site_import_bim" => return import_bim(world, i, reply),
+        other if crate::outcomes::tools::is_tool(other) => match crate::outcomes::tools::start(world, other, i) {
+            Some(out) => out,
+            None => ToolOutput::err(format!("unknown tool '{other}'")),
+        },
         other if other.starts_with("plant_") => {
             let s = crate::plant::tools::start(world, other, i);
             return run_started(world, s, reply);
@@ -960,6 +1440,12 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             Some(out) => out,
             None => ToolOutput::err(format!("unknown tool '{other}'")),
         },
+        #[cfg(feature = "antenna-studio")]
+        other if other.starts_with("antenna_") => match crate::antenna::tools::start(world, other, i) {
+            Some(out) => out,
+            None => ToolOutput::err(format!("unknown tool '{other}'")),
+        },
+        other if super::knowledge::is_tool(other) => super::knowledge::run(other, i),
         other => ToolOutput::err(format!("unknown tool '{other}'")),
     };
     Some(out)
@@ -1021,7 +1507,7 @@ fn poll(world: &mut World, w: Wait) -> Option<Wait> {
             let _ = reply.send(out);
             None
         }
-        Wait::Screenshot { slot: None, settled, reply, started } => {
+        Wait::Screenshot { slot: None, settled, reply, started, compare } => {
             // Keep the UI overlays (properties card, toolbar…) out of the capture.
             if let Some(mut h) = world.get_resource_mut::<crate::ui::HideOverlays>() {
                 h.0 = h.0.max(4);
@@ -1031,27 +1517,31 @@ fn poll(world: &mut World, w: Wait) -> Option<Wait> {
             let busy = fresh || world.resource::<PrototypeCache>().loading_count() > 0;
             let settled = if busy { 0 } else { settled + 1 };
             if settled < 10 && started.elapsed() < Duration::from_secs(60) {
-                return Some(Wait::Screenshot { slot: None, settled, reply, started });
+                return Some(Wait::Screenshot { slot: None, settled, reply, started, compare });
             }
             let slot: Arc<Mutex<Option<Image>>> = Arc::default();
             let s = slot.clone();
             world.spawn(Screenshot::primary_window()).observe(move |ev: On<ScreenshotCaptured>| {
                 *s.lock().unwrap() = Some(ev.image.clone());
             });
-            Some(Wait::Screenshot { slot: Some(slot), settled, reply, started: Instant::now() })
+            Some(Wait::Screenshot { slot: Some(slot), settled, reply, started: Instant::now(), compare })
         }
-        Wait::Screenshot { slot: Some(slot), settled, reply, started } => {
+        Wait::Screenshot { slot: Some(slot), settled, reply, started, compare } => {
             let img = slot.lock().unwrap().take();
             match img {
                 Some(img) => {
-                    let _ = reply.send(screenshot_output(world, img));
+                    let out = screenshot_output(world, img);
+                    let _ = reply.send(match compare {
+                        Some(id) => compare_output(world, &id, out),
+                        None => out,
+                    });
                     None
                 }
                 None if started.elapsed() > Duration::from_secs(10) => {
                     let _ = reply.send(ToolOutput::err("screenshot timed out"));
                     None
                 }
-                None => Some(Wait::Screenshot { slot: Some(slot), settled, reply, started }),
+                None => Some(Wait::Screenshot { slot: Some(slot), settled, reply, started, compare }),
             }
         }
         Wait::Place { items, reply, started, extra } => {
@@ -1152,6 +1642,17 @@ fn place(world: &mut World, items: Vec<PlaceItem>, extra: Value) -> ToolOutput {
                             t = Transform::from_translation(f.translation)
                                 .with_rotation(Quat::from_rotation_y(f.yaw))
                                 .with_scale(Vec3::splat(f.scale));
+                            // A stand-in's front is a piece of the photo: it goes exactly where
+                            // the photo camera sees that piece, so edges meet the photo's.
+                            if let Some((gw, gh)) = assetgen::standin_guess(&it.usd)
+                                && let Some(spot) = super::placer::standin_spot(sc, &obj, gw, gh)
+                            {
+                                let size = p.aabb_max - p.aabb_min;
+                                let s = spot.width / size.x.max(1e-3);
+                                let rot = Quat::from_rotation_y(spot.yaw);
+                                let to_face = Vec3::new(0.0, spot.height * 0.5, p.aabb_max.z * s);
+                                t = Transform::from_translation(spot.center - rot * to_face).with_rotation(rot).with_scale(Vec3::splat(s));
+                            }
                             sc.placed.insert(name.clone(), *id);
                         } else {
                             errors.push(format!("{name}: no detection #{id} in {image}; placed at the given position"));
@@ -1270,6 +1771,66 @@ fn set_camera(world: &mut World, eye: Vec3, target: Vec3, hfov: Option<f32>) {
     }
 }
 
+/// The assistant's hypothesis from a tool call.
+fn layout_guess(i: &Value) -> super::vision::perceive::LayoutGuess {
+    use super::vision::perceive::{CameraGuess, LayoutGuess, ObjectGuess};
+    let c = &i["camera"];
+    let camera = f(c, "height_m").map(|height_m| {
+        let level = f(c, "horizon_v").unwrap_or(0.5);
+        CameraGuess { height_m, horizon_left_v: f(c, "horizon_left_v").unwrap_or(level), horizon_right_v: f(c, "horizon_right_v").unwrap_or(level) }
+    });
+    let objects = i["objects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            let at = o["at_xz"].as_array().filter(|a| a.len() == 2).and_then(|a| Some([a[0].as_f64()? as f32, a[1].as_f64()? as f32]));
+            Some((o["id"].as_u64()? as usize, ObjectGuess { height_m: f(o, "height_m"), width_m: f(o, "width_m"), base_y: f(o, "base_y"), at_xz: at, yaw_deg: f(o, "yaw_deg") }))
+        })
+        .collect();
+    LayoutGuess { camera, hfov_deg: f(i, "hfov_deg"), building_axis_deg: f(i, "building_axis_deg"), objects }
+}
+
+/// A photo scene as a tool result: its JSON and the overlay.
+fn photo_scene_output(scene: &super::vision::perceive::PhotoScene, data: &[u8]) -> ToolOutput {
+    let mut v = scene.to_json();
+    v["detections"] = json!(scene.objects.len());
+    let mut out = ToolOutput { content: vec![Block::Text(pretty(&v))], is_error: false };
+    if let Ok(photo) = image::load_from_memory(data) {
+        let overlay = scene.overlay(&photo.to_rgb8(), &[]);
+        let mut d = image::DynamicImage::ImageRgb8(overlay);
+        if d.width() > 1280 {
+            d = d.resize(1280, 1280, image::imageops::FilterType::Triangle);
+        }
+        if let Some(png) = encode_png(&d) {
+            out.content.push(Block::Text("Detections (green, numbered by id) and your horizon (cyan):".into()));
+            out.content.push(png_block(png));
+        }
+    }
+    out
+}
+
+/// Sets a viewport capture against the photo it should resemble.
+fn compare_output(world: &mut World, image_id: &str, shot: ToolOutput) -> ToolOutput {
+    if shot.is_error {
+        return shot;
+    }
+    let render = shot.content.iter().find_map(|b| if let Block::Image { data, .. } = b { image::load_from_memory(data).ok() } else { None });
+    let photo = images::get(image_id).and_then(|(data, _)| image::load_from_memory(&data).ok());
+    let (Some(render), Some(photo)) = (render, photo) else { return ToolOutput::err("could not read the photo or the render") };
+    let (img, metrics) = photocheck::compare(&photo.to_rgb8(), &render.to_rgb8());
+    let Some(png) = encode_png(&image::DynamicImage::ImageRgb8(img)) else { return ToolOutput::err("could not encode the comparison") };
+    let data = Arc::new(png);
+    let id = images::put(data.clone(), "image/png");
+    world.resource_mut::<Agent>().transcript.push(ChatItem::Image(id));
+    let mut metrics = metrics;
+    if let Some(sc) = super::vision::perceive::scenes().lock().unwrap().get(image_id) {
+        let (eye, target) = (sc.camera.eye(), sc.camera.eye() + sc.camera.forward() * 10.0);
+        metrics["camera"] = json!({ "eye": [eye.x, eye.y, eye.z], "target": [target.x, target.y, target.z] });
+    }
+    ToolOutput { content: vec![Block::Text(pretty(&metrics)), Block::Image { data, mime: "image/png".into() }], is_error: false }
+}
+
 /// Crops the window capture to the 3D viewport and encodes it.
 fn screenshot_output(world: &mut World, img: Image) -> ToolOutput {
     let viewport = {
@@ -1314,43 +1875,155 @@ fn perceive_photo(image_id: &str, data: &[u8], default_hfov: f32, i: &Value) -> 
             (b["label"].as_str().unwrap_or("object").to_string(), [v("x0"), v("y0"), v("x1"), v("y1")])
         })
         .collect();
-    let ks = &i["known_size"];
-    let known = ks["id"].as_u64().and_then(|id| match (f(ks, "width_m"), f(ks, "height_m")) {
-        (Some(w), _) => Some((id as usize, w, false)),
-        (None, Some(h)) => Some((id as usize, h, true)),
-        _ => None,
-    });
+    let layout = layout_guess(i);
     let req = perceive::Request {
         image_id,
         bytes: data,
         labels: &labels,
         extra_boxes: &extra,
-        hfov_deg: f(i, "hfov_deg"),
         default_hfov,
-        known,
+        layout: &layout,
         threshold: f(i, "threshold").unwrap_or(0.2).clamp(0.05, 0.9),
     };
     let scene = match perceive::perceive(&req) {
         Ok(s) => s,
         Err(e) => {
             return ToolOutput::err(format!(
-                "{e:#}\nVision is unavailable for this photo: estimate positions from perspective and the user's dimensions, and say so."
+                "{e:#}\nThe detector is unavailable for this photo: give the objects you see as extra_boxes with no labels."
             ));
         }
     };
-    let mut v = scene.to_json();
-    v["detections"] = json!(scene.objects.len());
-    let mut out = ToolOutput { content: vec![Block::Text(pretty(&v))], is_error: false };
-    if let Ok(photo) = image::load_from_memory(data) {
-        let overlay = scene.overlay(&photo.to_rgb8(), &[]);
-        let mut d = image::DynamicImage::ImageRgb8(overlay);
-        if d.width() > 1280 {
-            d = d.resize(1280, 1280, image::imageops::FilterType::Triangle);
-        }
-        if let Some(png) = encode_png(&d) {
-            out.content.push(Block::Text("Detections (green, numbered by id):".into()));
-            out.content.push(png_block(png));
+    let _ = default_hfov;
+    photo_scene_output(&scene, data)
+}
+
+// ---------------------------------------------------------------------------
+// Buildings from BIM
+
+fn bim_tool_def() -> ToolDef {
+    ToolDef {
+        name: "site_import_bim".into(),
+        description: "Build the scene's structure from a BIM file (IFC): walls, slabs, roofs, columns, beams, doors and windows, each with the radio material its BIM material implies, for predicting coverage of a building that doesn't exist yet. Reports what was placed and what it couldn't read.".into(),
+        schema: json!({ "type": "object", "properties": { "path": { "type": "string" }, "skip": { "type": "array", "items": { "type": "string" }, "description": "Element kinds to leave out, e.g. [\"roof\"] so the inside stays visible" }, "include_proxies": { "type": "boolean", "description": "Also place generic proxies such as trees and markers (default false)" } }, "required": ["path"] }),
+    }
+}
+
+/// IFC is Z up in metres; the scene is Y up, with IFC's Y running along −Z.
+pub(crate) fn pieces_from_building(b: &ifc::Building, skip: &[String], include_other: bool) -> Vec<(super::structures::Piece, String, (crate::rtls::radio::Material, f32))> {
+    use super::structures::{Kind, Piece};
+    let boxes = crate::outcomes::spec::boxes_from_building(b, skip, include_other);
+    let ground = crate::outcomes::spec::ground_level(&boxes);
+    boxes
+        .into_iter()
+        .map(|x| {
+            let kind = match x.kind {
+                ifc::ElementKind::Wall | ifc::ElementKind::Covering => Kind::Wall,
+                ifc::ElementKind::Column => Kind::Column,
+                ifc::ElementKind::Beam => Kind::Beam,
+                ifc::ElementKind::Slab => Kind::Floor,
+                ifc::ElementKind::Roof => Kind::Ceiling,
+                ifc::ElementKind::Door | ifc::ElementKind::Window | ifc::ElementKind::Other => Kind::Block,
+            };
+            // Along its X, height, along its Y.
+            let size = Vec3::new(x.size[0].max(0.01) as f32, x.size[2].max(0.01) as f32, x.size[1].max(0.01) as f32);
+            let piece = Piece { kind, size, center: Vec2::new(x.center[0] as f32, -(x.center[1] as f32)), base_y: (x.center[2] - x.size[2] / 2.0 - ground) as f32, yaw: x.yaw as f32, material: None };
+            (piece, x.name, x.material)
+        })
+        .collect()
+}
+
+fn import_bim(world: &mut World, i: &Value, reply: Sender<ToolOutput>) -> Option<ToolOutput> {
+    let Some(path) = i["path"].as_str() else { return Some(ToolOutput::err("give the path of an .ifc file")) };
+    let building = match ifc::read_file(std::path::Path::new(path)) {
+        Ok(b) => b,
+        Err(e) => return Some(ToolOutput::err(format!("{path}: {e:#}"))),
+    };
+    let skip: Vec<String> = i["skip"].as_array().map_or(Vec::new(), |a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+    let pieces = pieces_from_building(&building, &skip, i["include_proxies"].as_bool().unwrap_or(false));
+    if pieces.is_empty() {
+        return Some(ToolOutput::err(format!("{path}: nothing to place ({} entities skipped)", building.skipped.len())));
+    }
+    let mut items = Vec::with_capacity(pieces.len());
+    for (p, name, material) in &pieces {
+        match super::structures::usd_for(p.kind, p.size) {
+            Ok(usd) => {
+                crate::rtls::radio::set_object_material(name, Some(*material));
+                items.push(PlaceItem {
+                    usd,
+                    transform: Transform::from_xyz(p.center.x, p.base_y, p.center.y).with_rotation(Quat::from_rotation_y(p.yaw)),
+                    name: Some(name.clone()),
+                    on_top_of: None,
+                    photo: None,
+                    ..Default::default()
+                });
+            }
+            Err(e) => return Some(ToolOutput::err(format!("could not write structure: {e}"))),
         }
     }
-    out
+    let mut cache = world.resource_mut::<PrototypeCache>();
+    for it in &items {
+        cache.request(&it.usd);
+    }
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for (kind, n) in building.counts() {
+        counts.insert(format!("{kind:?}"), n);
+    }
+    let extra = json!({ "building": building.name, "read": counts, "skipped": building.skipped.len(), "skipped_examples": building.skipped.iter().take(5).collect::<Vec<_>>(), "approximated": building.elements.iter().filter(|e| !e.exact).count() });
+    defer(world, Wait::Place { items, reply, started: Instant::now(), extra })
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use crate::scene::lock_tests::object;
+
+    fn tool(world: &mut World, name: &str, input: Value) -> ToolOutput {
+        let (reply, _rx) = unbounded();
+        start(world, ToolJob { name: name.into(), input, reply, from_mcp: false }).expect("finishes at once")
+    }
+
+    #[test]
+    fn a_locked_object_refuses_to_move_but_can_be_renamed() {
+        let mut w = World::new();
+        let e = object(&mut w, "kept", true);
+        let before = *w.get::<Transform>(e).unwrap();
+        let out = tool(&mut w, "update_object", json!({ "name": "kept", "x": 9.0 }));
+        assert!(out.is_error && out.summary().contains("locked"), "{}", out.summary());
+        assert_eq!(*w.get::<Transform>(e).unwrap(), before);
+        let out = tool(&mut w, "update_object", json!({ "name": "kept", "new_name": "still_kept" }));
+        assert!(!out.is_error, "{}", out.summary());
+        assert_eq!(w.get::<PlacedObject>(e).unwrap().name, "still_kept");
+    }
+
+    #[test]
+    fn delete_keeps_locked_objects_and_says_so() {
+        let mut w = World::new();
+        w.init_resource::<Actions>();
+        object(&mut w, "kept", true);
+        let free = object(&mut w, "free", false);
+        let out = tool(&mut w, "delete_objects", json!({ "names": ["kept", "free"] }));
+        let v: Value = serde_json::from_str(&out.summary()).unwrap();
+        assert_eq!(v["deleted"], json!(["free"]));
+        assert_eq!(v["locked_not_deleted"], json!(["kept"]));
+        assert!(matches!(w.resource::<Actions>().0.as_slice(), [Action::Delete(e)] if *e == free));
+    }
+
+    #[test]
+    fn a_new_material_is_refused_because_it_would_replace_the_object() {
+        let mut w = World::new();
+        object(&mut w, "kept", true);
+        let out = tool(&mut w, "set_object_material", json!({ "name": "kept" }));
+        assert!(out.is_error && out.summary().contains("locked"), "{}", out.summary());
+    }
+
+    #[test]
+    fn the_scene_listing_shows_the_lock() {
+        let mut w = World::new();
+        object(&mut w, "kept", true);
+        object(&mut w, "free", false);
+        let v: Value = serde_json::from_str(&tool(&mut w, "get_scene", json!({})).summary()).unwrap();
+        let of = |n: &str| v["objects"].as_array().unwrap().iter().find(|o| o["name"] == n).unwrap()["locked"].clone();
+        assert_eq!(of("kept"), json!(true));
+        assert_eq!(of("free"), Value::Null);
+    }
 }

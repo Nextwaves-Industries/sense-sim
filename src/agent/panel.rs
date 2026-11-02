@@ -90,7 +90,7 @@ fn plan(ui: &mut egui::Ui, agent: &Agent) {
         for (step, status) in &agent.plan {
             let (ic, color) = match status.as_str() {
                 "done" => (icon::CHECK, theme::SUCCESS),
-                "in_progress" => (icon::CIRCLE_NOTCH, theme::ACCENT),
+                "in_progress" => (icon::CIRCLE_NOTCH, theme::WARNING),
                 "failed" => (icon::WARNING_CIRCLE, theme::DANGER),
                 _ => ("·", theme::WEAK),
             };
@@ -485,7 +485,7 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
     let input_id = egui::Id::new("assistant_input");
     let focused = ctx.memory(|m| m.has_focus(input_id));
     let stroke = if focused { egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.7)) } else { egui::Stroke::new(1.0, theme::STROKE) };
-    egui::Frame::new().fill(theme::RAISED).stroke(stroke).corner_radius(12).inner_margin(Margin::same(8)).show(ui, |ui| {
+    egui::Frame::new().fill(theme::PANEL).stroke(stroke).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if !agent.attachments.is_empty() {
             let mut remove = None;
@@ -526,7 +526,7 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
             let p = agent.config.provider();
             let chip = format!("{} · {}", p.kind.label(), p.effective_model());
             if ui
-                .add(egui::Button::new(RichText::new(clip(&chip, 34)).small().color(theme::WEAK)).fill(theme::BG).corner_radius(10))
+                .add(egui::Button::new(RichText::new(clip(&chip, 34)).small().color(theme::WEAK)).fill(theme::RAISED).corner_radius(10))
                 .on_hover_text("Change provider or model")
                 .clicked()
             {
@@ -545,7 +545,7 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
                     let r = if can {
                         round_button(ui, icon::ARROW_UP, theme::ACCENT)
                     } else {
-                        ui.add(egui::Button::new(RichText::new(icon::ARROW_UP).size(15.0).color(theme::WEAK)).fill(theme::HOVER).corner_radius(14).min_size(vec2(28.0, 28.0)).sense(egui::Sense::hover()))
+                        ui.add(egui::Button::new(RichText::new(icon::ARROW_UP).size(15.0).color(theme::FAINT)).fill(theme::HOVER).corner_radius(14).min_size(vec2(28.0, 28.0)).sense(egui::Sense::hover()))
                     };
                     if (r.on_hover_text("Send (Enter) · Shift+Enter for a new line").clicked() || send_key) && can {
                         agent.send(bridge);
@@ -557,7 +557,7 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
 }
 
 fn round_button(ui: &mut egui::Ui, ic: &str, fill: Color32) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(ic).size(15.0).color(theme::BG)).fill(fill).corner_radius(14).min_size(vec2(28.0, 28.0)))
+    ui.add(egui::Button::new(RichText::new(ic).size(15.0).color(theme::ON_ACCENT)).fill(fill).corner_radius(14).min_size(vec2(28.0, 28.0)))
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +693,42 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
             catalog.index_all(library);
         }
     });
+
+    theme::divider(ui);
+    theme::caption(ui, "Knowledge base");
+    {
+        let ix = super::knowledge::index();
+        let summary: Vec<String> = ix.domains().into_iter().map(|(d, docs, _)| format!("{d} {docs}")).collect();
+        ui.add(egui::Label::new(RichText::new(format!("{} documents, {} passages: {}", ix.docs.len(), ix.chunk_count(), summary.join(", "))).color(theme::WEAK)).wrap());
+        let cfg = &mut agent.config;
+        theme::setting_row(ui, "Attach automatically", "Add clearly relevant passages to your messages", |ui| {
+            changed |= theme::toggle_switch(ui, &mut cfg.knowledge_auto).changed();
+        });
+        let skipped = super::knowledge::skipped();
+        if !skipped.is_empty() {
+            let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
+            ui.add(egui::Label::new(RichText::new(format!("Skipped {} of your files", skipped.len())).color(theme::WARNING)).wrap()).on_hover_text(lines.join("\n"));
+        }
+        ui.horizontal(|ui| {
+            let dir = super::knowledge::user_dir();
+            if ui.button(theme::label(icon::ARROW_SQUARE_OUT, "Add your documents")).on_hover_text(format!("{}\n.md or .txt, one sub-folder per topic", dir.display())).clicked() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+            }
+            if ui.button(theme::label(icon::ARROWS_CLOCKWISE, "Reload documents")).clicked() {
+                super::knowledge::reload();
+            }
+        });
+        let id = ui.make_persistent_id("knowledge_try");
+        let mut query = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
+        if ui.add(egui::TextEdit::singleline(&mut query).hint_text("Try a search, e.g. concrete wall attenuation").desired_width(f32::INFINITY)).changed() {
+            ui.data_mut(|d| d.insert_temp(id, query.clone()));
+        }
+        for h in ix.search(&query, &[], 5, 2) {
+            let (d, c) = ix.chunk(&h);
+            ui.add(egui::Label::new(RichText::new(format!("{} ({}, {:.0}% of the query)", c.heading, d.domain, h.coverage * 100.0)).small()).wrap()).on_hover_text(&c.text);
+        }
+    }
 
     theme::divider(ui);
     theme::caption(ui, "MCP");

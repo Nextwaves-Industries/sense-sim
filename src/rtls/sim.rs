@@ -10,13 +10,13 @@ use std::sync::Arc;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
-use super::device::{Device, DeviceKind, Motion, MotionState, Profile, Profiles, UwbMode, Zone};
+use super::device::{Device, DeviceKind, Motion, MotionState, Profile, Profiles, UwbMode, Zone, RadioMethod};
 use super::events::{RtlsEvent, Snapshot, TagRow};
 use super::io::{Control, Hub};
 use super::planning::Tech;
 use super::radio::{self, Material, Path};
 use super::solver::{self, Dim};
-use super::{ActiveAlarm, Link, LinkKind, RtlsConfig, RtlsState, SeriesPoint, Track};
+use super::{ActiveAlarm, ERROR_WINDOW_S, ErrorStats, Link, LinkKind, RtlsConfig, RtlsState, RunStats, SeriesPoint, Track, link_state};
 use crate::bvh::Bvh;
 use crate::scene::{PartBvh, PartOf, PlacedObject};
 /// The scene as radio sees it: every placed object with its world bounds and
@@ -36,6 +36,9 @@ struct Occ {
     /// one crossing is worth (thick structures count more).
     material: Material,
     weight: f32,
+    /// A storage rack: its bays can be empty, which radio passes through.
+    rack: bool,
+    name: String,
     /// BVH and world → mesh transform per part.
     parts: Vec<(Arc<Bvh>, Affine3A)>,
 }
@@ -45,11 +48,16 @@ pub type OccluderParts<'w, 's> = Query<'w, 's, (&'static PartOf, &'static PartBv
 
 /// Does the segment a + t·d, t ∈ [0, 1], touch the box?
 fn segment_hits_box(a: Vec3, d: Vec3, min: Vec3, max: Vec3) -> bool {
+    segment_box_range(a, d, min, max).is_some()
+}
+
+/// Where the segment a + t·d, t ∈ [0, 1], is inside the box.
+fn segment_box_range(a: Vec3, d: Vec3, min: Vec3, max: Vec3) -> Option<(f32, f32)> {
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
     for i in 0..3 {
         if d[i].abs() < 1e-9 {
             if a[i] < min[i] || a[i] > max[i] {
-                return false;
+                return None;
             }
         } else {
             let inv = 1.0 / d[i];
@@ -60,11 +68,11 @@ fn segment_hits_box(a: Vec3, d: Vec3, min: Vec3, max: Vec3) -> bool {
             t0 = t0.max(ta);
             t1 = t1.min(tb);
             if t0 > t1 {
-                return false;
+                return None;
             }
         }
     }
-    true
+    Some((t0, t1))
 }
 
 impl Occluders {
@@ -84,8 +92,9 @@ impl Occluders {
                         }
                     }
                 }
-                let (material, weight) = radio::obstruction_of_asset(&o.asset);
-                Occ { root: e, min: min - Vec3::splat(0.02), max: max + Vec3::splat(0.02), material, weight, parts: Vec::new() }
+                let (material, weight) = radio::object_material(&o.name).unwrap_or_else(|| radio::obstruction_of_asset(&o.asset));
+                let rack = material == Material::Metal && radio::is_rack(&o.asset);
+                Occ { root: e, min: min - Vec3::splat(0.02), max: max + Vec3::splat(0.02), material, weight, rack, name: o.name.clone(), parts: Vec::new() }
             })
             .collect();
         let index: std::collections::HashMap<Entity, usize> = objs.iter().enumerate().map(|(i, o)| (o.root, i)).collect();
@@ -95,6 +104,9 @@ impl Occluders {
             }
         }
         objs.retain(|o| !o.parts.is_empty());
+        // In a fixed order: losses add up in floats, and the order objects
+        // finished loading must not change a plan.
+        objs.sort_by(|a, b| a.min.to_array().partial_cmp(&b.min.to_array()).unwrap_or(std::cmp::Ordering::Equal).then(a.max.to_array().partial_cmp(&b.max.to_array()).unwrap_or(std::cmp::Ordering::Equal)));
         Self { objs }
     }
 
@@ -111,6 +123,7 @@ impl Occluders {
         let start = a + dir * 0.06;
         let limit = distance - 0.12;
         let mut path = Path { distance, ..Default::default() };
+        let fill = radio::SiteConditions::current().rack_fill;
         for o in &self.objs {
             if Some(o.root) == ignore || !segment_hits_box(a, d, o.min, o.max) {
                 continue;
@@ -118,12 +131,55 @@ impl Occluders {
             for (bvh, inv) in &o.parts {
                 // Mesh space with an unnormalized direction keeps t in world units.
                 if bvh.cast(inv.transform_point3(start), inv.transform_vector3(dir), limit).is_some() {
-                    path.cross_weighted(o.material, o.weight);
+                    // An empty bay is just the frame: thin, and nothing stops the signal.
+                    let rack_id = o.min.x.to_bits() as u64 ^ ((o.min.z.to_bits() as u64) << 32);
+                    let (t0, t1) = segment_box_range(a, d, o.min, o.max).unwrap_or((0.0, 1.0));
+                    if o.rack && !radio::crossing_meets_goods(rack_id, a + d * t0, a + d * t1, fill) {
+                        path.cross_weighted(Material::Thin, Material::Thin.weight());
+                    } else {
+                        path.cross_weighted(o.material, o.weight);
+                    }
                     break;
                 }
             }
         }
         path
+    }
+
+    /// Every object between two points, nearest first, with what radio sees it as.
+    pub fn trace(&self, a: Vec3, b: Vec3) -> Vec<(String, Material, f32, f32)> {
+        let d = b - a;
+        let distance = d.length();
+        if distance < 0.13 {
+            return Vec::new();
+        }
+        let dir = d / distance;
+        let start = a + dir * 0.06;
+        let limit = distance - 0.12;
+        let mut out = Vec::new();
+        for o in &self.objs {
+            if !segment_hits_box(a, d, o.min, o.max) {
+                continue;
+            }
+            for (bvh, inv) in &o.parts {
+                if let Some((t, _)) = bvh.cast(inv.transform_point3(start), inv.transform_vector3(dir), limit) {
+                    out.push((o.name.clone(), o.material, o.weight, t + 0.06));
+                    break;
+                }
+            }
+        }
+        out.sort_by(|x, y| x.3.total_cmp(&y.3));
+        out
+    }
+
+    /// Bounds of everything placed, or `None` in an empty scene.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        self.objs.iter().map(|o| (o.min, o.max)).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+    }
+
+    /// Is this point inside an object's box (somewhere nobody can stand)?
+    pub fn inside(&self, p: Vec3) -> bool {
+        self.objs.iter().any(|o| p.cmpge(o.min).all() && p.cmple(o.max).all())
     }
 
     /// Nearest surface hit along a ray: distance and world normal.
@@ -156,6 +212,33 @@ pub struct PathCache {
     occ: Option<Occluders>,
     /// (tag, reader) → (both positions as bits, ignored object, path).
     paths: std::collections::HashMap<(Entity, Entity), ([u32; 6], Option<Entity>, Path)>,
+    /// TDoA anchors outside the clock-sync group, for this scene and these anchor positions.
+    unsynced: Option<(u64, Vec<[u32; 3]>, BTreeSet<Entity>)>,
+}
+
+/// Where every device stands, to run from the same start again and to leave a scene as it
+/// was found. `outcomes::stress::Start` does the same for its own runs.
+pub struct RunStart {
+    devices: Vec<(Entity, Transform, MotionState)>,
+}
+
+impl RunStart {
+    pub fn take(world: &mut World) -> Self {
+        let mut q = world.query_filtered::<(Entity, &Transform, &MotionState), With<Device>>();
+        Self { devices: q.iter(world).map(|(e, t, m)| (e, *t, m.clone())).collect() }
+    }
+
+    pub fn restore(&self, world: &mut World) {
+        for (e, t, m) in &self.devices {
+            if let Ok(mut entity) = world.get_entity_mut(*e) {
+                entity.insert((*t, m.clone()));
+            }
+        }
+        // A filter still tracking where a tag ended would see it jump.
+        for t in world.resource_mut::<RtlsState>().tracks.values_mut() {
+            t.kf.reset();
+        }
+    }
 }
 
 /// Changes whenever a placed object moves, appears or gets its meshes.
@@ -163,6 +246,7 @@ fn scene_signature(parts: &OccluderParts, objects: &Query<(Entity, &PlacedObject
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     parts.iter().count().hash(&mut h);
+    radio::conditions_signature().hash(&mut h);
     for (e, _, t) in objects {
         e.hash(&mut h);
         for v in t.translation.to_array().into_iter().chain(t.rotation.to_array()).chain(t.scale.to_array()) {
@@ -184,6 +268,12 @@ struct Infra {
     forward: Vec3,
     profile: Profile,
     antenna: Option<super::antenna::AntennaChoice>,
+}
+
+/// Is a solution anywhere a device of this technology could have heard it from? The engine
+/// can tell that without knowing where the tag is.
+fn near_infrastructure(infra: &[Infra], tech: &str, at: Vec3) -> bool {
+    infra.iter().filter(|a| a.kind.tech() == tech).any(|a| (a.pos - at).length() <= a.profile.max_range_m * 1.5)
 }
 
 /// Applies control commands, (re)starts outputs and runs as many fixed
@@ -358,10 +448,11 @@ pub fn step(
     // ---- Motion
     let mut riding: BTreeMap<Entity, Entity> = BTreeMap::new();
     for (e, dev, mut t, mut ms) in devices.iter_mut() {
-        if dev.kind.is_mobile() && dev.enabled
-            && let Some(obj) = apply_motion(dev, &mut t, &mut ms, dt as f32, &mut st.rng, &objects)
-        {
-            riding.insert(e, obj);
+        if dev.kind.is_mobile() && dev.enabled {
+            let rng = &mut link_state(&mut st.links, st.seed, (e, e), (&dev.id, "motion"), (Vec3::ZERO, Vec3::ZERO), 0.0, f32::MAX).rng;
+            if let Some(obj) = apply_motion(dev, &mut t, &mut ms, dt as f32, rng, &objects) {
+                riding.insert(e, obj);
+            }
         }
     }
 
@@ -371,7 +462,7 @@ pub fn step(
         cache.paths.clear();
         cache.sig = Some(sig);
     }
-    let PathCache { occ, paths: path_cache, .. } = &mut *cache;
+    let PathCache { occ, paths: path_cache, unsynced: unsynced_cache, .. } = &mut *cache;
     let occ: &Occluders = occ.as_ref().expect("built above");
 
     // ---- Collect devices
@@ -401,18 +492,47 @@ pub fn step(
 
     let mut links_per_infra: BTreeMap<Entity, u32> = BTreeMap::new();
 
+    // TDoA needs clock sync: an anchor that can't reach the others gives nothing.
+    let unsynced: BTreeSet<Entity> = if mobile.iter().any(|m| m.2 == DeviceKind::UwbTag && m.4.mode == UwbMode::Tdoa) {
+        let anchors: Vec<&Infra> = infra.iter().filter(|a| a.kind == DeviceKind::UwbAnchor).collect();
+        let key: Vec<[u32; 3]> = anchors.iter().map(|a| a.pos.to_array().map(f32::to_bits)).collect();
+        if unsynced_cache.as_ref().is_none_or(|(sg, k, _)| *sg != sig || *k != key) {
+            let out = super::placement::outside_biggest_group(anchors.len(), |i, j| occ.path(anchors[i].pos, anchors[j].pos, None).in_band(anchors[i].profile.freq_mhz).uwb_passes(&anchors[i].profile));
+            *unsynced_cache = Some((sig, key, out.into_iter().map(|i| anchors[i].entity).collect()));
+        }
+        unsynced_cache.as_ref().map_or_else(BTreeSet::new, |x| x.2.clone())
+    } else {
+        BTreeSet::new()
+    };
+    st.unsynced_anchors = unsynced.len();
+
     // ---- UWB and BLE positioning
     let ants = super::antenna::Antennas { library: &library, applied: &applied };
+    let conditions = radio::SiteConditions::current();
+    let worn: BTreeSet<Entity> = devices.iter().filter(|(_, d, ..)| d.radio.worn).map(|(e, ..)| e).collect();
     for (e, id, kind, truth, tag_prof, _, tag_fwd, tag_ant) in &mobile {
         let tech = kind.tech();
+        let is_worn = worn.contains(e);
         let track = st.tracks.entry(*e).or_insert_with(|| Track::new(id.clone(), tech, *truth));
         track.id = id.clone();
         track.truth = *truth;
-        if !matches!(kind, DeviceKind::UwbTag | DeviceKind::BleTag) || now < track.next_update {
+        if !matches!(kind, DeviceKind::UwbTag | DeviceKind::BleTag | DeviceKind::WifiClient) || now < track.next_update {
             continue;
         }
-        track.next_update = now + 1.0 / tag_prof.update_hz.max(0.1) as f64;
+        // On a schedule, not from now: a tick that lands just after it would stretch every period.
+        track.next_update = (track.next_update + 1.0 / tag_prof.update_hz.max(0.1) as f64).max(now);
+        // A tag on a route is moving from its first update; anything else once it has moved.
+        let on_route = track.attempts == 0 && devices.get(*e).is_ok_and(|(_, d, ..)| matches!(d.motion, Motion::Path { .. } | Motion::Wander { .. }));
+        let moving = on_route || truth.distance(track.last_truth) > 0.005;
+        track.last_truth = *truth;
         track.attempts += 1;
+        if moving {
+            track.moving_epochs += 1;
+        } else {
+            track.parked_epochs += 1;
+        }
+        st.run.entry((tech, moving)).or_default().attempts += 1;
+        let plane_y = track.plane_y;
         let ignore = riding.get(e).copied();
         let mut links: Vec<Link> = Vec::new();
         let mut fix: Option<solver::Fix> = None;
@@ -422,17 +542,32 @@ pub fn step(
             DeviceKind::UwbTag => {
                 let anchors: Vec<&Infra> = infra.iter().filter(|a| a.kind == DeviceKind::UwbAnchor).collect();
                 // Antenna gain of both ends towards each other rides on the path.
-                let paths: Vec<Path> = anchors
+                let mut paths: Vec<Path> = anchors
                     .iter()
                     .map(|a| {
-                        let gain = ants.gain(a.antenna.as_ref(), Tech::Uwb, true, &a.profile, a.forward, *truth - a.pos)
-                            + ants.gain(tag_ant.as_ref(), Tech::Uwb, false, tag_prof, *tag_fwd, a.pos - *truth);
-                        Path { gain_db: gain, ..occ.path(*truth, a.pos, ignore) }
+                        let (to_tag, to_anchor) = (*truth - a.pos, a.pos - *truth);
+                        let gain = ants.gain(a.antenna.as_ref(), Tech::Uwb, true, &a.profile, a.forward, to_tag)
+                            + ants.gain(tag_ant.as_ref(), Tech::Uwb, false, tag_prof, *tag_fwd, to_anchor);
+                        let mut bias = ants.bias_m(a.antenna.as_ref(), Tech::Uwb, true, a.forward, to_tag) + ants.bias_m(tag_ant.as_ref(), Tech::Uwb, false, *tag_fwd, to_anchor);
+                        let mut loss = 0.0;
+                        if is_worn {
+                            let (l, extra) = radio::body_shadow(tag_fwd.angle_between(to_anchor), tag_prof.freq_mhz);
+                            loss = l;
+                            bias += extra;
+                        }
+                        Path { gain_db: gain - loss, antenna_bias_m: bias, ..occ.path(*truth, a.pos, ignore).in_band(a.profile.freq_mhz) }
                     })
                     .collect();
+                for (a, p) in anchors.iter().zip(paths.iter_mut()) {
+                    let l = link_state(&mut st.links, st.seed, (*e, a.entity), (id, &a.id), (*truth, a.pos), p.wall_eq, radio::LINK_HOLD_M);
+                    // Someone standing in a link counts as a thick obstruction for that tick.
+                    if conditions.people_per_100m2 > 0.0 && l.rng.chance(conditions.person_in_path(p.distance)) {
+                        p.cross_weighted(Material::Generic, 1.5);
+                    }
+                }
                 let dim_for = |pts: &[DVec3]| {
                     let (lo, hi) = pts.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
-                    if s.solve_3d && pts.len() >= 4 && hi - lo > 1.0 { Dim::Space } else { Dim::Plane(truth.y as f64) }
+                    if s.solve_3d && pts.len() >= 4 && hi - lo > 1.0 { Dim::Space } else { Dim::Plane(plane_y as f64) }
                 };
                 match tag_prof.mode {
                     UwbMode::Twr => {
@@ -441,40 +576,28 @@ pub fn step(
                         let mut sig = Vec::new();
                         let mut idx = Vec::new();
                         for (a, p) in anchors.iter().zip(&paths) {
-                            let r = radio::uwb_range(&a.profile, tag_prof, *p, &mut st.rng);
-                            links.push(Link { other: a.entity, kind: LinkKind::Range, walls: p.walls, blocker: p.blocker, value: r, rssi_dbm: radio::uwb_rx_power(&a.profile, *p), wall_eq: p.wall_eq, true_distance: p.distance, used: false });
-                            if let Some(r) = r {
+                            let l = st.links.get_mut(&(*e, a.entity)).expect("made above");
+                            let m = radio::twr_measure(&a.profile, tag_prof, *p, l.held, s.robust, &mut l.rng);
+                            links.push(Link { other: a.entity, kind: LinkKind::Range, walls: p.walls, blocker: p.blocker, value: m.map(|m| m.range), rssi_dbm: radio::uwb_rx_power(&a.profile, *p), wall_eq: p.wall_eq, bias_eq: p.bias_eq, true_distance: p.distance, used: false });
+                            if let Some(m) = m {
                                 idx.push(links.len() - 1);
                                 a_pos.push(dv(a.pos));
-                                ranges.push(r as f64);
-                                // First-path power diagnostic, as UWB chips report it: a blocked
-                                // path arrives several dB below the free-space value expected
-                                // at the measured range. Flagged ranges are down-weighted.
-                                let fp = radio::uwb_rx_power(&a.profile, *p) + st.rng.gauss(1.5);
-                                let expected = radio::uwb_rx_power(&a.profile, Path { distance: r, gain_db: p.gain_db, ..Default::default() });
-                                let base = a.profile.range_sigma_m.max(0.02) as f64;
-                                let nlos_flag = s.robust && expected - fp > 4.0;
-                                sig.push(if nlos_flag { base * 6.0 + a.profile.nlos_bias_m as f64 } else { base });
+                                ranges.push(m.range as f64);
+                                sig.push(m.sigma);
                                 *links_per_infra.entry(a.entity).or_default() += 1;
                                 out.push(RtlsEvent::Range {
                                     ts: now,
                                     tag: id.clone(),
                                     anchor: a.id.clone(),
-                                    range_m: r,
+                                    range_m: m.range,
                                     los: p.los(),
-                                    rssi_dbm: fp,
+                                    rssi_dbm: m.fp_dbm,
                                 });
                             }
                         }
                         let dim = dim_for(&a_pos);
                         if a_pos.len() >= solver::min_measurements(dim).min(3) {
-                            let prior = track.est.map(dv);
-                            let gate = 3.0 * sig.iter().copied().fold(f64::MAX, f64::min);
-                            fix = if s.robust {
-                                solver::solve_twr_robust(dim, &a_pos, &ranges, &sig, prior, gate.max(0.15))
-                            } else {
-                                solver::solve_twr(dim, &a_pos, &ranges, &sig, prior)
-                            };
+                            fix = solver::twr_solve(dim, &a_pos, &ranges, &sig, track.est.map(dv), s.robust);
                             if let Some(f) = &fix {
                                 for &u in &f.used {
                                     links[idx[u]].used = true;
@@ -486,8 +609,9 @@ pub fn step(
                     UwbMode::Tdoa => {
                         let mut arrivals: Vec<(usize, f32)> = Vec::new();
                         for (k, (a, p)) in anchors.iter().zip(&paths).enumerate() {
-                            let t = radio::uwb_arrival_m(&a.profile, *p, 0.0, &mut st.rng);
-                            links.push(Link { other: a.entity, kind: LinkKind::Tdoa, walls: p.walls, blocker: p.blocker, value: None, rssi_dbm: radio::uwb_rx_power(&a.profile, *p), wall_eq: p.wall_eq, true_distance: p.distance, used: false });
+                            let l = st.links.get_mut(&(*e, a.entity)).expect("made above");
+                            let t = if unsynced.contains(&a.entity) { None } else { radio::uwb_arrival_held(&a.profile, tag_prof, *p, 0.0, l.held, &mut l.rng) };
+                            links.push(Link { other: a.entity, kind: LinkKind::Tdoa, walls: p.walls, blocker: p.blocker, value: None, rssi_dbm: radio::uwb_blink_rx_power(&a.profile, tag_prof, *p), wall_eq: p.wall_eq, bias_eq: p.bias_eq, true_distance: p.distance, used: false });
                             if let Some(t) = t {
                                 arrivals.push((k, t));
                                 *links_per_infra.entry(a.entity).or_default() += 1;
@@ -514,7 +638,8 @@ pub fn step(
                             }
                             let all: Vec<DVec3> = arrivals.iter().map(|(k, _)| dv(anchors[*k].pos)).collect();
                             let dim = dim_for(&all);
-                            let sigma = (anchors[rk].profile.sync_sigma_ns * radio::C_M_PER_NS).max(0.03) as f64 * 1.4;
+                            // A difference of two arrivals.
+                            let sigma = (radio::uwb_arrival_sigma(&anchors[rk].profile).max(0.03) * std::f32::consts::SQRT_2) as f64;
                             if a_pos.len() >= 3 {
                                 fix = solver::solve_tdoa(dim, dv(anchors[rk].pos), &a_pos, &diffs, sigma, track.est.map(dv));
                                 if fix.is_some() {
@@ -529,37 +654,112 @@ pub fn step(
                     }
                 }
             }
-            DeviceKind::BleTag => {
-                let nodes: Vec<&Infra> = infra.iter().filter(|a| a.kind == DeviceKind::BleNode).collect();
+            DeviceKind::BleTag | DeviceKind::WifiClient => {
+                let wifi = *kind == DeviceKind::WifiClient;
+                let (node_kind, node_tech) = if wifi { (DeviceKind::WifiAp, Tech::Wifi) } else { (DeviceKind::BleNode, Tech::Ble) };
+                let nodes: Vec<&Infra> = infra.iter().filter(|a| a.kind == node_kind).collect();
+                let plane = Dim::Plane(plane_y as f64);
                 let mut a_pos = Vec::new();
                 let mut d_est = Vec::new();
                 let mut sig = Vec::new();
+                let (mut rtt_pos, mut rtt_r, mut rtt_sig) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut aoa_pos, mut aoa_dir, mut aoa_w) = (Vec::new(), Vec::new(), Vec::new());
+                let mut aoa_sigma = 0.0f64;
                 let mut best: Option<(f32, Vec3)> = None;
                 for n in &nodes {
-                    let gain = ants.gain(n.antenna.as_ref(), Tech::Ble, true, &n.profile, n.forward, *truth - n.pos)
-                        + ants.gain(tag_ant.as_ref(), Tech::Ble, false, tag_prof, *tag_fwd, n.pos - *truth);
-                    let p = Path { gain_db: gain, ..occ.path(*truth, n.pos, ignore) };
-                    let r = radio::ble_rssi(&n.profile, tag_prof, p, &mut st.rng);
-                    links.push(Link { other: n.entity, kind: LinkKind::Rssi, walls: p.walls, blocker: p.blocker, value: r, rssi_dbm: r.unwrap_or_else(|| radio::ble_mean_rssi(&n.profile, tag_prof, p)), wall_eq: p.wall_eq, true_distance: p.distance, used: r.is_some() });
-                    if let Some(r) = r {
-                        *links_per_infra.entry(n.entity).or_default() += 1;
-                        out.push(RtlsEvent::Rssi { ts: now, tag: id.clone(), node: n.id.clone(), rssi_dbm: r, los: p.los() });
-                        let d = solver::rssi_to_distance(r as f64, tag_prof.rssi_at_1m as f64, n.profile.path_loss_exp as f64);
-                        a_pos.push(dv(n.pos));
-                        d_est.push(d);
-                        // Multiplicative error of log-distance ranging.
-                        sig.push((d * n.profile.shadow_sigma_db as f64 * std::f64::consts::LN_10 / (10.0 * n.profile.path_loss_exp as f64)).max(0.3));
-                        if best.is_none_or(|(b, _)| r > b) {
-                            best = Some((r, n.pos));
+                    let mut gain = ants.gain(n.antenna.as_ref(), node_tech, true, &n.profile, n.forward, *truth - n.pos)
+                        + ants.gain(tag_ant.as_ref(), node_tech, false, tag_prof, *tag_fwd, n.pos - *truth);
+                    if is_worn {
+                        gain -= radio::body_shadow(tag_fwd.angle_between(n.pos - *truth), n.profile.freq_mhz).0;
+                    }
+                    let mut p = Path { gain_db: gain, ..occ.path(*truth, n.pos, ignore).in_band(n.profile.freq_mhz) };
+                    let l = link_state(&mut st.links, st.seed, (*e, n.entity), (id, &n.id), (*truth, n.pos), p.wall_eq, radio::LINK_HOLD_M);
+                    if conditions.people_per_100m2 > 0.0 && l.rng.chance(conditions.person_in_path(p.distance)) {
+                        p.cross_weighted(Material::Generic, 1.5);
+                    }
+                    let mean = radio::ble_mean_rssi(&n.profile, tag_prof, p);
+                    let mut link = Link { other: n.entity, kind: LinkKind::Rssi, walls: p.walls, blocker: p.blocker, value: None, rssi_dbm: mean, wall_eq: p.wall_eq, bias_eq: p.bias_eq, true_distance: p.distance, used: false };
+                    match n.profile.method {
+                        RadioMethod::Aoa => {
+                            let dir = (*truth - n.pos).normalize_or_zero();
+                            let angle = n.forward.angle_between(dir);
+                            link.kind = LinkKind::Aoa;
+                            if let Some(b) = radio::ble_aoa_bearing(&n.profile, tag_prof, p, dir, angle, l.held, &mut l.rng) {
+                                link.value = Some(angle.to_degrees());
+                                link.used = true;
+                                *links_per_infra.entry(n.entity).or_default() += 1;
+                                out.push(RtlsEvent::Rssi { ts: now, tag: id.clone(), node: n.id.clone(), rssi_dbm: mean, los: p.los() });
+                                // Far bearings miss by more: weigh by the distance the signal suggests.
+                                // All the engine has is the bearing it measured and a noisy signal
+                                // strength, not the true range or what's in the way.
+                                let heard = mean + radio::held_noise(n.profile.shadow_sigma_db, l.held.n3, &mut l.rng);
+                                let d = solver::rssi_to_distance(heard as f64, radio::rssi_1m(tag_prof) as f64, n.profile.path_loss_exp as f64).max(0.5);
+                                let sd = radio::aoa_sigma_rad(&n.profile, &Path::default(), n.forward.angle_between(b)) as f64 * d;
+                                aoa_pos.push(dv(n.pos));
+                                aoa_dir.push(dv(b));
+                                aoa_w.push(1.0 / (sd * sd).max(1e-6));
+                                aoa_sigma += sd;
+                            }
+                        }
+                        RadioMethod::Rtt => {
+                            link.kind = LinkKind::WifiRtt;
+                            let r = radio::wifi_rtt_range(&n.profile, tag_prof, p, l.held, &mut l.rng);
+                            link.value = r;
+                            if let Some(r) = r {
+                                link.used = true;
+                                *links_per_infra.entry(n.entity).or_default() += 1;
+                                out.push(RtlsEvent::Range { ts: now, tag: id.clone(), anchor: n.id.clone(), range_m: r, los: p.los(), rssi_dbm: mean });
+                                rtt_pos.push(dv(n.pos));
+                                rtt_r.push(r as f64);
+                                rtt_sig.push(n.profile.range_sigma_m.max(0.1) as f64);
+                                if best.is_none_or(|(b, _)| mean > b) {
+                                    best = Some((mean, n.pos));
+                                }
+                            }
+                        }
+                        RadioMethod::Rssi => {
+                            if wifi {
+                                link.kind = LinkKind::WifiRssi;
+                            }
+                            let r = radio::ble_rssi(&n.profile, tag_prof, p, l.held, &mut l.rng);
+                            link.value = r;
+                            link.rssi_dbm = r.unwrap_or(mean);
+                            if let Some(r) = r {
+                                link.used = true;
+                                *links_per_infra.entry(n.entity).or_default() += 1;
+                                out.push(RtlsEvent::Rssi { ts: now, tag: id.clone(), node: n.id.clone(), rssi_dbm: r, los: p.los() });
+                                let d = solver::rssi_to_distance(r as f64, radio::rssi_1m(tag_prof) as f64, n.profile.path_loss_exp as f64);
+                                a_pos.push(dv(n.pos));
+                                d_est.push(d);
+                                // Multiplicative error of log-distance ranging.
+                                sig.push(radio::rssi_distance_sigma(&n.profile, d as f32) as f64);
+                                if best.is_none_or(|(b, _)| r > b) {
+                                    best = Some((r, n.pos));
+                                }
+                            }
                         }
                     }
+                    links.push(link);
                 }
-                if a_pos.len() >= 3 {
-                    fix = solver::solve_twr(Dim::Plane(truth.y as f64), &a_pos, &d_est, &sig, track.est.map(dv));
+                // The most precise measurement available decides.
+                if !aoa_pos.is_empty() {
+                    fix = solver::solve_aoa(plane, &aoa_pos, &aoa_dir, &aoa_w);
+                    sigma_hint = aoa_sigma / aoa_pos.len() as f64;
+                }
+                if fix.is_none() && rtt_pos.len() >= 3 {
+                    let gate = 3.0 * rtt_sig.iter().copied().fold(f64::MAX, f64::min);
+                    fix = solver::solve_twr_robust(plane, &rtt_pos, &rtt_r, &rtt_sig, track.est.map(dv), gate);
+                    sigma_hint = rtt_sig.iter().sum::<f64>() / rtt_sig.len() as f64;
+                }
+                if fix.is_none() && a_pos.len() >= 3 {
+                    fix = solver::solve_twr(plane, &a_pos, &d_est, &sig, track.est.map(dv));
                     sigma_hint = sig.iter().sum::<f64>() / sig.len() as f64;
-                } else if let Some((_, p)) = best {
-                    // Proximity: "near the strongest beacon".
-                    fix = Some(solver::Fix { pos: DVec3::new(p.x as f64, truth.y as f64, p.z as f64), residual: 3.0, used: vec![], dop: 9.9 });
+                }
+                if fix.is_none()
+                    && let Some((_, p)) = best
+                {
+                    // Proximity: "near the strongest node".
+                    fix = Some(solver::Fix { pos: DVec3::new(p.x as f64, plane_y as f64, p.z as f64), residual: 3.0, used: vec![], dop: 9.9 });
                     sigma_hint = 3.0;
                 }
             }
@@ -569,8 +769,9 @@ pub fn step(
         track.links = links;
         if let Some(f) = fix.filter(|f| f.pos.is_finite()) {
             let raw = f.pos.as_vec3();
-            // Reject wild solutions (outside any sane distance from the infrastructure).
-            if (raw - *truth).length() > 200.0 {
+            // Reject wild solutions, and count them.
+            if !near_infrastructure(&infra, tech, raw) {
+                st.run.entry((tech, moving)).or_default().rejected += 1;
                 continue;
             }
             track.raw = Some(raw);
@@ -580,7 +781,8 @@ pub fn step(
                     track.kf.reset();
                 }
                 track.kf.predict(dt_fix);
-                track.kf.update(f.pos, (f.residual.max(sigma_hint) * f.dop.clamp(1.0, 10.0)).max(0.03));
+                // Residual × DOP is a 2D error: the filter wants it per axis.
+                track.kf.update(f.pos, (f.residual.max(sigma_hint) * f.dop.clamp(1.0, 10.0) * std::f64::consts::FRAC_1_SQRT_2).max(0.03));
                 track.kf.position().as_vec3()
             } else {
                 raw
@@ -591,10 +793,15 @@ pub fn step(
             track.dop = f.dop as f32;
             track.residual = f.residual as f32;
             track.used = f.used.len() as u32;
-            track.quality = ((1.0 / (1.0 + 4.0 * f.residual)) * (1.5 / f.dop.max(1.5))).clamp(0.0, 1.0) as f32;
+            track.quality = solver::fix_quality(&f);
             let err = (est - *truth).length();
             track.err = Some(err);
             st.errors.push_back((now, err, tech));
+            st.run.entry((tech, moving)).or_default().add(err);
+            st.error_spots.push_back((*truth, err, tech));
+            if st.error_spots.len() > 20_000 {
+                st.error_spots.pop_front();
+            }
             track.trail.push_back(est);
             while track.trail.len() > 200 {
                 track.trail.pop_front();
@@ -622,6 +829,7 @@ pub fn step(
         let mut readable: Vec<(usize, usize, radio::RfidLink, u32, f32)> = Vec::new();
         let mut in_field = vec![0usize; readers.len()];
         let mut tag_links: Vec<Vec<Link>> = vec![Vec::new(); rfid_tags.len()];
+        let mut miss = vec![1.0f32; rfid_tags.len()];
         // Paths in range: from the cache when neither end moved, else ray cast
         // (spread over the CPU cores; a stocked warehouse has thousands).
         let mut pairs: Vec<(usize, usize, Option<Path>)> = Vec::new();
@@ -657,7 +865,7 @@ pub fn step(
             misses.iter().map(|(a, b, ign)| occ.path(*a, *b, *ign)).collect::<Vec<_>>().into_iter()
         };
         for (ti, ri, cached) in pairs {
-            let (e, _, _, truth, tprof, ..) = rfid_tags[ti];
+            let (e, id, _, truth, tprof, ..) = rfid_tags[ti];
             let r = readers[ri];
             let p = match cached {
                 Some(p) => p,
@@ -667,9 +875,15 @@ pub fn step(
                     p
                 }
             };
+            let p = p.in_band(r.profile.freq_mhz);
             let to_tag = (*truth - r.pos).normalize_or_zero();
-            let angle = r.forward.angle_between(to_tag);
-            let link = radio::rfid_link(&r.profile, tprof, p, angle, &mut st.rng);
+            // The same gain the map and the optimiser use: the device's own antenna, then an
+            // applied FDTD one, then the profile's.
+            let g_r = ants.gain(r.antenna.as_ref(), Tech::Rfid, true, &r.profile, r.forward, to_tag);
+            miss[ti] *= 1.0 - radio::rfid_read_probability(&r.profile, tprof, &p, g_r);
+            // A parked tag keeps its fade: only moving something changes it.
+            let l = link_state(&mut st.links, st.seed, (*e, r.entity), (id, &r.id), (*truth, r.pos), p.wall_eq, radio::rfid_hold_m(&r.profile));
+            let link = radio::rfid_link(&r.profile, tprof, p, g_r, l.held.n1 * radio::RFID_FADE_SIGMA_DB, &mut l.rng);
             tag_links[ti].push(Link {
                 other: r.entity,
                 kind: LinkKind::Rfid,
@@ -678,6 +892,7 @@ pub fn step(
                 value: link.readable.then_some(link.rssi_dbm),
                 rssi_dbm: link.rssi_dbm,
                 wall_eq: p.wall_eq,
+                bias_eq: p.bias_eq,
                 true_distance: p.distance,
                 used: link.readable,
             });
@@ -690,7 +905,8 @@ pub fn step(
         let mut best: BTreeMap<usize, (f32, usize)> = BTreeMap::new();
         for (ti, ri, link, _, _) in &readable {
             let lambda = radio::rfid_reads_per_tag(&readers[*ri].profile, in_field[*ri]) * dt as f32;
-            let count = lambda.floor() as u32 + st.rng.chance(lambda.fract()) as u32;
+            let l = st.links.get_mut(&(rfid_tags[*ti].0, readers[*ri].entity)).expect("made above");
+            let count = lambda.floor() as u32 + l.rng.chance(lambda.fract()) as u32;
             if count == 0 {
                 continue;
             }
@@ -720,17 +936,19 @@ pub fn step(
         for (ti, (e, id, _, truth, ..)) in rfid_tags.iter().enumerate() {
             let track = st.tracks.entry(*e).or_insert_with(|| Track::new(id.clone(), "rfid", *truth));
             track.links = std::mem::take(&mut tag_links[ti]);
+            track.read_chance = 1.0 - miss[ti];
             if let Some((_, ri)) = best.get(&ti) {
                 let r = readers[*ri];
                 // Presence: "in front of reader R".
                 let flat = Vec3::new(r.forward.x, 0.0, r.forward.z).normalize_or_zero();
-                let est = Vec3::new(r.pos.x, truth.y, r.pos.z) + flat * 1.0;
+                let est = Vec3::new(r.pos.x, track.plane_y, r.pos.z) + flat * 1.0;
                 track.est = Some(est);
                 track.err = Some((est - *truth).length());
                 track.best_reader = Some(r.entity);
                 track.last_fix = now;
                 track.fixes += 1;
                 track.reads += 1;
+                track.first_read.get_or_insert(now);
                 track.quality = 0.5;
             }
         }
@@ -814,7 +1032,7 @@ pub fn step(
     for (e, n) in &links_per_infra {
         *st.infra_links.entry(*e).or_default() += n;
     }
-    while st.errors.front().is_some_and(|(t, _, _)| *t < now - 30.0) {
+    while st.errors.front().is_some_and(|(t, _, _)| *t < now - ERROR_WINDOW_S) {
         st.errors.pop_front();
     }
 
@@ -833,13 +1051,15 @@ pub fn step(
     // ---- Snapshot
     if now >= st.next_snapshot {
         st.next_snapshot = now + 1.0 / s.snapshot_hz.max(0.05) as f64;
-        let (rmse, _, cep95, _) = st.error_stats(None);
+        // The live view. With no fixes there is no error to report, not an error of zero.
+        let (rmse, cep95) = st.error_stats_checked(None).map_or((f32::NAN, f32::NAN), |e| (e.rmse, e.cep95));
         let rfid_rate = st.rfid_rate();
         let mut tags: Vec<TagRow> = st
             .tracks
             .values()
             .map(|t| {
-                let p = t.est.unwrap_or(t.truth);
+                // No estimate is no position: the true one isn't the engine's to report.
+                let p = t.est.unwrap_or(Vec3::NAN);
                 TagRow {
                     id: t.id.clone(),
                     tech: t.tech.into(),
@@ -905,17 +1125,49 @@ pub struct AutoTest {
     pub deploy: bool,
 }
 
+/// Error figures, null when there were no fixes.
+fn errors_json(e: Option<ErrorStats>) -> serde_json::Value {
+    serde_json::json!({ "rmse_m": e.map(|e| e.rmse), "cep50_m": e.map(|e| e.cep50), "cep95_m": e.map(|e| e.cep95), "max_m": e.map(|e| e.max), "samples": e.map_or(0, |e| e.n) })
+}
+
+/// A set of updates: their errors, how many had a fix, and how far 95 % of them land with
+/// no fix counted as a miss (null when more than 5 % had none).
+fn run_json(r: &RunStats) -> serde_json::Value {
+    let mut v = errors_json(r.stats());
+    v["attempts"] = r.attempts.into();
+    v["fixes"] = r.fixes.into();
+    v["rejected_fixes"] = r.rejected.into();
+    v["availability"] = serde_json::json!(r.availability());
+    v["p95_counting_no_fix_m"] = serde_json::json!(r.p95_counting_misses().filter(|p| p.is_finite()));
+    v
+}
+
 pub fn report_json(world: &mut World) -> serde_json::Value {
     let st = world.resource::<RtlsState>();
-    let (rmse, cep50, cep95, max) = st.error_stats(None);
-    let per_tech: serde_json::Value = ["uwb", "ble", "rfid"]
+    let all = st.run_stats(None, None).stats();
+    let per_tech: serde_json::Value = ["uwb", "ble", "rfid", "wifi"]
         .iter()
         .map(|t| {
-            let (r, c50, c95, m) = st.error_stats(Some(t));
-            (t.to_string(), serde_json::json!({ "rmse_m": r, "cep50_m": c50, "cep95_m": c95, "max_m": m }))
+            let mut v = run_json(&st.run_stats(Some(t), None));
+            for (key, moving) in [("moving", true), ("parked", false)] {
+                let mut class = run_json(&st.run_stats(Some(t), Some(moving)));
+                class["tags"] = st.tracks.values().filter(|x| x.tech == *t && (if moving { x.moving_epochs } else { x.parked_epochs }) > 1).count().into();
+                v[key] = class;
+            }
+            v["last_30s"] = errors_json(st.error_stats_checked(Some(t)));
+            (t.to_string(), v)
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
+    let rfid: Vec<&Track> = st.tracks.values().filter(|t| t.tech == "rfid").collect();
+    let read_by = |limit: f64| rfid.iter().filter(|t| t.first_read.is_some_and(|f| f <= limit)).count();
+    let rfid_json = serde_json::json!({
+        "tags": rfid.len(),
+        "test_s": st.time,
+        "read_within_test": read_by(f64::MAX),
+        "read_within_5s": read_by(5.0),
+        "mean_read_chance_per_round": (!rfid.is_empty()).then(|| rfid.iter().map(|t| t.read_chance).sum::<f32>() / rfid.len() as f32),
+    });
     let mut tags: Vec<serde_json::Value> = st
         .tracks
         .values()
@@ -926,6 +1178,8 @@ pub fn report_json(world: &mut World) -> serde_json::Value {
                 "fix_rate": if t.attempts > 0 { t.fixes as f64 / t.attempts as f64 } else if t.tech == "rfid" { (t.reads > 0) as u8 as f64 } else { 0.0 },
                 "fixes": t.fixes,
                 "rfid_reads": t.reads,
+                "read_chance_per_round": (t.tech == "rfid").then_some(t.read_chance),
+                "first_read_s": t.first_read,
                 "last_error_m": t.err,
                 "lost": t.lost,
                 "dop": t.dop,
@@ -948,10 +1202,16 @@ pub fn report_json(world: &mut World) -> serde_json::Value {
         .collect();
     let st = world.resource::<RtlsState>();
     serde_json::json!({
+        "simulated": true,
+        "seed": st.seed,
         "sim_time_s": st.time,
         "ms_per_tick": st.tick_ms,
-        "rmse_m": rmse, "cep50_m": cep50, "cep95_m": cep95, "max_error_m": max,
+        "window": format!("whole run, {:.0} s; last_30s is what a live view shows", st.time),
+        "rmse_m": all.map(|e| e.rmse), "cep50_m": all.map(|e| e.cep50), "cep95_m": all.map(|e| e.cep95), "max_error_m": all.map(|e| e.max), "samples": all.map_or(0, |e| e.n),
+        "last_30s": errors_json(st.error_stats_checked(None)),
         "by_tech": per_tech,
+        "rfid": rfid_json,
+        "unsynced_anchors": st.unsynced_anchors,
         "rfid_reads_per_s": st.rfid_rate(),
         "events": st.events_total,
         "snapshot": st.snapshot,
@@ -981,19 +1241,35 @@ pub fn autotest(world: &mut World) {
     let seed = world.resource::<RtlsConfig>().settings.seed;
     let mut deployed = None;
     if t.deploy {
-        // `SENSESIM_DEPLOY_TECH=uwb|ble|rfid` and `SENSESIM_DEPLOY_WORKERS=n`
+        // `SENSESIM_DEPLOY_TECH=uwb|ble|aoa|wifi|rfid` and `SENSESIM_DEPLOY_WORKERS=n`
         // pick what to plan (used to build the bundled sample layouts).
         let mut req = super::deploy::DeployRequest::default();
         if let Ok(tech) = std::env::var("SENSESIM_DEPLOY_TECH") {
             req.uwb = tech.contains("uwb");
             req.ble = tech.contains("ble");
             req.rfid = tech.contains("rfid");
+            req.ble_aoa = tech.contains("aoa");
+            req.wifi = tech.contains("wifi");
         }
         if let Some(n) = std::env::var("SENSESIM_DEPLOY_WORKERS").ok().and_then(|n| n.parse().ok()) {
             req.workers = n;
         }
+        // `SENSESIM_DEPLOY_OPTS=redundancy,dim3,colocate,heights` and
+        // `SENSESIM_DEPLOY_TARGET=<m>`: the plan's options, for regression runs.
+        if let Ok(o) = std::env::var("SENSESIM_DEPLOY_OPTS") {
+            req.redundancy = o.contains("redundancy");
+            req.dim3 = o.contains("dim3");
+            req.colocate = o.contains("colocate");
+            if o.contains("heights") {
+                req.heights = vec![0.3, 1.8];
+            }
+        }
+        if let Some(m) = std::env::var("SENSESIM_DEPLOY_TARGET").ok().and_then(|m| m.parse().ok()) {
+            req.target_m = m;
+        }
         let r = super::deploy::auto_deploy(world, &req);
-        deployed = Some(serde_json::json!({ "placed": r.headline(), "coverage": r.coverage, "predicted_p95_m": r.predicted_p95_m, "targets_met": r.targets_met, "notes": r.notes }));
+        let plans: Vec<serde_json::Value> = r.plans.iter().map(|p| serde_json::json!({ "tech": p.tech, "devices": p.devices, "coverage": p.coverage, "reachable_coverage": p.reachable_coverage, "predicted_p95_m": p.p95_m.is_finite().then_some(p.p95_m), "cost": p.cost, "targets_met": p.targets_met })).collect();
+        deployed = Some(serde_json::json!({ "placed": r.headline(), "coverage": r.coverage, "predicted_p95_m": r.predicted_p95_m.is_finite().then_some(r.predicted_p95_m), "targets_met": r.targets_met, "notes": r.notes, "plans": plans, "feedback_added": r.feedback_added, "uwb_cep95_m": r.uwb_cep95_m.is_finite().then_some(r.uwb_cep95_m), "rfid_unread": r.rfid_unread.len(), "inventory_tags": r.inventory_tags, "portal_readers": r.portal_readers }));
         let mut q = world.query::<(&super::device::Device, &Transform)>();
         let devs: Vec<(super::device::Device, Transform)> = q.iter(world).map(|(d, t)| (d.clone(), *t)).collect();
         let mut zq = world.query::<&super::device::Zone>();
@@ -1030,8 +1306,294 @@ mod tests {
         let pos = [[5.0, 0.0, -2.0], [5.0, 0.0, 2.0], [5.0, 3.0, 2.0], [5.0, 3.0, -2.0]];
         let bvh = Arc::new(Bvh::new(&pos, &[0, 1, 2, 0, 2, 3]));
         Occluders {
-            objs: vec![Occ { root: Entity::PLACEHOLDER, min: Vec3::new(4.98, 0.0, -2.0), max: Vec3::new(5.02, 3.0, 2.0), material: Material::Concrete, weight: Material::Concrete.weight(), parts: vec![(bvh, Affine3A::IDENTITY)] }],
+            objs: vec![Occ { root: Entity::PLACEHOLDER, min: Vec3::new(4.98, 0.0, -2.0), max: Vec3::new(5.02, 3.0, 2.0), material: Material::Concrete, weight: Material::Concrete.weight(), rack: false, name: String::new(), parts: vec![(bvh, Affine3A::IDENTITY)] }],
         }
+    }
+
+    /// A headless world running the real tick over the built-in profiles.
+    fn world(extra: Vec<Profile>) -> World {
+        let mut list: Vec<Profile> = serde_json::from_str(include_str!("../../assets/devices/generic.json")).unwrap();
+        list.extend(extra);
+        let mut w = World::new();
+        w.insert_resource(RtlsState::new(1));
+        w.insert_resource(RtlsConfig::default());
+        w.insert_resource(Profiles(list, Default::default()));
+        w.insert_resource(Hub::default());
+        w.init_resource::<super::super::antenna::AntennaLibrary>();
+        w.init_resource::<super::super::planning::AppliedAntenna>();
+        w.init_resource::<super::super::planning::Coverage>();
+        w.init_resource::<super::super::fdtd::Fdtd>();
+        w
+    }
+
+    fn device(w: &mut World, id: &str, kind: DeviceKind, profile: &str, at: Vec3, motion: Motion) -> Entity {
+        w.spawn((Device { id: id.into(), kind, profile: profile.into(), enabled: true, motion, address: String::new(), auto: false, radio: Default::default() }, Transform::from_translation(at))).id()
+    }
+
+    fn anchors(w: &mut World, profile: &str) {
+        for (i, (x, z)) in [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)].into_iter().enumerate() {
+            device(w, &format!("A{i}"), DeviceKind::UwbAnchor, profile, Vec3::new(x, 2.6, z), Motion::Static);
+        }
+    }
+
+    fn walker() -> Motion {
+        Motion::Path { points: vec![[1.0, 1.2, 1.0], [9.0, 1.2, 1.0], [9.0, 1.2, 9.0], [1.0, 1.2, 9.0]], speed: 1.3, ping_pong: false }
+    }
+
+    fn restart(w: &mut World, seed: u64) {
+        w.resource_mut::<RtlsState>().restart(seed);
+    }
+
+    fn tool(w: &mut World, name: &str, input: serde_json::Value) -> serde_json::Value {
+        let out = super::super::tools::start(w, name, &input).unwrap();
+        assert!(!out.is_error, "{}", out.summary());
+        serde_json::from_str(&out.summary()).unwrap()
+    }
+
+    #[test]
+    fn a_solution_nowhere_near_the_anchors_is_wild() {
+        let a = Infra { entity: Entity::PLACEHOLDER, id: "A1".into(), kind: DeviceKind::UwbAnchor, pos: Vec3::ZERO, forward: Vec3::NEG_Z, profile: Profile { max_range_m: 40.0, ..Default::default() }, antenna: None };
+        let infra = [a];
+        assert!(near_infrastructure(&infra, "uwb", Vec3::new(50.0, 1.0, 0.0)));
+        assert!(!near_infrastructure(&infra, "uwb", Vec3::new(70.0, 1.0, 0.0)));
+        assert!(!near_infrastructure(&infra, "ble", Vec3::new(1.0, 1.0, 0.0)), "only its own technology's devices count");
+    }
+
+    #[test]
+    fn no_fixes_is_no_result_not_a_perfect_one() {
+        let mut w = world(Vec::new());
+        // A tag and nothing to hear it.
+        device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag", Vec3::new(5.0, 1.2, 5.0), Motion::Static);
+        run_for(&mut w, 2.0);
+        let r = report_json(&mut w);
+        assert!(r["rmse_m"].is_null() && r["cep95_m"].is_null(), "{r}");
+        assert!(r["by_tech"]["uwb"]["cep95_m"].is_null(), "{r}");
+        assert!(r["by_tech"]["uwb"]["attempts"].as_u64().unwrap_or(0) >= 10, "{r}");
+        assert_eq!(r["by_tech"]["uwb"]["fixes"], 0, "{r}");
+    }
+
+    #[test]
+    fn a_tag_with_no_position_does_not_report_its_true_one() {
+        let mut w = world(Vec::new());
+        device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag", Vec3::new(5.0, 1.2, 5.0), Motion::Static);
+        run_for(&mut w, 1.5);
+        let snap = &w.resource::<RtlsState>().snapshot;
+        assert!(!snap.tags[0].x.is_finite(), "{:?}", snap.tags[0]);
+        assert!(snap.tags[0].lost);
+    }
+
+    #[test]
+    fn a_long_run_reports_all_of_it_and_says_so() {
+        let mut w = world(Vec::new());
+        anchors(&mut w, "uwb-anchor");
+        device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag", Vec3::new(5.0, 1.2, 5.0), Motion::Static);
+        run_for(&mut w, 45.0);
+        let r = report_json(&mut w);
+        let u = &r["by_tech"]["uwb"];
+        // 10 Hz for 45 s, not the last 30 s of it.
+        let n = u["samples"].as_u64().unwrap_or(0);
+        assert!(n > 430, "{r}");
+        assert!(r["window"].as_str().unwrap_or("").contains("whole run"), "{r}");
+        assert!(u["last_30s"]["samples"].as_u64().unwrap_or(9999) <= 301, "{r}");
+    }
+
+    #[test]
+    fn moving_and_parked_tags_are_scored_apart() {
+        let mut w = world(Vec::new());
+        anchors(&mut w, "uwb-anchor");
+        device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag", Vec3::new(1.0, 1.2, 1.0), walker());
+        device(&mut w, "T2", DeviceKind::UwbTag, "uwb-tag", Vec3::new(5.0, 1.2, 5.0), Motion::Static);
+        run_for(&mut w, 5.0);
+        let r = report_json(&mut w);
+        let u = &r["by_tech"]["uwb"];
+        assert!(u["moving"]["samples"].as_u64().unwrap_or(0) > 40, "{r}");
+        assert!(u["parked"]["samples"].as_u64().unwrap_or(0) > 40, "{r}");
+        assert_eq!(u["moving"]["tags"], 1, "{r}");
+        assert_eq!(u["parked"]["tags"], 1, "{r}");
+    }
+
+    #[test]
+    fn the_same_seed_reproduces_a_run() {
+        let mut w = world(Vec::new());
+        anchors(&mut w, "uwb-anchor");
+        w.resource_mut::<RtlsConfig>().settings.running = false;
+        let t = device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag", Vec3::new(1.0, 1.2, 1.0), walker());
+        let start = w.get::<Transform>(t).unwrap().translation;
+        let a = tool(&mut w, "rtls_run", serde_json::json!({ "seconds": 12.0 }));
+        assert_eq!(w.get::<Transform>(t).unwrap().translation, start, "a run leaves the scene as it began");
+        let b = tool(&mut w, "rtls_run", serde_json::json!({ "seconds": 12.0 }));
+        for key in ["rmse_m", "cep50_m", "cep95_m", "max_error_m"] {
+            assert_eq!(a[key], b[key], "{key}");
+        }
+        assert!(a["rmse_m"].as_f64().unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn another_tag_leaves_this_tags_draws_alone() {
+        let run = |other: bool| {
+            let mut w = world(Vec::new());
+            anchors(&mut w, "uwb-anchor");
+            let t = device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag", Vec3::new(3.0, 1.2, 4.0), Motion::Static);
+            if other {
+                device(&mut w, "T2", DeviceKind::UwbTag, "uwb-tag", Vec3::new(7.0, 1.2, 6.0), Motion::Static);
+                device(&mut w, "A9", DeviceKind::UwbAnchor, "uwb-anchor", Vec3::new(5.0, 2.6, -3.0), Motion::Static);
+            }
+            run_for(&mut w, 2.0);
+            let tr = &w.resource::<RtlsState>().tracks[&t];
+            tr.links.iter().filter_map(|l| l.value).take(4).collect::<Vec<f32>>()
+        };
+        assert_eq!(run(false), run(true));
+    }
+
+    #[test]
+    fn the_solver_is_not_told_the_tags_height() {
+        // No noise at all: the only error left is solving at the wrong height.
+        let quiet = Profile { id: "quiet-anchor".into(), kind: DeviceKind::UwbAnchor, range_sigma_m: 0.0, dropout: 0.0, ..Default::default() };
+        let quiet_tag = Profile { id: "quiet-tag".into(), kind: DeviceKind::UwbTag, range_sigma_m: 0.0, mount_height_m: 1.2, ..Default::default() };
+        let mut w = world(vec![quiet, quiet_tag]);
+        anchors(&mut w, "quiet-anchor");
+        // Starts at 1.2 m and climbs in place: a pallet lifted off the floor.
+        let rise = Motion::Path { points: vec![[2.0, 1.2, 3.0], [2.0, 2.1, 3.0]], speed: 1.0, ping_pong: false };
+        let t = device(&mut w, "T1", DeviceKind::UwbTag, "quiet-tag", Vec3::new(2.0, 1.2, 3.0), rise);
+        run_for(&mut w, 0.5);
+        run_for(&mut w, 0.45);
+        let tr = &w.resource::<RtlsState>().tracks[&t];
+        let raw = tr.raw.unwrap();
+        let off = (Vec2::new(raw.x, raw.z) - Vec2::new(tr.truth.x, tr.truth.z)).length();
+        assert!(off > 0.02, "solved at the true height: {off} m at y {}", tr.truth.y);
+    }
+
+    #[test]
+    fn the_rfid_sim_uses_the_devices_own_antenna() {
+        let mut w = world(Vec::new());
+        let r = device(&mut w, "R1", DeviceKind::RfidReader, "rfid-reader", Vec3::new(0.0, 2.2, 0.0), Motion::Static);
+        // Facing -Z, the tag right in the beam: read with the profile's 9 dBi, not through a -30 dBi antenna.
+        w.get_mut::<Device>(r).unwrap().radio.antenna = Some(super::super::antenna::AntennaChoice::Omni { gain_dbi: -30.0 });
+        let t = device(&mut w, "E1", DeviceKind::RfidTag, "rfid-tag", Vec3::new(0.0, 2.2, -5.0), Motion::Static);
+        run_for(&mut w, 2.0);
+        assert_eq!(w.resource::<RtlsState>().tracks[&t].reads, 0);
+    }
+
+    /// A reader and a tag at `margin` dB of forward link, over `seeds` runs: share ever read.
+    fn ever_read(margin: f32, moving: bool, seeds: u64) -> f32 {
+        let far = Profile { id: "far-reader".into(), kind: DeviceKind::RfidReader, tx_power_dbm: 30.0, antenna_gain_dbi: 9.0, beam_deg: 360.0, freq_mhz: 920.5, sensitivity_dbm: -200.0, max_range_m: 500.0, ..Default::default() };
+        let d = 10f32.powf((30.0 + 9.0 + 2.0 + 18.0 - margin - 20.0 * 920.5f32.log10() + 27.55) / 20.0);
+        let mut w = world(vec![far]);
+        device(&mut w, "R1", DeviceKind::RfidReader, "far-reader", Vec3::new(0.0, 2.2, 0.0), Motion::Static);
+        let at = Vec3::new(d, 2.2, 0.0);
+        let motion = if moving { Motion::Path { points: vec![[d, 2.2, -1.5], [d, 2.2, 1.5]], speed: 1.0, ping_pong: true } } else { Motion::Static };
+        let t = device(&mut w, "E1", DeviceKind::RfidTag, "rfid-tag", at, motion);
+        let mut read = 0;
+        for seed in 1..=seeds {
+            w.get_mut::<Transform>(t).unwrap().translation = at;
+            restart(&mut w, seed);
+            run_for(&mut w, 3.0);
+            read += (w.resource::<RtlsState>().tracks[&t].reads > 0) as u32;
+        }
+        read as f32 / seeds as f32
+    }
+
+    #[test]
+    fn a_parked_tags_fade_is_held_until_something_moves() {
+        // -2 dB of margin through a 2 dB fade reads about one round in six. Redrawn every
+        // 50 ms, nearly every tag gets read within seconds; held, only those in a good spot.
+        let parked = ever_read(-2.0, false, 80);
+        assert!(parked > 0.05 && parked < 0.32, "{parked}");
+        // A tag that keeps moving gets a new fade every half wavelength.
+        let moving = ever_read(-2.0, true, 20);
+        assert!(moving > 0.8, "{moving}");
+    }
+
+    #[test]
+    fn rfid_reports_a_per_round_chance_and_reads_in_a_stated_time() {
+        let mut w = world(Vec::new());
+        device(&mut w, "R1", DeviceKind::RfidReader, "rfid-reader", Vec3::new(0.0, 2.2, 0.0), Motion::Static);
+        device(&mut w, "E1", DeviceKind::RfidTag, "rfid-tag", Vec3::new(0.0, 2.2, -4.0), Motion::Static);
+        run_for(&mut w, 2.0);
+        let r = report_json(&mut w);
+        let tag = &r["tags"][0];
+        assert!(tag["read_chance_per_round"].as_f64().unwrap_or(0.0) > 0.9, "{r}");
+        assert_eq!(r["rfid"]["tags"], 1, "{r}");
+        assert_eq!(r["rfid"]["read_within_test"], 1, "{r}");
+        assert_eq!(r["rfid"]["test_s"].as_f64().map(|s| s.round()), Some(2.0), "{r}");
+    }
+
+    #[test]
+    fn an_anchor_that_cannot_reach_the_others_gives_no_tdoa() {
+        let reach = Profile { id: "reach-anchor".into(), kind: DeviceKind::UwbAnchor, range_sigma_m: 0.08, max_range_m: 20.0, dropout: 0.0, ..Default::default() };
+        let mut w = world(vec![reach]);
+        anchors(&mut w, "reach-anchor");
+        // Hears the tag, 16 m away, but is more than 20 m from every other anchor.
+        let lone = device(&mut w, "A9", DeviceKind::UwbAnchor, "reach-anchor", Vec3::new(30.0, 2.6, 5.0), Motion::Static);
+        let t = device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag-tdoa", Vec3::new(14.0, 1.2, 5.0), Motion::Static);
+        for _ in 0..10 {
+            run_for(&mut w, 0.1);
+            let tr = &w.resource::<RtlsState>().tracks[&t];
+            let link = tr.links.iter().find(|l| l.other == lone).expect("in the list");
+            assert!(link.value.is_none() && !link.used, "{link:?}");
+        }
+    }
+
+    #[test]
+    fn a_blink_is_as_strong_as_the_tag_that_sends_it() {
+        let mut w = world(Vec::new());
+        anchors(&mut w, "uwb-anchor");
+        let t = device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag-tdoa", Vec3::new(5.0, 1.2, 5.0), Motion::Static);
+        w.get_mut::<Device>(t).unwrap().radio.uwb_tx_dbm_mhz = Some(-90.0);
+        run_for(&mut w, 2.0);
+        assert_eq!(w.resource::<RtlsState>().tracks[&t].fixes, 0);
+    }
+
+    #[test]
+    fn a_parked_tag_keeps_part_of_its_ranging_error() {
+        // The Kalman filter can't average away what stays with the spot.
+        let mut w = world(Vec::new());
+        anchors(&mut w, "uwb-anchor");
+        let t = device(&mut w, "T1", DeviceKind::UwbTag, "uwb-tag", Vec3::new(5.0, 1.2, 5.0), Motion::Static);
+        let mut sq = 0.0;
+        let seeds = 30;
+        for seed in 1..=seeds {
+            restart(&mut w, seed);
+            run_for(&mut w, 2.0);
+            // Where it settles over 6 s: independent noise would average out to almost nothing.
+            let mut sum = Vec3::ZERO;
+            for _ in 0..60 {
+                run_for(&mut w, 0.1);
+                sum += w.resource::<RtlsState>().tracks[&t].est.unwrap();
+            }
+            sq += (sum / 60.0 - Vec3::new(5.0, 1.2, 5.0)).length_squared();
+        }
+        let rms = (sq / seeds as f32).sqrt();
+        assert!(rms > 0.035, "{rms}");
+    }
+
+    #[test]
+    fn the_map_measures_tdoa_when_every_tag_blinks() {
+        let tdoa_err = |profile: &str| {
+            let mut w = world(Vec::new());
+            anchors(&mut w, "uwb-anchor");
+            // 5 m outside the square, where losing the emission time hurts most.
+            device(&mut w, "T1", DeviceKind::UwbTag, profile, Vec3::new(15.0, 1.2, 5.0), Motion::Static);
+            let _ = w.run_system_cached_with(super::super::planning::compute, super::super::planning::CoverageRequest { tech: Tech::Uwb, height: 1.2, cell: 1.0 });
+            let c = w.resource::<super::super::planning::Coverage>();
+            let (ix, iz) = (((14.5 - c.origin.x) / c.cell) as usize, ((5.0 - c.origin.y) / c.cell) as usize);
+            c.cells[iz * c.nx + ix].err
+        };
+        let twr = tdoa_err("uwb-tag");
+        let tdoa = tdoa_err("uwb-tag-tdoa");
+        assert!(tdoa > twr * 1.5, "tdoa {tdoa} twr {twr}");
+    }
+
+    #[test]
+    fn rfid_coverage_does_not_report_decibels_as_metres() {
+        let mut w = world(Vec::new());
+        device(&mut w, "R1", DeviceKind::RfidReader, "rfid-reader", Vec3::new(0.0, 2.2, 0.0), Motion::Static);
+        device(&mut w, "E1", DeviceKind::RfidTag, "rfid-tag", Vec3::new(4.0, 1.2, 4.0), Motion::Static);
+        let r = tool(&mut w, "rtls_coverage", serde_json::json!({ "tech": "rfid", "cell": 1.0 }));
+        assert!(r["p95_predicted_error_m"].is_null(), "{r}");
+        assert!(r["mean_predicted_error_m"].is_null(), "{r}");
+        assert!(r["quality"]["pass_fraction"].is_null(), "{r}");
+        assert!(r["read_margin_db"]["p95"].as_f64().is_some(), "{r}");
     }
 
     #[test]

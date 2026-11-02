@@ -272,10 +272,13 @@ pub fn anthropic_request(model: &str, effort: &str, fallbacks: bool, system: &st
         "max_tokens": 16000,
         "system": [{ "type": "text", "text": system }],
         "messages": msgs,
-        "tools": tools,
         // Automatic caching: the breakpoint follows the end of the conversation.
         "cache_control": { "type": "ephemeral" },
     });
+    // A call without tools (the reviewer) leaves the field out altogether.
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
     if !effort.is_empty() {
         body["output_config"] = json!({ "effort": effort });
     }

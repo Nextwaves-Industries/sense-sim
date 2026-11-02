@@ -1,6 +1,6 @@
 //! Settings dialog: category list on the left, setting rows on the right.
 
-use bevy_egui::egui::{self, Margin, RichText, vec2};
+use bevy_egui::egui::{self, RichText, vec2};
 
 use crate::agent::Agent;
 use crate::agent::catalog::Catalog;
@@ -46,61 +46,44 @@ pub fn show(
     gpu: &mut Gpu,
 ) -> bool {
     let mut open = true;
-    let size = vec2(760.0f32.min(ctx.content_rect().width() - 40.0), 520.0f32.min(ctx.content_rect().height() - 60.0));
-    let modal = egui::Modal::new(egui::Id::new("settings_modal"))
-        .frame(egui::Frame::new().fill(theme::PANEL).stroke(egui::Stroke::new(1.0, theme::STROKE)).corner_radius(12).inner_margin(Margin::ZERO))
-        .show(ctx, |ui| {
-            ui.set_min_size(size);
-            ui.set_max_size(size);
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                // Category list.
-                egui::Frame::new().fill(theme::BG).inner_margin(Margin::same(12)).corner_radius(egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 }).show(ui, |ui| {
-                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                    ui.set_width(180.0);
-                    ui.set_min_height(size.y - 24.0);
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    ui.label(RichText::new("Settings").text_style(egui::TextStyle::Heading));
-                    ui.add_space(8.0);
-                    for t in SettingsTab::ALL {
-                        let (ic, name) = t.label();
-                        let sel = *tab == t;
-                        let b = egui::Button::new(theme::label(ic, name))
-                            .selected(sel)
-                            .frame_when_inactive(false)
-                            .min_size(vec2(ui.available_width(), 30.0));
-                        if ui.add(b).clicked() {
-                            *tab = t;
-                        }
-                    }
-                    });
-                });
-                // Content.
-                egui::Frame::new().inner_margin(Margin::symmetric(20, 14)).show(ui, |ui| {
-                    ui.vertical(|ui| {
-                    let w = size.x - 180.0 - 24.0 - 40.0;
-                    ui.set_width(w);
-                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(tab.label().1).size(17.0).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if theme::icon_button(ui, icon::X, "Close (Esc)").clicked() {
-                                open = false;
-                            }
-                        });
-                    });
-                    theme::divider(ui);
-                    egui::ScrollArea::vertical().max_height(size.y - 80.0).auto_shrink([false, false]).show(ui, |ui| match tab {
-                        SettingsTab::General => general(ui, library),
-                        SettingsTab::Viewport => viewport(ui, view),
-                        SettingsTab::Graphics => graphics(ui, gpu),
-                        SettingsTab::Performance => performance(ui, cache),
-                        SettingsTab::Assistant => crate::agent::panel::settings_ui(ui, agent, library, catalog),
-                    });
-                    });
-                });
-            });
+    let screen = ctx.content_rect();
+    let size = vec2(940.0f32.min(screen.width() - 48.0), 680.0f32.min(screen.height() - 48.0));
+    let modal = egui::Modal::new(egui::Id::new("settings_modal")).backdrop_color(theme::BACKDROP).frame(theme::modal_frame()).show(ctx, |ui| {
+        ui.set_min_size(size);
+        ui.set_max_size(size);
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        if theme::modal_title(ui, size.x, "Settings", true, "Close (Esc)") {
+            open = false;
+        }
+        let (body, _) = ui.allocate_exact_size(vec2(size.x, size.y - 56.0), egui::Sense::hover());
+        let nav_w = 220.0;
+        let nav = egui::Rect::from_min_size(body.min, vec2(nav_w, body.height()));
+        let content = egui::Rect::from_min_max(egui::pos2(nav.right() + 22.0, body.top() + 14.0), body.max - vec2(14.0, 8.0));
+        ui.painter().vline(nav.right(), body.y_range(), egui::Stroke::new(1.0, theme::STROKE));
+
+        // Category list.
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(nav));
+        child.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        for t in SettingsTab::ALL {
+            let (ic, name) = t.label();
+            if theme::nav_item(&mut child, ic, name, *tab == t, nav_w - 1.0).clicked() {
+                *tab = t;
+            }
+        }
+
+        // Content.
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content));
+        child.spacing_mut().item_spacing = vec2(8.0, 6.0);
+        child.label(RichText::new(tab.label().1).font(theme::bold(18.0)));
+        child.add_space(6.0);
+        egui::ScrollArea::vertical().id_salt(*tab as u8).auto_shrink([false, false]).show(&mut child, |ui| match tab {
+            SettingsTab::General => general(ui, library),
+            SettingsTab::Viewport => viewport(ui, view),
+            SettingsTab::Graphics => graphics(ui, gpu),
+            SettingsTab::Performance => performance(ui, cache),
+            SettingsTab::Assistant => crate::agent::panel::settings_ui(ui, agent, library, catalog),
         });
+    });
     open && !modal.should_close()
 }
 
@@ -147,6 +130,12 @@ fn viewport(ui: &mut egui::Ui, view: &mut ViewSettings) {
     theme::setting_row(ui, "Shadows", "Sun shadows. Turn off for speed in large scenes.", |ui| {
         theme::toggle_switch(ui, &mut view.shadows);
     });
+    theme::setting_row(ui, "Sample when zoomed out", "Draw far objects with fewer triangles and skip parts under a pixel, with no visible change. Clicks and simulations still use the full geometry.", |ui| {
+        theme::toggle_switch(ui, &mut view.sampling);
+    });
+    theme::setting_row(ui, "Occlusion culling", "Skip parts hidden behind others. Speeds up scenes with walls and rooms, but can slow open ones.", |ui| {
+        theme::toggle_switch(ui, &mut view.occlusion);
+    });
     ui.add_space(6.0);
     theme::caption(ui, "Lighting");
     theme::setting_row(ui, "Sun", "Directional light in lux.", |ui| {
@@ -174,7 +163,7 @@ fn graphics(ui: &mut egui::Ui, gpu: &mut Gpu) {
                 } else if a.discrete {
                     ("Discrete", theme::SUCCESS)
                 } else {
-                    (a.kind.as_str(), theme::ACCENT)
+                    (a.kind.as_str(), theme::WARNING)
                 };
                 ui.label(RichText::new(text).color(color).strong());
             });
@@ -187,7 +176,7 @@ fn graphics(ui: &mut egui::Ui, gpu: &mut Gpu) {
         }
     }
     if gpu.recovered {
-        ui.label(RichText::new("The last start with the chosen GPU or backend failed, so Sense Sim reset them to Auto.").small().color(theme::ACCENT));
+        ui.label(RichText::new("The last start with the chosen GPU or backend failed, so Sense Sim reset them to Auto.").small().color(theme::WARNING));
     }
 
     ui.add_space(6.0);
@@ -224,7 +213,7 @@ fn graphics(ui: &mut egui::Ui, gpu: &mut Gpu) {
     });
     if gpu.restart_needed() {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Restart Sense Sim to switch the GPU.").small().color(theme::ACCENT));
+            ui.label(RichText::new("Restart Sense Sim to switch the GPU.").small().color(theme::WARNING));
             if ui.button(theme::label(icon::ARROW_CLOCKWISE, "Restart now")).clicked() {
                 gpu.restart = true;
             }
@@ -293,14 +282,14 @@ fn graphics(ui: &mut egui::Ui, gpu: &mut Gpu) {
             theme::toggle_switch(ui, &mut gpu.prefs.openems);
         },
     );
-    let color = if link.ok { theme::SUCCESS } else if gpu.prefs.openems { theme::ACCENT } else { theme::WEAK };
+    let color = if link.ok { theme::SUCCESS } else if gpu.prefs.openems { theme::WARNING } else { theme::WEAK };
     ui.label(RichText::new(status).small().color(color));
     if gpu.prefs.openems {
         theme::setting_row(ui, "Update every", "", |ui| {
             ui.add(egui::Slider::new(&mut gpu.prefs.openems_period_s, 0.5..=30.0).suffix(" s").fixed_decimals(1));
         });
         if link.ems_fps_limit > 0 {
-            ui.label(RichText::new(format!("OpenEMS caps the frame rate at {} fps (gpu0/FpsLimit).", link.ems_fps_limit)).small().color(theme::ACCENT));
+            ui.label(RichText::new(format!("OpenEMS caps the frame rate at {} fps (gpu0/FpsLimit).", link.ems_fps_limit)).small().color(theme::WARNING));
         }
     }
 

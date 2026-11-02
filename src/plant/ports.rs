@@ -375,22 +375,32 @@ pub fn fit_circle(ring: &[Vec3]) -> Option<Rim> {
     (var.sqrt() < 0.08 * r && flat < 0.1 * r).then_some(Rim { center: c, normal: nrm, radius: r })
 }
 
-/// Concentric rims (inner and outer edge of one pipe wall, flange faces)
-/// collapse into the largest; at most 8 remain, biggest first.
+/// Concentric rims (inner and outer edge of one pipe wall, flange faces) collapse into
+/// one, sized as the smallest: that's the bore. Keeping a flange's outside diameter
+/// instead cut friction 170 times over. At most 8 remain, biggest nozzle first.
 fn dedupe_rims(mut rims: Vec<Rim>) -> Vec<Rim> {
     rims.sort_by(|a, b| b.radius.total_cmp(&a.radius));
-    let mut keep: Vec<Rim> = Vec::new();
+    let mut keep: Vec<(Rim, f32)> = Vec::new();
     for r in rims {
-        let dup = keep.iter().any(|k| {
+        let same = keep.iter().position(|(k, outer)| {
             let d = r.center - k.center;
-            k.normal.dot(r.normal).abs() > 0.95 && d.reject_from_normalized(k.normal).length() < 0.5 * k.radius && d.dot(k.normal).abs() < 2.0 * k.radius
+            k.normal.dot(r.normal).abs() > 0.95 && d.reject_from_normalized(k.normal).length() < 0.5 * outer && d.dot(k.normal).abs() < 2.0 * outer
         });
-        if !dup {
-            keep.push(r);
+        match same {
+            // Far smaller than the opening it sits in is a pin hole, not the bore.
+            Some(i) => {
+                if r.radius >= 0.2 * keep[i].1 {
+                    keep[i].0.radius = keep[i].0.radius.min(r.radius);
+                }
+            }
+            None => {
+                let outer = r.radius;
+                keep.push((r, outer));
+            }
         }
     }
     keep.truncate(8);
-    keep
+    keep.into_iter().map(|(r, _)| r).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +651,20 @@ pub fn port_json(p: &Port, t: &Transform) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // OUT-M15: a 165 mm flange became the size of a 53 mm bore, cutting friction 170×.
+    #[test]
+    fn a_flange_doesnt_become_the_bore() {
+        let rim = |r: f32, at: Vec3| Rim { center: at, normal: Vec3::X, radius: r };
+        let kept = dedupe_rims(vec![rim(0.0265, Vec3::new(0.01, 0.0, 0.0)), rim(0.0825, Vec3::ZERO), rim(0.03, Vec3::new(0.0, 1.0, 0.0))]);
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert_eq!(kept[0].radius, 0.0265, "the bore, at the flange's position");
+        assert_eq!(kept[0].center, Vec3::ZERO);
+        assert_eq!(kept[1].radius, 0.03, "another nozzle stands on its own");
+        // A pin hole on the axis isn't the bore.
+        let kept = dedupe_rims(vec![rim(0.05, Vec3::ZERO), rim(0.004, Vec3::ZERO)]);
+        assert_eq!(kept[0].radius, 0.05);
+    }
 
     #[test]
     fn circle_fit_finds_a_pipe_end() {

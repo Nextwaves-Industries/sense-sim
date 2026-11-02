@@ -1,14 +1,14 @@
 //! Deployment planning: coverage / DOP / predicted-error heatmap over the
-//! floor, RFID read zones, and a greedy anchor placement optimiser. All of it
-//! ray casts against the real scene geometry.
+//! floor, RFID read zones, and the placement optimiser (the search itself is in
+//! `placement`). All of it ray casts against the real scene geometry.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::antenna::{AntennaChoice, AntennaLibrary, Antennas};
-use super::device::{Device, DeviceKind, Profile, Profiles};
+use super::device::{Device, DeviceKind, Profile, Profiles, UwbMode};
+use super::placement::{self, Acc, Candidate, Column, Entry, Method, Mount, Mover, Planner, Point, RadioScene, SAME_SPOT_M};
 use super::radio::{self, Path};
 use super::sim::{OccluderParts, Occluders};
 use super::solver::{self, Dim};
@@ -20,15 +20,17 @@ pub enum Tech {
     Uwb,
     Ble,
     Rfid,
+    Wifi,
 }
 
 impl Tech {
-    pub const ALL: [Tech; 3] = [Tech::Uwb, Tech::Ble, Tech::Rfid];
+    pub const ALL: [Tech; 4] = [Tech::Uwb, Tech::Ble, Tech::Rfid, Tech::Wifi];
     pub fn label(self) -> &'static str {
         match self {
             Tech::Uwb => "UWB",
             Tech::Ble => "BLE",
             Tech::Rfid => "RFID",
+            Tech::Wifi => "WiFi",
         }
     }
     pub fn infra(self) -> DeviceKind {
@@ -36,6 +38,7 @@ impl Tech {
             Tech::Uwb => DeviceKind::UwbAnchor,
             Tech::Ble => DeviceKind::BleNode,
             Tech::Rfid => DeviceKind::RfidReader,
+            Tech::Wifi => DeviceKind::WifiAp,
         }
     }
     pub fn parse(s: &str) -> Option<Tech> {
@@ -43,6 +46,7 @@ impl Tech {
             "uwb" => Some(Tech::Uwb),
             "ble" => Some(Tech::Ble),
             "rfid" => Some(Tech::Rfid),
+            "wifi" => Some(Tech::Wifi),
             _ => None,
         }
     }
@@ -55,11 +59,19 @@ pub struct Cell {
     /// In range including obstructed links.
     pub heard: u32,
     pub dop: f32,
-    /// Predicted 1-sigma horizontal error (m); NaN = no fix.
+    /// Predicted horizontal RMS error (m); NaN = no fix. RFID has no position: there it is
+    /// the best link margin (dB) of a read chance the optimiser accepts, for colouring.
     pub err: f32,
     /// Strongest received signal (dBm): UWB first path, BLE RSSI, RFID power at the tag.
     pub signal: f32,
+    /// Heard, but by too few for a position: how far "near the strongest node" is off (m).
+    /// NaN elsewhere.
+    pub proximity_m: f32,
 }
+
+/// What `Cell::err` once held where a radio is heard but there are too few for a position.
+/// Those cells now have no `err`; see `Cell::proximity_m`.
+pub const PROXIMITY_ERR_M: f32 = 4.0;
 
 /// When a reading counts as correct for the Quality view: the position lands
 /// within `target_m` of the truth, and a spot passes when that happens for at
@@ -121,6 +133,13 @@ pub struct Coverage {
     entity: Option<Entity>,
 }
 
+impl Coverage {
+    /// The floor map's entity, if it has one.
+    pub fn heatmap(&self) -> Option<Entity> {
+        self.entity
+    }
+}
+
 /// Propagation model behind the floor map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MapSource {
@@ -143,7 +162,7 @@ pub struct FdtdAntenna {
     pub label: String,
     /// Result folder, to tell which FDTD run is applied.
     pub source: std::path::PathBuf,
-    /// Directivity `d[θ][φ]` in dBi on a regular grid.
+    /// Gain `d[θ][φ]` in dBi on a regular grid: directivity with its losses taken off.
     pub theta_step: f32,
     pub phi_step: f32,
     pub d: Vec<Vec<f32>>,
@@ -152,21 +171,37 @@ pub struct FdtdAntenna {
     /// Patch: the antenna axis (θ = 0) is the device's facing direction.
     /// Wire antennas (dipole, monopole) stand upright: the axis is world up.
     pub axis_forward: bool,
+    /// UWB range shift per direction (m), on the same grid as `d`, once analysed.
+    /// The average has been removed: a normal antenna-delay calibration takes it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bias_m: Option<Vec<Vec<f32>>>,
 }
 
 impl FdtdAntenna {
-    /// Realised gain (dBi, mismatch included) from a device facing `fwd`
-    /// towards `dir`.
-    pub fn gain(&self, fwd: Vec3, dir: Vec3) -> f32 {
+    /// Grid position (θ, φ) of `dir` for a device facing `fwd`.
+    fn angles(&self, fwd: Vec3, dir: Vec3) -> (f32, f32) {
         let z = if self.axis_forward { fwd.normalize_or(Vec3::NEG_Z) } else { Vec3::Y };
         let x = if self.axis_forward { Vec3::Y.cross(z).normalize_or(Vec3::X) } else { Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::X) };
         let y = z.cross(x);
         let d = dir.normalize_or_zero();
-        let theta = d.dot(z).clamp(-1.0, 1.0).acos().to_degrees();
-        let phi = d.dot(y).atan2(d.dot(x)).to_degrees().rem_euclid(360.0);
+        (d.dot(z).clamp(-1.0, 1.0).acos().to_degrees(), d.dot(y).atan2(d.dot(x)).to_degrees().rem_euclid(360.0))
+    }
+
+    /// Realised gain (dBi, mismatch included) from a device facing `fwd`
+    /// towards `dir`.
+    pub fn gain(&self, fwd: Vec3, dir: Vec3) -> f32 {
+        let (theta, phi) = self.angles(fwd, dir);
         let Some(row) = self.d.get(((theta / self.theta_step).round() as usize).min(self.d.len().saturating_sub(1))) else { return self.mismatch_db };
         let v = row.get(((phi / self.phi_step).round() as usize).min(row.len().saturating_sub(1))).copied().unwrap_or(0.0);
         v.max(-30.0) + self.mismatch_db
+    }
+
+    /// Range shift (m) of a UWB link towards `dir`; 0 until analysed.
+    pub fn bias_m(&self, fwd: Vec3, dir: Vec3) -> f32 {
+        let Some(grid) = &self.bias_m else { return 0.0 };
+        let (theta, phi) = self.angles(fwd, dir);
+        let Some(row) = grid.get(((theta / self.theta_step).round() as usize).min(grid.len().saturating_sub(1))) else { return 0.0 };
+        row.get(((phi / self.phi_step).round() as usize).min(row.len().saturating_sub(1))).copied().filter(|v| v.is_finite()).unwrap_or(0.0)
     }
 }
 
@@ -192,7 +227,14 @@ impl Coverage {
         }
         errs.sort_by(f32::total_cmp);
         let mean = errs.iter().sum::<f32>() / errs.len() as f32;
-        (covered, mean, errs[((errs.len() - 1) as f32 * 0.95) as usize])
+        (covered, mean, errs[((errs.len() - 1) as f32 * 0.95).ceil() as usize])
+    }
+
+    /// Share of the floor heard but without a position, and the worst that "near the strongest
+    /// node" is off there (m).
+    pub fn proximity_only(&self) -> (f32, f32) {
+        let far: Vec<f32> = self.cells.iter().map(|c| c.proximity_m).filter(|d| d.is_finite()).collect();
+        (far.len() as f32 / self.cells.len().max(1) as f32, far.iter().copied().fold(0.0, f32::max))
     }
 }
 
@@ -246,12 +288,21 @@ struct Node {
     antenna: Option<AntennaChoice>,
 }
 
+/// The tag a plan or map is made for. The tags in the scene decide how UWB is measured:
+/// TDoA if all of them blink.
+fn planned_tag<'a>(profiles: &Profiles, tech: Tech, devices: impl Iterator<Item = &'a Device>) -> Profile {
+    let default = tag_profile(profiles, tech);
+    let tags: Vec<Profile> = devices.filter(|d| d.enabled && d.kind == default.kind).map(|d| profiles.for_device(d)).collect();
+    if !tags.is_empty() && tags.iter().all(|t| t.mode == UwbMode::Tdoa) { tags[0].clone() } else { default }
+}
+
 /// The tag profile the floor map assumes for a technology.
 pub fn tag_profile(profiles: &Profiles, tech: Tech) -> Profile {
     let kind = match tech {
         Tech::Uwb => DeviceKind::UwbTag,
         Tech::Ble => DeviceKind::BleTag,
         Tech::Rfid => DeviceKind::RfidTag,
+        Tech::Wifi => DeviceKind::WifiClient,
     };
     profiles.default_for(kind).cloned().unwrap_or_default()
 }
@@ -262,26 +313,45 @@ pub fn tag_profile(profiles: &Profiles, tech: Tech) -> Profile {
 /// `rssi_at_1m` is its power 1 m away, isotropic); RFID: forward-link power at the tag.
 pub fn fdtd_rx_dbm(tech: Tech, node: &Profile, tag: &Profile, tag_gain: f32, prop: f32) -> f32 {
     match tech {
+        Tech::Uwb if tag.mode == UwbMode::Tdoa => radio::uwb_tx_total_dbm(tag) + prop + tag_gain,
         Tech::Uwb => radio::uwb_tx_total_dbm(node) + prop + tag_gain,
-        Tech::Ble => tag.rssi_at_1m + solver::fspl_db(1.0, node.freq_mhz as f64) as f32 + prop + tag_gain,
+        Tech::Ble | Tech::Wifi => radio::rssi_1m(tag) + solver::fspl_db(1.0, node.freq_mhz as f64) as f32 + prop + tag_gain,
         Tech::Rfid => node.tx_power_dbm + prop + tag.antenna_gain_dbi,
     }
 }
 
-/// Evaluates one floor point against a set of infrastructure nodes. For UWB
-/// and BLE each path carries the antenna gain of both ends (`Path::gain_db`);
+/// Evaluates one floor point against a set of infrastructure nodes, with the
+/// planner's own link model, so the map shows what the optimiser scores. Each
+/// path carries the antenna gain of both ends (`Path::gain_db`, UWB, BLE, WiFi);
 /// RFID readers' gain towards `p` comes from `ants`. Where `props[i]` is set
 /// (FDTD), it replaces the ray model's distance and wall loss for node `i`;
 /// line of sight and what blocks a UWB first path still come from `paths`.
 #[allow(clippy::too_many_arguments)]
 fn eval(tech: Tech, p: Vec3, nodes: &[Node], paths: &[Path], props: &[Option<f32>], tag: &Profile, tag_gain: f32, ants: Antennas) -> Cell {
-    let mut c = Cell { err: f32::NAN, signal: f32::NEG_INFINITY, ..default() };
+    let mut c = Cell { err: f32::NAN, signal: f32::NEG_INFINITY, proximity_m: f32::NAN, ..default() };
+    // Adds a heard node's measurement. FDTD can pass a link the ray model
+    // calls out of range: then it counts with the node's own plain noise.
+    let measure = |acc: &mut Acc, m: Method, n: &Node, path: &Path, i: usize| -> bool {
+        let to = p - n.pos;
+        let u = to.normalize_or_zero().to_array();
+        let e = match placement::link_info(m, &n.prof, tag, path, n.fwd.angle_between(to), 0.0) {
+            Some(l) => Entry { pt: 0, p: l.p, w: l.w, v: l.v, b: l.b, u, bearing: l.bearing },
+            None if m == Method::Aoa => return false,
+            None => {
+                let s = if m == Method::Rssi { radio::rssi_distance_sigma(&n.prof, path.distance) } else { n.prof.range_sigma_m.max(0.02) };
+                Entry { pt: 0, p: 0.9, w: 0.9 / (s * s), v: 0.9 / (s * s), b: 0.0, u, bearing: false }
+            }
+        };
+        acc.add(i as u32, &e);
+        true
+    };
     match tech {
         Tech::Uwb => {
             let mut los = Vec::new();
             let mut all = Vec::new();
-            let mut sigma = 0.1f32;
-            for ((n, path), prop) in nodes.iter().zip(paths).zip(props) {
+            let method = if tag.mode == UwbMode::Tdoa { Method::Tdoa } else { Method::Twr };
+            let mut acc = Acc::default();
+            for (i, ((n, path), prop)) in nodes.iter().zip(paths).zip(props).enumerate() {
                 let prof = &n.prof;
                 let passes = match prop {
                     Some(prop) => {
@@ -290,6 +360,12 @@ fn eval(tech: Tech, p: Vec3, nodes: &[Node], paths: &[Path], props: &[Option<f32
                             c.signal = c.signal.max(rx);
                         }
                         rx >= prof.sensitivity_dbm && path.distance <= prof.max_range_m && path.blocker.is_none() && path.wall_eq <= prof.max_walls as f32 + 1e-3
+                    }
+                    None if method == Method::Tdoa => {
+                        if path.distance <= prof.max_range_m {
+                            c.signal = c.signal.max(radio::uwb_blink_rx_power(prof, tag, *path));
+                        }
+                        path.uwb_blink_passes(prof, tag)
                     }
                     None => {
                         if path.distance <= prof.max_range_m {
@@ -305,76 +381,96 @@ fn eval(tech: Tech, p: Vec3, nodes: &[Node], paths: &[Path], props: &[Option<f32
                 if path.los() {
                     los.push(n.pos.as_dvec3());
                 }
-                sigma = n.prof.range_sigma_m.max(0.02);
+                measure(&mut acc, method, n, path, i);
             }
             c.los = los.len() as u32;
             c.heard = all.len() as u32;
-            let dim = Dim::Plane(p.y as f64);
-            if los.len() >= 3 {
-                c.dop = solver::dop(dim, &los, p.as_dvec3()) as f32;
-                c.err = sigma * c.dop;
-            } else if all.len() >= 3 {
-                c.dop = solver::dop(dim, &all, p.as_dvec3()) as f32;
-                // NLOS-dominated: bias-limited.
-                c.err = sigma * c.dop + nodes[0].prof.nlos_bias_m;
+            if all.len() >= method.need() {
+                c.dop = solver::dop(Dim::Plane(p.y as f64), if los.len() >= 3 { &los } else { &all }, p.as_dvec3()) as f32;
+                let e = acc.err(method, false);
+                if e.is_finite() {
+                    c.err = e;
+                }
             }
         }
-        Tech::Ble => {
+        Tech::Ble | Tech::Wifi => {
             let mut heard = Vec::new();
-            let mut spread = 0.0;
-            for ((n, path), prop) in nodes.iter().zip(paths).zip(props) {
+            let mut acc = Acc::default();
+            let mut need = usize::MAX;
+            let mut strongest: Option<(f32, Vec3)> = None;
+            for (i, ((n, path), prop)) in nodes.iter().zip(paths).zip(props).enumerate() {
                 // `rssi_at_1m` is calibrated with isotropic antennas: add the
                 // antenna gains of both ends (on the path).
                 let rssi = match prop {
                     Some(prop) => fdtd_rx_dbm(tech, &n.prof, tag, tag_gain, *prop),
-                    None => tag.rssi_at_1m - 10.0 * n.prof.path_loss_exp * path.distance.max(0.1).log10() - n.prof.wall_loss_db * path.wall_eq + path.gain_db,
+                    None => radio::ble_mean_rssi(&n.prof, tag, *path),
                 };
                 if path.distance <= n.prof.max_range_m {
                     c.signal = c.signal.max(rssi);
                 }
                 if rssi >= n.prof.sensitivity_dbm && path.distance <= n.prof.max_range_m {
-                    heard.push(n.pos.as_dvec3());
-                    spread += path.distance * n.prof.shadow_sigma_db * std::f32::consts::LN_10 / (10.0 * n.prof.path_loss_exp);
-                    if path.los() {
-                        c.los += 1;
+                    let m = Method::of(tech, &n.prof, tag);
+                    if measure(&mut acc, m, n, path, i) {
+                        need = need.min(m.need());
+                        heard.push(n.pos.as_dvec3());
+                        if strongest.is_none_or(|(s, _)| rssi > s) {
+                            strongest = Some((rssi, n.pos));
+                        }
+                        if path.los() {
+                            c.los += 1;
+                        }
                     }
                 }
             }
             c.heard = heard.len() as u32;
             if heard.len() >= 3 {
                 c.dop = solver::dop(Dim::Plane(p.y as f64), &heard, p.as_dvec3()) as f32;
-                c.err = (spread / heard.len() as f32) * c.dop.min(5.0) * 0.6;
-            } else if !heard.is_empty() {
-                c.err = 4.0;
+            }
+            if heard.len() >= need {
+                // AoA and RSSI bearings and ranges add up the same way.
+                let e = acc.err(Method::Rssi, false);
+                if e.is_finite() {
+                    c.err = e;
+                }
+            }
+            // Too few for a fix: "near the strongest node", as the simulation reports it. That's
+            // no position, and it's as wrong as the tag is far from the node.
+            if let Some((_, at)) = strongest.filter(|_| !c.err.is_finite()) {
+                c.proximity_m = (at - p).xz().length();
             }
         }
         Tech::Rfid => {
             let mut best = f32::MIN;
+            let mut miss = 1.0f32;
             for ((n, path), prop) in nodes.iter().zip(paths).zip(props) {
-                let fwd = match prop {
-                    Some(prop) => fdtd_rx_dbm(tech, &n.prof, tag, tag_gain, *prop),
+                let (fwd, margin, read) = match prop {
+                    Some(prop) => {
+                        let rx = fdtd_rx_dbm(tech, &n.prof, tag, tag_gain, *prop);
+                        let margin = rx - tag.tag_sensitivity_dbm;
+                        (rx, margin, radio::normal_above(margin, radio::RFID_FADE_SIGMA_DB))
+                    }
                     None => {
                         let to = (p - n.pos).normalize_or_zero();
                         let g = ants.gain(n.antenna.as_ref(), Tech::Rfid, true, &n.prof, n.fwd, to);
-                        n.prof.tx_power_dbm + g + tag.antenna_gain_dbi
-                            - solver::fspl_db(path.distance as f64, n.prof.freq_mhz as f64) as f32
-                            - n.prof.wall_loss_db * path.wall_eq
+                        let (f, r) = radio::rfid_margins(&n.prof, tag, path, g);
+                        // The tag must be energised and its reply heard.
+                        (f + tag.tag_sensitivity_dbm, f.min(r), radio::rfid_read_probability(&n.prof, tag, path, g))
                     }
                 };
-                let margin = fwd - tag.tag_sensitivity_dbm;
                 if path.distance <= n.prof.max_range_m {
                     c.signal = c.signal.max(fwd);
-                }
-                if margin >= 0.0 && path.distance <= n.prof.max_range_m {
-                    c.heard += 1;
-                    if path.los() {
-                        c.los += 1;
+                    miss *= 1.0 - read;
+                    if read >= 0.5 {
+                        c.heard += 1;
+                        if path.los() {
+                            c.los += 1;
+                        }
                     }
                 }
                 best = best.max(margin);
             }
-            // For RFID "err" encodes the forward-link margin (dB) for colouring.
-            if c.heard > 0 {
+            // The optimiser's criterion, so the map shows what it scores.
+            if 1.0 - miss >= placement::READ_P {
                 c.err = best;
             }
         }
@@ -406,12 +502,15 @@ pub fn compute(
         .filter(|(_, d, _)| d.enabled && d.kind == req.tech.infra())
         .map(|(e, d, t)| Node { entity: e, pos: t.translation, fwd: *t.forward(), prof: profiles.for_device(d), antenna: d.radio.antenna.clone() })
         .collect();
-    let tag = tag_profile(&profiles, req.tech);
+    let tag = planned_tag(&profiles, req.tech, devices.iter().map(|(_, d, _)| d));
     // A tag's facing is unknown at a floor point: its omni gain, else isotropic.
     let tag_gain = ants.tag_gain_unaimed(None, &tag);
     // FDTD source: each node's run in the latest whole-scene result, if it is
     // still where it was simulated; the others stay on the ray model.
     let scene = (cov.source == MapSource::Fdtd).then(|| fdtd.scene(req.tech)).flatten();
+    // A run that can't carry the map doesn't reach it, however the source was set.
+    let blocked = scene.as_ref().and_then(|s| s.use_block());
+    let scene = scene.filter(|_| blocked.is_none());
     let runs: Vec<Option<(usize, f32)>> = nodes
         .iter()
         .map(|n| {
@@ -431,23 +530,26 @@ pub fn compute(
                     if (n.pos - p).length() > n.prof.max_range_m * 1.1 {
                         return Path { distance: f32::MAX, walls: 99, wall_eq: 99.0, bias_eq: 99.0, ..Default::default() };
                     }
-                    let path = occ.path(p, n.pos, None);
+                    let path = occ.path(p, n.pos, None).in_band(n.prof.freq_mhz);
                     match req.tech {
                         Tech::Rfid => path,
                         _ => Path { gain_db: ants.gain(n.antenna.as_ref(), req.tech, true, &n.prof, n.fwd, p - n.pos) + tag_gain, ..path },
                     }
                 })
                 .collect();
-            let props: Vec<Option<f32>> = runs.iter().map(|r| r.and_then(|(i, fix)| scene.as_ref()?.link_db_at(i, p).map(|l| l + fix))).collect();
+            let props: Vec<Option<f32>> = runs.iter().map(|r| r.and_then(|(i, _)| scene.as_ref()?.propagation_db(i, p))).collect();
             cells.push(eval(req.tech, p, &nodes, &paths, &props, &tag, tag_gain, ants));
         }
     }
     let source_note = match (cov.source, &scene) {
         (MapSource::Ray, _) => String::new(),
-        (MapSource::Fdtd, None) => format!("No whole-scene FDTD run for {} yet: ray model shown", req.tech.label()),
+        (MapSource::Fdtd, None) => match &blocked {
+            Some(why) => format!("FDTD run not used, {why}: ray model shown"),
+            None => format!("No whole-scene FDTD run for {} yet: ray model shown", req.tech.label()),
+        },
         (MapSource::Fdtd, Some(s)) => {
             let used = runs.iter().filter(|r| r.is_some()).count();
-            let scaled = if s.plan.scaled() { format!(" · scaled ×{:.1}", s.plan.scale) } else { String::new() };
+            let scaled = if s.plan.scaled() { format!(" · scaled ×{:.1}, shadows up to {:.0} dB too strong", s.plan.scale, s.plan.shadow_error_db()) } else { String::new() };
             let stale = nodes.len() - used;
             let stale = if stale > 0 { format!(" · {stale} of {} moved or new since the run (ray model for those)", nodes.len()) } else { String::new() };
             format!("FDTD · {}{scaled}{stale}", s.band.label())
@@ -474,16 +576,18 @@ pub fn compute(
         entity: cov.entity,
     };
     let (covered, mean, p95) = cov.stats();
+    let (near_only, worst) = cov.proximity_only();
     cov.summary = match req.tech {
-        Tech::Rfid => format!("{} readers: {:.0}% of the floor readable at {:.1} m", nodes.len(), covered * 100.0, req.height),
+        Tech::Rfid => format!("{} readers: {:.0}% of the floor has a read chance over 90% at {:.1} m", nodes.len(), covered * 100.0, req.height),
         _ => format!(
-            "{} {}: {:.0}% of the floor has a fix at {:.1} m; predicted error mean {:.2} m, p95 {:.2} m",
+            "{} {}: {:.0}% of the floor has a fix at {:.1} m; predicted RMS error mean {:.2} m, worst 5% from {:.2} m{}",
             nodes.len(),
             if req.tech == Tech::Uwb { "anchors" } else { "nodes" },
             covered * 100.0,
             req.height,
             mean,
-            p95
+            p95,
+            if near_only > 0.0 { format!("; {:.0}% more is heard by too few for a position, up to {worst:.0} m off", near_only * 100.0) } else { String::new() }
         ),
     };
 }
@@ -496,16 +600,50 @@ pub struct OptimizeRequest {
     pub height: f32,
     /// Mounting points (position, facing). `None` = perimeter + grid at the profile's mount height.
     pub candidates: Option<Vec<(Vec3, Vec3)>>,
-    /// Stop once this share of the free floor is covered (≥3 LOS for UWB/BLE, ≥1 for RFID)…
+    /// Stop once this share of the free floor has a usable fix (the devices a fix needs heard,
+    /// in line of sight or not, and 95 % of readings within 3× the target) or, for RFID, a
+    /// read chance over 90 %…
     pub target_coverage: Option<f32>,
-    /// …and the 95th percentile of predicted error is at most this (UWB/BLE).
+    /// …and across the floor, points with no fix included, 95 % of readings land within this.
     pub target_p95_m: Option<f32>,
-    /// Anchors that must be in line of sight for a covered point (default 3 for
-    /// UWB/BLE, 1 for RFID). 4 leaves one spare to reject a blocked range.
+    /// Devices that must be heard for a covered point (default 3 for UWB/BLE, 1 for RFID).
+    /// 4 leaves one spare to reject a blocked range.
     pub min_los: Option<usize>,
     /// Zones (min, max) where tags must be located: sampled more densely,
     /// weighted higher, and each must reach `target_coverage` on its own.
     pub zones: Vec<(Vec3, Vec3)>,
+    /// Where each candidate hangs (parallel to `candidates`); inferred when missing.
+    pub mounts: Option<Vec<Mount>>,
+    /// Infrastructure profile to plan with (default: the kind's first).
+    pub profile: Option<String>,
+    /// Tag heights to plan for (default: `height`), e.g. 0.3 / 1.0 / 1.8 m.
+    pub heights: Vec<f32>,
+    /// Plan for full 3D fixes instead of X/Z at a known height.
+    pub dim3: bool,
+    /// Keep the targets with any one device failed.
+    pub redundancy: bool,
+    pub min_spacing_m: Option<f32>,
+    /// Weight of install cost against coverage (default small).
+    pub cost_weight: Option<f32>,
+    /// Where the cables run to: far mounts cost more.
+    pub head_end: Option<Vec3>,
+    /// Slide the chosen devices along their mounting surface afterwards.
+    pub refine: bool,
+    /// Also try wall, column and pole mounts at other heights.
+    pub expand_heights: bool,
+    /// Exact spots tags must be read or located at, by group: racks' shelf
+    /// levels. They count even inside an object's footprint, and each group
+    /// must reach `target_coverage` on its own, as a zone does.
+    pub targets: Vec<(Vec3, u16)>,
+    /// Spots taken by another technology's devices: unavailable here.
+    pub reserved: Vec<Vec3>,
+    /// Shared with another technology's device: much cheaper to mount.
+    pub shared_mounts: Vec<Vec3>,
+    /// Areas the simulation measured badly: much heavier in the score.
+    pub heavy: Vec<(Vec3, Vec3)>,
+    /// Add at least this many devices even if the prediction says it's enough
+    /// (the simulation knows better).
+    pub force_add: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -513,12 +651,31 @@ pub struct OptimizeResult {
     /// Chosen mounting points: (position, facing).
     pub chosen: Vec<(Vec3, Vec3)>,
     pub coverage_after: f32,
+    /// How far 95 % of readings land, at the floor's 95th percentile with no-fix points
+    /// counted: infinite past 5 % of the floor without a position.
     pub p95_after: f32,
+    /// The same over the points with a fix.
+    pub p95_located: f32,
+    /// The targets asked for are met. Not "as much as could be reached".
     pub targets_met: bool,
+    /// Share of the floor every mounting point together could cover.
+    pub reachable_coverage: f32,
     /// Covered share of each requested zone (NaN = no walkable floor in it).
     pub zone_coverage: Vec<f32>,
     /// Zones (with walkable floor) that meet the coverage target.
     pub zones_met: usize,
+    /// Covered share of each group of `targets`.
+    pub target_coverage: Vec<f32>,
+    /// p95 with each point's worst single device failure (redundancy on).
+    pub p95_k1: f32,
+    /// Install cost of the chosen devices.
+    pub cost: f32,
+    /// RFID: reader pairs in each other's beam.
+    pub conflicts: usize,
+    /// RFID: mean read chance outside the zones.
+    pub stray: f32,
+    /// TDoA: anchors without a clock-sync path to the others.
+    pub unsynced: usize,
 }
 
 /// World-space bounds (min, max) of the placed objects.
@@ -588,18 +745,49 @@ pub fn default_candidates(lo: Vec2, hi: Vec2, height: f32) -> Vec<(Vec3, Vec3)> 
     v.into_iter().map(|p| (Vec3::new(p.x, height, p.y), face(p))).collect()
 }
 
-/// A usable fix needs reasonable geometry: beyond this DOP a point does not
-/// count as covered even with enough anchors in view.
-const MAX_DOP: f64 = 5.0;
-/// Budgets up to this many devices are planned with beam search.
-const BEAM_MAX_ADD: usize = 6;
-// Wide enough that 3 anchors are an exhaustive search (one plan scores in
-// microseconds).
-const BEAM_WIDTH: usize = 2000;
+/// Beyond this many candidates extra heights are not worth the ray casts.
+const MAX_EXPANDED_CANDS: usize = 900;
 
-/// Greedy placement: from candidate mounting points, repeatedly add the one
-/// that most improves coverage and geometry (DOP), until the targets are met
-/// or nothing helps any more.
+/// A device's measurements from a spot, and the surfaces it may slide on.
+struct SceneMover<'a, S, G> {
+    scene: &'a S,
+    pts: &'a [Point],
+    method: Method,
+    prof: &'a Profile,
+    tag: &'a Profile,
+    gain: &'a G,
+    lo: Vec2,
+    hi: Vec2,
+    boxes: &'a [(Vec3, Vec3)],
+}
+
+impl<S: RadioScene, G: Fn(&Profile, Vec3, Vec3) -> f32 + Sync> Mover for SceneMover<'_, S, G> {
+    fn settle(&self, from: &Candidate, to: Vec3) -> Option<Vec3> {
+        if to.x < self.lo.x || to.x > self.hi.x || to.z < self.lo.y || to.z > self.hi.y {
+            return None;
+        }
+        if from.mount.on_surface() {
+            // Same gap to the surface behind it, wherever it slides.
+            let back = -from.facing.normalize_or_zero();
+            let gap = self.scene.surface(from.pos, back, 1.0)?;
+            let t = self.scene.surface(to, back, gap + 0.3)?;
+            let land = to + back * (t - gap);
+            // Rounding a corner onto another surface is not sliding.
+            (land.distance(from.pos) <= (to - from.pos).length() + 0.05).then_some(land)
+        } else {
+            let inside = self.boxes.iter().any(|(a, b)| to.x >= a.x && to.x <= b.x && to.y >= a.y && to.y <= b.y && to.z >= a.z && to.z <= b.z);
+            (!inside).then_some(to)
+        }
+    }
+
+    fn column(&self, pos: Vec3, facing: Vec3) -> Column {
+        placement::column(self.scene, self.pts, self.method, self.prof, self.tag, pos, facing, self.gain)
+    }
+}
+
+/// Chooses mounting points for the most coverage and accuracy at the lowest
+/// install cost, or the fewest that meet the targets, with the same link model
+/// the simulation runs (see `placement`).
 #[allow(clippy::too_many_arguments)]
 pub fn optimize(
     In(req): In<OptimizeRequest>,
@@ -612,349 +800,219 @@ pub fn optimize(
     (applied, library): (Res<AppliedAntenna>, Res<AntennaLibrary>),
 ) -> OptimizeResult {
     let infra_kind = req.tech.infra();
-    let Some(prof) = profiles.default_for(infra_kind).cloned() else { return OptimizeResult::default() };
+    let wanted = req.profile.as_deref().and_then(|id| profiles.get(id)).filter(|p| p.kind == infra_kind);
+    let Some(prof) = wanted.or_else(|| profiles.default_for(infra_kind)).cloned() else { return OptimizeResult::default() };
     let (lo, hi) = area(&objects, &devices);
     let size = hi - lo;
     let boxes = object_boxes(&objects);
-    // Evaluation points on the walkable floor.
+    let tag = planned_tag(&profiles, req.tech, devices.iter().map(|(_, d, _)| d));
+    let method = Method::of(req.tech, &prof, &tag);
+    let reads = method == Method::Read;
+
+    // Evaluation points on the walkable floor, at every tag height.
+    let heights: Vec<f32> = if req.heights.is_empty() { vec![req.height] } else { req.heights.clone() };
+    let per_height = 1.0 / heights.len() as f32;
     let ec = (size.x * size.y / 500.0).sqrt().max(0.75);
-    let mut pts = Vec::new();
-    let mut z = lo.y + ec * 0.5;
-    while z < hi.y {
-        let mut x = lo.x + ec * 0.5;
-        while x < hi.x {
-            if !blocked(&boxes, Vec2::new(x, z), 0.1) {
-                pts.push(Vec3::new(x, req.height, z));
+    let mut pts: Vec<Point> = Vec::new();
+    let zones_of = |x: f32, z: f32| -> Vec<u16> { req.zones.iter().enumerate().filter(|(_, (a, b))| x >= a.x && x <= b.x && z >= a.z && z <= b.z).map(|(i, _)| i as u16).collect() };
+    // Floor inside a zone counts double: that is where tags must be found.
+    const ZONE_WEIGHT: f32 = 2.0;
+    for &h in &heights {
+        let mut z = lo.y + ec * 0.5;
+        while z < hi.y {
+            let mut x = lo.x + ec * 0.5;
+            while x < hi.x {
+                if !blocked(&boxes, Vec2::new(x, z), 0.1) {
+                    let zones = zones_of(x, z);
+                    let weight = per_height * if zones.is_empty() { 1.0 } else { ZONE_WEIGHT };
+                    pts.push(Point { pos: Vec3::new(x, h, z), weight, floor: true, zones });
+                }
+                x += ec;
             }
-            x += ec;
+            z += ec;
         }
-        z += ec;
     }
-    // Floor coverage is judged on the even grid only; zone points come after.
-    let n_floor = pts.len();
     // Zones get a finer grid of their own so a small zone is never judged on
     // one or two points (or none) of the coarse floor grid.
     let zc = (ec * 0.5).max(0.5);
-    for (a, b) in &req.zones {
-        let mut z = a.z + zc * 0.5;
-        while z < b.z {
-            let mut x = a.x + zc * 0.5;
-            while x < b.x {
-                if !blocked(&boxes, Vec2::new(x, z), 0.1) {
-                    pts.push(Vec3::new(x, req.height, z));
+    for &h in &heights {
+        for (a, b) in &req.zones {
+            let mut z = a.z + zc * 0.5;
+            while z < b.z {
+                let mut x = a.x + zc * 0.5;
+                while x < b.x {
+                    if !blocked(&boxes, Vec2::new(x, z), 0.1) {
+                        pts.push(Point { pos: Vec3::new(x, h, z), weight: per_height * ZONE_WEIGHT, floor: false, zones: zones_of(x, z) });
+                    }
+                    x += zc;
                 }
-                x += zc;
+                z += zc;
             }
-            z += zc;
+        }
+        // What the simulation measured badly weighs a lot more.
+        for (a, b) in &req.heavy {
+            let mut z = a.z + zc * 0.5;
+            while z < b.z {
+                let mut x = a.x + zc * 0.5;
+                while x < b.x {
+                    if !blocked(&boxes, Vec2::new(x, z), 0.1) {
+                        pts.push(Point { pos: Vec3::new(x, h, z), weight: per_height * 8.0, floor: false, zones: Vec::new() });
+                    }
+                    x += zc;
+                }
+                z += zc;
+            }
         }
     }
-    let in_zone: Vec<Vec<usize>> = pts
-        .iter()
-        .map(|p| req.zones.iter().enumerate().filter(|(_, (a, b))| p.x >= a.x && p.x <= b.x && p.z >= a.z && p.z <= b.z).map(|(i, _)| i).collect())
-        .collect();
-    let zone_pts: Vec<usize> = (0..req.zones.len()).map(|i| in_zone.iter().filter(|z| z.contains(&i)).count()).collect();
-    // Floor inside a zone counts double: that is where tags must be found.
-    const ZONE_WEIGHT: f64 = 2.0;
-    // Mounting points closer than this are the same spot (a column face and
-    // the wall behind it): keep the first, so two anchors never end up together.
-    const SAME_SPOT_M: f32 = 1.0;
-    let mut cands: Vec<(Vec3, Vec3)> = Vec::new();
-    for c in req.candidates.clone().unwrap_or_else(|| default_candidates(lo, hi, prof.mount_height_m)) {
-        if !cands.iter().any(|(p, _)| p.distance(c.0) < SAME_SPOT_M) {
-            cands.push(c);
-        }
+    let groups = req.targets.iter().map(|t| t.1 as usize + 1).max().unwrap_or(0);
+    for (p, g) in &req.targets {
+        pts.push(Point { pos: *p, weight: ZONE_WEIGHT, floor: false, zones: vec![(req.zones.len() + *g as usize) as u16] });
     }
-    // How far a device at `a` facing `fwd` reaches towards `p`. For UWB: its
-    // transmit power and the antenna gains on the link (its own settings,
-    // else the profile's); new devices are planned with the defaults.
-    let ants = Antennas { library: &library, applied: &applied };
-    let tag_kind = match req.tech {
-        Tech::Uwb => DeviceKind::UwbTag,
-        Tech::Ble => DeviceKind::BleTag,
-        Tech::Rfid => DeviceKind::RfidTag,
-    };
-    let tag_gain = ants.tag_gain_unaimed(None, &profiles.default_for(tag_kind).cloned().unwrap_or_default());
-    let reach = |pr: &Profile, ant: Option<&AntennaChoice>, a: Vec3, fwd: Vec3, p: Vec3| match req.tech {
-        Tech::Uwb => radio::uwb_link_range_gain_m(pr, ants.gain(ant, Tech::Uwb, true, pr, fwd, p - a) + tag_gain),
-        _ => pr.max_range_m,
-    };
-    let infra: Vec<(Vec3, Vec3, Profile, Option<AntennaChoice>)> = devices
-        .iter()
-        .filter(|(_, d, _)| d.enabled && d.kind == infra_kind)
-        .map(|(_, d, t)| (t.translation, *t.forward(), profiles.for_device(d), d.radio.antenna.clone()))
-        .collect();
-    let existing: Vec<Vec3> = infra.iter().map(|(a, ..)| *a).collect();
-    let occ = Occluders::build(&parts, &occ_objects);
-    // "In view": nothing in the way but thin material (cardboard, wood,
-    // glass) that barely slows or weakens the signal. Metal and liquid block.
-    let vis = |a: Vec3, reach_m: f32, p: Vec3| {
-        (a - p).length() <= reach_m && {
-            let path = occ.path(p, a, None);
-            path.blocker.is_none() && path.wall_eq <= 0.5
-        }
-    };
-    let ex_vis: Vec<Vec<bool>> = infra.iter().map(|(a, f, pr, an)| pts.iter().map(|p| vis(*a, reach(pr, an.as_ref(), *a, *f, *p), *p)).collect()).collect();
-    let cand_vis: Vec<Vec<bool>> = cands.iter().map(|(a, f)| pts.iter().map(|p| vis(*a, reach(&prof, None, *a, *f, *p), *p)).collect()).collect();
-    let need = req.min_los.unwrap_or(match req.tech {
-        Tech::Uwb | Tech::Ble => 3,
-        Tech::Rfid => 1,
+
+    // Candidate mounting points, with what they cost and hang on.
+    let spacing = req.min_spacing_m.unwrap_or(if reads { 1.0 } else { 1.5 });
+    let default_list = req.candidates.is_none();
+    let raw = req.candidates.clone().unwrap_or_else(|| default_candidates(lo, hi, prof.mount_height_m));
+    // Rounded and sorted: mount points are derived from objects in the order
+    // they finished loading, and that must not change the plan.
+    let round = |v: Vec3, k: f32| (v * k).round() / k;
+    let mut raw: Vec<(Vec3, Vec3, Option<Mount>)> = raw.into_iter().enumerate().map(|(i, (p, f))| (round(p, 1000.0), round(f, 10000.0), req.mounts.as_ref().and_then(|m| m.get(i)).copied())).collect();
+    raw.sort_by(|a, b| {
+        let key = |c: &(Vec3, Vec3, Option<Mount>)| [c.0.x, c.0.y, c.0.z, c.1.x, c.1.y, c.1.z];
+        key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let sigma = match req.tech {
-        Tech::Uwb => prof.range_sigma_m.max(0.02) as f64,
-        _ => 1.5,
-    };
-    // Accuracy the plan is judged against (the deploy target, else 30 cm).
-    let target_m = req.target_p95_m.unwrap_or(0.3);
-    // Score, floor coverage, p95 predicted error and per-zone coverage of a choice.
-    #[derive(Clone)]
-    struct Eval {
-        s: f64,
-        cov: f32,
-        p95: f32,
-        zones: Vec<f32>,
-    }
-    let eval = |chosen: &[usize]| -> Eval {
-        let mut s = 0.0;
-        let mut covered = 0usize;
-        let mut zone_hit = vec![0usize; req.zones.len()];
-        let mut errs: Vec<f32> = Vec::new();
-        for (k, p) in pts.iter().enumerate() {
-            let w = if in_zone[k].is_empty() { 1.0 } else { ZONE_WEIGHT };
-            let mut seen: Vec<DVec3> = Vec::new();
-            for (i, a) in existing.iter().enumerate() {
-                if ex_vis[i][k] {
-                    seen.push(a.as_dvec3());
-                }
-            }
-            for &c in chosen {
-                if cand_vis[c][k] {
-                    seen.push(cands[c].0.as_dvec3());
-                }
-            }
-            if seen.len() < need {
-                // Partial credit so the search can start from zero anchors
-                // (one anchor alone never covers a point that needs three).
-                s += w * 0.3 * seen.len() as f64 / need as f64;
-            } else if need >= 3 {
-                // Geometry decides: anchors bunched together or in a line give
-                // a huge DOP, so "3 in view" alone is not a usable fix.
-                let d = solver::dop(Dim::Plane(p.y as f64), &seen, p.as_dvec3());
-                let d = if d.is_finite() { d.min(MAX_DOP * 4.0) } else { MAX_DOP * 4.0 };
-                if d <= MAX_DOP {
-                    if k < n_floor {
-                        covered += 1;
-                    }
-                    for &z in &in_zone[k] {
-                        zone_hit[z] += 1;
-                    }
-                }
-                // Credit by how often a reading here is within the target.
-                let q = fix_share((sigma * d) as f32, target_m) as f64;
-                s += w * (0.4 + 0.6 * q) + w * 0.25 / (1.0 + d);
-                // A 4th anchor makes NLOS rejection possible.
-                if seen.len() >= 4 {
-                    s += w * 0.15;
-                }
-                errs.push((sigma * d) as f32);
-            } else {
-                if k < n_floor {
-                    covered += 1;
-                }
-                for &z in &in_zone[k] {
-                    zone_hit[z] += 1;
-                }
-                s += w;
-            }
-        }
-        errs.sort_by(f32::total_cmp);
-        let p95 = if errs.is_empty() { f32::INFINITY } else { errs[((errs.len() - 1) as f32 * 0.95) as usize] };
-        let zones = zone_hit.iter().zip(&zone_pts).map(|(&h, &n)| if n == 0 { f32::NAN } else { h as f32 / n as f32 }).collect();
-        Eval { s, cov: covered as f32 / n_floor.max(1) as f32, p95, zones }
-    };
-    // Floor no mounting point can see well enough (deep behind racks, say)
-    // stays uncovered however many anchors go up: aim for what is reachable,
-    // for the whole floor and for each zone.
-    let reach = {
-        let all: Vec<usize> = (0..cands.len()).collect();
-        eval(&all)
-    };
-    let target_cov = req.target_coverage.map(|t| t.min(reach.cov * 0.98));
-    let zone_target: Vec<f32> = reach.zones.iter().map(|r| if r.is_nan() { 0.0 } else { req.target_coverage.unwrap_or(0.0).min(r * 0.98) }).collect();
-    let met = |e: &Eval| {
-        target_cov.is_some_and(|t| e.cov >= t)
-            && e.zones.iter().zip(&zone_target).all(|(z, t)| z.is_nan() || *z >= *t)
-            && (need < 3 || req.target_p95_m.is_none_or(|t| e.p95 <= t))
-    };
-    let zone_sum = |e: &Eval| e.zones.iter().filter(|z| !z.is_nan()).sum::<f32>();
-    let mut chosen: Vec<usize> = Vec::new();
-    let mut now = eval(&chosen);
-    let cov0 = now.cov;
-    // A small budget (say "limit to 3 anchors") is a set to choose jointly:
-    // the best 3 are rarely the best 1 plus the best next ones. Beam search
-    // keeps the best partial sets at each size instead of one.
-    if req.add <= BEAM_MAX_ADD {
-        let mut beam: Vec<(Vec<usize>, Eval)> = vec![(Vec::new(), now.clone())];
-        let mut done: Option<(Vec<usize>, Eval)> = None;
-        for _ in 0..req.add {
-            let mut tried = std::collections::HashSet::new();
-            let mut next: Vec<(Vec<usize>, Eval)> = Vec::new();
-            for (set, _) in &beam {
-                for c in 0..cands.len() {
-                    if set.contains(&c) {
-                        continue;
-                    }
-                    let mut t = set.clone();
-                    t.push(c);
-                    let mut key = t.clone();
-                    key.sort_unstable();
-                    if tried.insert(key) {
-                        let r = eval(&t);
-                        next.push((t, r));
-                    }
-                }
-            }
-            if next.is_empty() {
-                break;
-            }
-            next.sort_by(|a, b| b.1.s.total_cmp(&a.1.s));
-            next.truncate(BEAM_WIDTH);
-            // The fewest anchors that meet the targets win.
-            if let Some(m) = next.iter().find(|(_, e)| met(e)) {
-                done = Some(m.clone());
-                break;
-            }
-            beam = next;
-        }
-        if let Some((set, e)) = done.or_else(|| beam.into_iter().next()) {
-            chosen = set;
-            now = e;
-        }
-    }
-    for _ in 0..if req.add <= BEAM_MAX_ADD { 0 } else { req.add.min(64) } {
-        if met(&now) {
-            break;
-        }
-        let mut best: Option<(Eval, usize)> = None;
-        for c in 0..cands.len() {
-            if chosen.contains(&c) {
-                continue;
-            }
-            let mut trial = chosen.clone();
-            trial.push(c);
-            let r = eval(&trial);
-            if best.as_ref().is_none_or(|(b, _)| r.s > b.s) {
-                best = Some((r, c));
-            }
-        }
-        // Every anchor past the first few must earn its place: at least 1% more
-        // floor (or zone) covered, or 1 cm off the predicted p95.
-        let worth = |r: &Eval| {
-            chosen.len() < need
-                || r.cov > now.cov + 0.01
-                || zone_sum(r) > zone_sum(&now) + 0.01
-                || (now.p95.is_finite() && r.p95 < now.p95 - 0.01)
-                || (!now.p95.is_finite() && r.p95.is_finite())
+    let mut cands: Vec<Candidate> = Vec::new();
+    for (pos, mut facing, given) in raw {
+        let mount = match given {
+            Some(m) => m,
+            None if default_list => Mount::Free,
+            None if facing.y < -0.9 => Mount::Ceiling,
+            None => Mount::Wall,
         };
-        match best {
-            Some((r, c)) if r.s > now.s + 1e-6 && worth(&r) => {
-                chosen.push(c);
-                now = r;
-            }
-            _ => break,
+        // A locator's array looks down unless it hangs on a wall.
+        if method == Method::Aoa && mount == Mount::Free {
+            facing = Vec3::NEG_Y;
         }
+        if req.reserved.iter().any(|r| r.distance(pos) < SAME_SPOT_M) || cands.iter().any(|c: &Candidate| c.pos.distance(pos) < SAME_SPOT_M && c.facing.dot(facing) > 0.98) {
+            continue;
+        }
+        let shared = req.shared_mounts.iter().any(|s| s.distance(pos) < SAME_SPOT_M);
+        let cost = placement::install_cost(mount, pos, req.head_end) * if shared { 0.3 } else { 1.0 };
+        cands.push(Candidate { pos, facing, mount, cost });
     }
-    // Swap refinement: greedy picks bunch up (often in the middle, under a
-    // ceiling). Try replacing each pick with every unused candidate and keep
-    // swaps that improve the score; this spreads anchors toward the corners.
-    let swap = |chosen: &mut Vec<usize>, now: &mut Eval| {
-        for _ in 0..3 {
-            let mut improved = false;
-            for k in 0..chosen.len() {
-                let mut best: Option<(Eval, usize)> = None;
-                for c in 0..cands.len() {
-                    if chosen.contains(&c) {
-                        continue;
-                    }
-                    let mut trial = chosen.clone();
-                    trial[k] = c;
-                    let r = eval(&trial);
-                    // Never trade a plan that meets the targets for one that does not.
-                    if r.s > now.s + 1e-6 && (met(&r) || !met(now)) && best.as_ref().is_none_or(|(b, _)| r.s > b.s) {
-                        best = Some((r, c));
-                    }
-                }
-                if let Some((r, c)) = best {
-                    chosen[k] = c;
-                    *now = r;
-                    improved = true;
-                }
-            }
-            if !improved {
-                break;
-            }
-        }
+    if req.expand_heights && cands.len() * 3 <= MAX_EXPANDED_CANDS {
+        // Up to the lowest thing overhead at mid-room, if anything is there.
+        let occ = Occluders::build(&parts, &occ_objects);
+        let c = (lo + hi) * 0.5;
+        let ceiling = RadioScene::surface(&occ, Vec3::new(c.x, 0.5, c.y), Vec3::Y, 30.0).map(|t| t + 0.5);
+        cands = placement::expand_heights(&cands, ceiling);
+    }
+    if reads {
+        let mut aim_at = req.zones.clone();
+        aim_at.extend(req.targets.iter().map(|(p, _)| (*p, *p)));
+        cands = placement::expand_aims(&cands, &aim_at, prof.max_range_m);
+    }
+
+    // How strong a link is towards a point: its transmit power and the antenna
+    // gains on the link (its own settings, else the profile's). New devices
+    // are planned with the defaults.
+    let ants = Antennas { library: &library, applied: &applied };
+    let tag_gain = ants.tag_gain_unaimed(None, &tag);
+    let tech = req.tech;
+    let gain_new = |p: &Profile, fwd: Vec3, dir: Vec3| ants.gain(None, tech, true, p, fwd, dir) + if reads { 0.0 } else { tag_gain };
+    let occ = Occluders::build(&parts, &occ_objects);
+    let cols: Vec<Column> = cands.iter().map(|c| placement::column(&occ, &pts, method, &prof, &tag, c.pos, c.facing, &gain_new)).collect();
+    let mut existing: Vec<_> = devices.iter().filter(|(_, d, _)| d.enabled && d.kind == infra_kind).collect();
+    existing.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+    let fixed: Vec<(Vec3, Column)> = existing
+        .into_iter()
+        .map(|(_, d, t)| {
+            let (pos, fwd, pr, an) = (t.translation, *t.forward(), profiles.for_device(d), d.radio.antenna.clone());
+            let gain = |p: &Profile, f: Vec3, dir: Vec3| ants.gain(an.as_ref(), tech, true, p, f, dir) + if reads { 0.0 } else { tag_gain };
+            (pos, placement::column(&occ, &pts, Method::of(tech, &pr, &tag), &pr, &tag, pos, fwd, &gain))
+        })
+        .collect();
+
+    let need = req.min_los.unwrap_or(method.need()) + req.redundancy as usize + if req.dim3 && !reads { 1 } else { 0 };
+    let target_m = req.target_p95_m.unwrap_or(method.default_target_m());
+    let cfg = placement::Config {
+        method,
+        dim3: req.dim3,
+        need,
+        target_m,
+        err_cap: target_m * 3.0,
+        redundancy: req.redundancy,
+        min_spacing_m: spacing,
+        cost_weight: req.cost_weight.map_or(placement::Config::default().cost_weight, |w| w as f64),
+        zones_only: reads && !(req.zones.is_empty() && req.targets.is_empty()),
+        conflict_m: if reads { prof.max_range_m.min(8.0) } else { 0.0 },
+        beam_deg: prof.beam_deg,
+        target_coverage: req.target_coverage,
+        target_p95: req.target_p95_m,
+        zone_count: req.zones.len() + groups,
+        force_add: req.force_add,
+        avoid: req.reserved.clone(),
+        ..Default::default()
     };
-    // Fewest anchors: greedy adds what helped at the time, and later picks
-    // often make earlier ones redundant. Drop every anchor the plan can do
-    // without (the least useful first), re-spread the rest, and repeat.
-    for _ in 0..4 {
-        swap(&mut chosen, &mut now);
-        let mut pruned = false;
-        loop {
-            let was_met = met(&now);
-            let ok = |r: &Eval| {
-                if was_met {
-                    met(r)
-                } else {
-                    // Short of the target (budget, racks): drop only dead weight.
-                    r.cov >= now.cov - 1e-6 && zone_sum(r) >= zone_sum(&now) - 1e-6 && r.p95 <= now.p95 + 0.005
-                }
-            };
-            let mut best: Option<(Eval, usize)> = None;
-            for k in 0..chosen.len() {
-                let mut trial = chosen.clone();
-                trial.remove(k);
-                let r = eval(&trial);
-                if ok(&r) && best.as_ref().is_none_or(|(b, _)| r.s > b.s) {
-                    best = Some((r, k));
-                }
-            }
-            match best {
-                Some((r, k)) => {
-                    chosen.remove(k);
-                    now = r;
-                    pruned = true;
-                }
-                None => break,
-            }
-        }
-        if !pruned {
-            break;
-        }
-    }
+    let sync_prof = prof.clone();
+    let sync_scene = &occ;
+    let sync = move |a: Vec3, b: Vec3| RadioScene::path(sync_scene, a, b).in_band(sync_prof.freq_mhz).uwb_passes(&sync_prof);
+    let n_cands = cands.len();
+    let mut planner = Planner::new(cfg, &pts, cands, cols, fixed, Some(&sync));
+    let cov0 = planner.metrics().coverage;
+    let mover = SceneMover { scene: &occ, pts: &pts, method, prof: &prof, tag: &tag, gain: &gain_new, lo, hi, boxes: &boxes };
+    planner.run(req.add, req.refine.then_some(&mover as &dyn Mover));
+    let m = planner.metrics();
+
+    let met = planner.targets_met(&m);
+    let zones_met = planner.zones_met(&m, req.zones.len());
     let result = OptimizeResult {
-        chosen: chosen.iter().map(|&c| cands[c]).collect(),
-        coverage_after: now.cov,
-        p95_after: now.p95,
-        targets_met: met(&now),
-        zone_coverage: now.zones.clone(),
-        zones_met: now.zones.iter().zip(&zone_target).filter(|(z, t)| !z.is_nan() && **z >= **t).count(),
+        chosen: planner.chosen.iter().map(|&c| (planner.cands[c].pos, planner.cands[c].facing)).collect(),
+        coverage_after: m.coverage,
+        p95_after: m.p95,
+        p95_located: m.p95_located,
+        targets_met: met,
+        reachable_coverage: planner.reachable_coverage(),
+        zone_coverage: m.zones[..req.zones.len()].to_vec(),
+        zones_met,
+        target_coverage: m.zones[req.zones.len()..].to_vec(),
+        p95_k1: m.p95_k1,
+        cost: m.cost,
+        conflicts: m.conflicts,
+        stray: m.stray,
+        unsynced: m.unsynced,
     };
-    let zones_note = {
-        let z: Vec<f32> = now.zones.iter().copied().filter(|z| !z.is_nan()).collect();
-        if z.is_empty() { String::new() } else { format!(", zones {}/{} fully covered", z.iter().filter(|c| **c >= 0.999).count(), z.len()) }
-    };
+    let mut note = format!(
+        "{} suggested {} ({} mounting points): {} {:.0}% → {:.0}%",
+        result.chosen.len(),
+        prof.name,
+        n_cands,
+        if reads { "read chance over 90% on" } else { "floor with a fix" },
+        cov0 * 100.0,
+        m.coverage * 100.0,
+    );
+    let zone_vals: Vec<f32> = result.zone_coverage.iter().copied().filter(|z| !z.is_nan()).collect();
+    if !zone_vals.is_empty() {
+        note += &format!(", zones {}/{} fully covered", zone_vals.iter().filter(|c| **c >= 0.999).count(), zone_vals.len());
+    }
+    if !reads && m.p95.is_finite() {
+        note += &format!(", p95 predicted {:.0} cm", m.p95 * 100.0);
+    } else if !reads && m.p95_located.is_finite() {
+        note += &format!(", p95 predicted {:.0} cm where there is a fix", m.p95_located * 100.0);
+    }
+    if req.redundancy && m.p95_k1.is_finite() {
+        note += &format!(" ({:.0} cm with a device down)", m.p95_k1 * 100.0);
+    }
+    note += &format!(", install cost {:.1}", m.cost);
+    if m.conflicts > 0 {
+        note += &format!(". {} reader pair(s) in each other's beam: put them on different channels or time slots", m.conflicts);
+    }
+    if m.unsynced > 0 {
+        note += &format!(". {} anchor(s) can't reach the others for clock sync", m.unsynced);
+    }
     cov.suggestions = result.chosen.iter().map(|(p, _)| *p).collect();
     cov.suggestion_facing = result.chosen.iter().map(|(_, f)| *f).collect();
-    cov.suggestion_note = format!(
-        "{} suggested {} ({} mounting points): floor with ≥{need} line-of-sight {:.0}% → {:.0}%{}{zones_note}",
-        cov.suggestions.len(),
-        req.tech.infra().label(),
-        cands.len(),
-        cov0 * 100.0,
-        now.cov * 100.0,
-        if need >= 3 && now.p95.is_finite() { format!(", p95 predicted {:.0} cm", now.p95 * 100.0) } else { String::new() }
-    );
+    cov.suggestion_note = note;
     result
 }
 
@@ -974,6 +1032,7 @@ pub fn signal_scale(tech: Tech) -> (f32, f32) {
         Tech::Uwb => (-95.0, -65.0),
         Tech::Ble => (-95.0, -60.0),
         Tech::Rfid => (-18.0, 0.0),
+        Tech::Wifi => (-85.0, -45.0),
     }
 }
 
@@ -1101,7 +1160,7 @@ pub fn refresh_on_change(
     devices: Query<(&Device, &Transform)>,
     profiles: Res<Profiles>,
     time: Res<Time>,
-    mut last: Local<Vec<(Vec3, bool, [f32; 3])>>,
+    mut last: Local<Vec<(Vec3, bool, [f32; 4])>>,
     mut due: Local<Option<f64>>,
 ) {
     if !cov.visible || cov.cells.is_empty() {
@@ -1110,12 +1169,12 @@ pub fn refresh_on_change(
         return;
     }
     // Position, on/off and radio settings (TX power, range) of each device.
-    let now: Vec<(Vec3, bool, [f32; 3])> = devices
+    let now: Vec<(Vec3, bool, [f32; 4])> = devices
         .iter()
         .filter(|(d, _)| d.kind == cov.tech.infra())
         .map(|(d, t)| {
             let p = profiles.resolve(&d.profile, d.kind);
-            (t.translation, d.enabled, [p.uwb_tx_dbm_mhz, p.tx_power_dbm, p.max_range_m])
+            (t.translation, d.enabled, [p.uwb_tx_dbm_mhz, p.tx_power_dbm, p.max_range_m, p.freq_mhz])
         })
         .collect();
     if *last != now {
@@ -1163,6 +1222,58 @@ mod tests {
         assert_eq!(cov.quality_share(), 0.5);
     }
 
+    fn lone_node(prof: Profile, pos: Vec3) -> Node {
+        Node { entity: Entity::PLACEHOLDER, pos, fwd: Vec3::NEG_Y, prof, antenna: None }
+    }
+
+    #[test]
+    fn the_rfid_map_uses_the_optimisers_read_chance() {
+        // 1 dB of forward margin is a read chance near 70 %: the optimiser wants 90 %.
+        let (lib, applied) = (AntennaLibrary::default(), AppliedAntenna::default());
+        let ants = Antennas { library: &lib, applied: &applied };
+        let reader = Profile { kind: DeviceKind::RfidReader, tx_power_dbm: 30.0, antenna_gain_dbi: 0.0, beam_deg: 360.0, freq_mhz: 920.5, sensitivity_dbm: -200.0, max_range_m: 500.0, ..default() };
+        let tag = Profile { kind: DeviceKind::RfidTag, tag_sensitivity_dbm: -18.0, antenna_gain_dbi: 2.0, ..default() };
+        let at = |margin: f32| 10f32.powf((30.0 + 2.0 + 18.0 - margin - 20.0 * 920.5f32.log10() + 27.55) / 20.0);
+        let cell = |margin: f32| {
+            let d = at(margin);
+            let n = lone_node(reader.clone(), Vec3::new(0.0, 2.0, 0.0));
+            eval(Tech::Rfid, Vec3::new(d, 2.0, 0.0), &[n], &[Path { distance: d, ..default() }], &[None], &tag, 0.0, ants)
+        };
+        assert!(!cell(1.0).err.is_finite(), "{:?}", cell(1.0));
+        assert!(cell(4.0).err.is_finite(), "{:?}", cell(4.0));
+    }
+
+    #[test]
+    fn heard_by_too_few_nodes_is_not_a_position() {
+        let (lib, applied) = (AntennaLibrary::default(), AppliedAntenna::default());
+        let ants = Antennas { library: &lib, applied: &applied };
+        let node = Profile { kind: DeviceKind::BleNode, max_range_m: 30.0, ..default() };
+        let tag = Profile { kind: DeviceKind::BleTag, ..default() };
+        let p = Vec3::new(12.0, 1.0, 0.0);
+        let n = lone_node(node, Vec3::new(0.0, 2.4, 0.0));
+        let path = Path { distance: n.pos.distance(p), ..default() };
+        let c = eval(Tech::Ble, p, &[n], &[path], &[None], &tag, 0.0, ants);
+        // The sim's "fix" sits at the node, 12 m away.
+        assert_eq!(c.heard, 1);
+        assert!(!c.err.is_finite(), "{c:?}");
+        assert!((c.proximity_m - 12.0).abs() < 0.01, "{c:?}");
+    }
+
+    #[test]
+    fn fdtd_fallback_uses_the_nodes_own_noise() {
+        // FDTD hears nodes the ray model can't: an RSSI node doesn't range to 10 cm for that.
+        let (lib, applied) = (AntennaLibrary::default(), AppliedAntenna::default());
+        let ants = Antennas { library: &lib, applied: &applied };
+        let node = Profile { kind: DeviceKind::BleNode, max_range_m: 30.0, range_sigma_m: 0.1, ..default() };
+        let tag = Profile { kind: DeviceKind::BleTag, ..default() };
+        let p = Vec3::new(10.0, 1.0, 10.0);
+        let nodes: Vec<Node> = [Vec3::new(0.0, 2.4, 0.0), Vec3::new(20.0, 2.4, 0.0), Vec3::new(10.0, 2.4, 20.0)].into_iter().map(|q| lone_node(node.clone(), q)).collect();
+        let paths: Vec<Path> = nodes.iter().map(|n| Path { distance: n.pos.distance(p), walls: 3, wall_eq: 30.0, bias_eq: 30.0, ..default() }).collect();
+        let c = eval(Tech::Ble, p, &nodes, &paths, &[Some(-30.0), Some(-30.0), Some(-30.0)], &tag, 0.0, ants);
+        assert_eq!(c.heard, 3);
+        assert!(c.err > 2.0, "{c:?}");
+    }
+
     /// A dipole-like pattern (sin² θ, 2.15 dBi peak) on a 5° grid.
     fn dipole(axis_forward: bool) -> FdtdAntenna {
         let d = (0..=36)
@@ -1171,7 +1282,7 @@ mod tests {
                 vec![2.15 + 10.0 * (s * s).max(1e-4).log10(); 73]
             })
             .collect();
-        FdtdAntenna { tech: Tech::Uwb, label: String::new(), source: Default::default(), theta_step: 5.0, phi_step: 5.0, d, mismatch_db: -0.5, axis_forward }
+        FdtdAntenna { tech: Tech::Uwb, label: String::new(), source: Default::default(), theta_step: 5.0, phi_step: 5.0, d, mismatch_db: -0.5, axis_forward, bias_m: None }
     }
 
     #[test]

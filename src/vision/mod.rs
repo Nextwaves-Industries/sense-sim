@@ -1,8 +1,9 @@
-//! In-process vision models (ONNX Runtime, GPU via DirectML): metric depth,
-//! open-vocabulary detection and CLIP, used by the assistant to measure a
-//! reference photo instead of guessing.
+//! In-process vision models (ONNX Runtime, GPU via DirectML) for reference photos:
+//! open-vocabulary detection finds objects and CLIP classifies materials. Metric
+//! depth only verifies a finished layout; it never builds one.
 
 pub mod geometry;
+pub mod materials;
 pub mod models;
 pub mod perceive;
 pub mod runtime;

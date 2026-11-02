@@ -29,7 +29,7 @@ pub fn show(ui: &mut egui::Ui, text: &str) {
                 code.push_str(l);
                 code.push('\n');
             }
-            egui::Frame::new().fill(theme::BG).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
+            egui::Frame::new().fill(theme::HOVER).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(egui::Label::new(RichText::new(code.trim_end()).monospace().size(12.5).color(theme::TEXT)).wrap());
             });
@@ -108,7 +108,7 @@ fn inline(ui: &mut egui::Ui, s: &str, size: f32, color: Color32, heading: bool) 
     let base = |bold: bool, italic: bool| {
         let mut f = TextFormat {
             font_id: if bold || heading { FontId::new(size, egui::FontFamily::Name(theme::SEMIBOLD.into())) } else { FontId::proportional(size) },
-            color: if bold || heading { Color32::WHITE } else { color },
+            color: if bold || heading { theme::INK } else { color },
             ..Default::default()
         };
         f.italics = italic;
@@ -117,7 +117,7 @@ fn inline(ui: &mut egui::Ui, s: &str, size: f32, color: Color32, heading: bool) 
     let code_fmt = TextFormat {
         font_id: FontId::monospace(size - 1.5),
         color: theme::ACCENT,
-        background: theme::BG,
+        background: theme::HOVER,
         ..Default::default()
     };
     let link_fmt = TextFormat { font_id: FontId::proportional(size), color: theme::ONLINE, underline: Stroke::new(1.0, theme::ONLINE), ..Default::default() };

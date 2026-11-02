@@ -258,6 +258,15 @@ pub fn solve_twr_robust(
     Some(best)
 }
 
+/// One TWR epoch's position, the way the simulation solves it.
+pub fn twr_solve(dim: Dim, anchors: &[DVec3], ranges: &[f64], sigmas: &[f64], prior: Option<DVec3>, robust: bool) -> Option<Fix> {
+    if anchors.len() < min_measurements(dim).min(3) {
+        return None;
+    }
+    let gate = 3.0 * sigmas.iter().copied().fold(f64::MAX, f64::min);
+    if robust { solve_twr_robust(dim, anchors, ranges, sigmas, prior, gate.max(0.15)) } else { solve_twr(dim, anchors, ranges, sigmas, prior) }
+}
+
 /// TDoA: `diffs[i]` = |p - anchors[i]| - |p - reference| (metres).
 pub fn solve_tdoa(dim: Dim, reference: DVec3, anchors: &[DVec3], diffs: &[f64], sigma: f64, prior: Option<DVec3>) -> Option<Fix> {
     let m = anchors.len();
@@ -290,6 +299,89 @@ pub fn solve_tdoa(dim: Dim, reference: DVec3, anchors: &[DVec3], diffs: &[f64], 
         })
         .collect();
     Some(Fix { pos, residual, used: (0..m).collect(), dop: dop_from_rows(dim.n(), &rows) })
+}
+
+/// Angle of arrival: the point closest to all the bearing rays (origin
+/// `locators[i]`, unit direction `bearings[i]`, weight `weights[i]`), in the
+/// least-squares sense. On a known plane one bearing is enough: the ray meets
+/// that height. Residual = RMS miss distance (m).
+pub fn solve_aoa(dim: Dim, locators: &[DVec3], bearings: &[DVec3], weights: &[f64]) -> Option<Fix> {
+    let m = locators.len();
+    if m == 0 || m != bearings.len() || m != weights.len() {
+        return None;
+    }
+    let (mut a, mut b) = (bevy::math::DMat3::ZERO, DVec3::ZERO);
+    for ((o, u), w) in locators.iter().zip(bearings).zip(weights) {
+        let u = u.normalize_or_zero();
+        // I − uuᵀ: squared distance to the ray.
+        let p = bevy::math::DMat3::IDENTITY - bevy::math::DMat3::from_cols(u * u.x, u * u.y, u * u.z);
+        a += p * *w;
+        b += (p * *o) * *w;
+    }
+    let pos = match dim {
+        Dim::Plane(y) => {
+            // Height known: solve X/Z with Y fixed; with a single bearing (or
+            // parallel ones) that system is singular, so take where the rays
+            // meet the plane.
+            let (axx, axz, azz) = (a.x_axis.x, a.z_axis.x, a.z_axis.z);
+            let (bx, bz) = (b.x - a.y_axis.x * y, b.z - a.y_axis.z * y);
+            let det = axx * azz - axz * axz;
+            let (mut s, mut n) = (DVec3::ZERO, 0.0);
+            for ((o, u), w) in locators.iter().zip(bearings).zip(weights) {
+                if u.y.abs() > 0.05 {
+                    let t = (y - o.y) / u.y;
+                    if t > 0.0 {
+                        s += (*o + *u * t) * *w;
+                        n += *w;
+                    }
+                }
+            }
+            if m >= 2 && det.abs() > 1e-9 {
+                DVec3::new((bx * azz - bz * axz) / det, y, (bz * axx - bx * axz) / det)
+            } else if n > 0.0 {
+                s / n
+            } else {
+                return None;
+            }
+        }
+        Dim::Space => {
+            if a.determinant().abs() < 1e-9 {
+                return None;
+            }
+            a.inverse() * b
+        }
+    };
+    let miss: f64 = locators
+        .iter()
+        .zip(bearings)
+        .map(|(o, u)| {
+            let v = pos - *o;
+            (v - *u * v.dot(*u)).length_squared()
+        })
+        .sum();
+    // Position variance per unit of a bearing's cross-track variance, from the bearings'
+    // own information: a ray meeting the floor at a slant says little along it.
+    let trace = match dim {
+        Dim::Plane(_) => {
+            let det = a.x_axis.x * a.z_axis.z - a.z_axis.x * a.z_axis.x;
+            if det > 1e-12 { (a.x_axis.x + a.z_axis.z) / det } else { f64::INFINITY }
+        }
+        Dim::Space => {
+            let i = a.inverse();
+            i.x_axis.x + i.y_axis.y + i.z_axis.z
+        }
+    };
+    let mean_cross_variance = m as f64 / weights.iter().sum::<f64>().max(1e-12);
+    let dop = (trace / mean_cross_variance).max(0.0).sqrt().min(9.9);
+    Some(Fix { pos, residual: (miss / m as f64).sqrt(), used: (0..m).collect(), dop })
+}
+
+/// 0..1, what a fix is worth by its fit and geometry. A lone bearing has no residual to
+/// show, which says nothing good: nothing checks it.
+pub fn fix_quality(f: &Fix) -> f32 {
+    let q = (1.0 / (1.0 + 4.0 * f.residual)) * (1.5 / f.dop.max(1.5));
+    let checked = if f.used.len() == 1 { 0.5 } else { 1.0 };
+    (q * checked).clamp(0.0, 1.0) as f32
 }
 
 /// Horizontal (or 3D) dilution of precision for ranging from `anchors` at `p`.
@@ -487,6 +579,28 @@ mod tests {
         let d: Vec<f64> = others.iter().map(|p| (*p - truth).length() - (reference - truth).length()).collect();
         let f = solve_tdoa(Dim::Plane(1.2), reference, others, &d, 0.1, None).unwrap();
         assert!((f.pos - truth).length() < 1e-3, "{:?}", f.pos);
+    }
+
+    #[test]
+    fn an_unchecked_bearing_is_not_a_perfect_fix() {
+        let truth = DVec3::new(4.0, 1.0, 0.0);
+        let o = DVec3::new(4.0, 3.0, 0.0);
+        let f = solve_aoa(Dim::Plane(1.0), &[o], &[(truth - o).normalize()], &[1.0]).unwrap();
+        assert!(fix_quality(&f) <= 0.5, "{}", fix_quality(&f));
+    }
+
+    #[test]
+    fn aoa_dop_says_how_little_one_bearing_checks() {
+        let truth = DVec3::new(4.0, 1.0, 0.0);
+        let bearing = |o: DVec3| (truth - o).normalize();
+        // Straight overhead: the bearing's own noise, on two axes.
+        let o = DVec3::new(4.0, 3.0, 0.0);
+        let nadir = solve_aoa(Dim::Plane(1.0), &[o], &[bearing(o)], &[1.0]).unwrap();
+        assert!((nadir.dop - std::f64::consts::SQRT_2).abs() < 0.01, "{}", nadir.dop);
+        // 60° off: the ray meets the floor at a slant, so its noise stretches along the floor.
+        let o = DVec3::new(4.0 - 2.0 * 3f64.sqrt(), 3.0, 0.0);
+        let slant = solve_aoa(Dim::Plane(1.0), &[o], &[bearing(o)], &[1.0]).unwrap();
+        assert!((slant.dop - (1.0f64 / 0.25 + 1.0).sqrt()).abs() < 0.01, "{}", slant.dop);
     }
 
     #[test]

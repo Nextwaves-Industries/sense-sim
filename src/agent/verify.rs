@@ -30,6 +30,7 @@ struct Obj {
     entity: Entity,
     name: String,
     asset: String,
+    path: std::path::PathBuf,
     min: Vec3,
     max: Vec3,
     /// Ceiling or roof beam: hangs, so it has no support to check.
@@ -65,12 +66,12 @@ pub fn verify_scene(world: &mut World) -> Value {
                 let (min, max) = world_bounds(o, t);
                 let asset = o.asset.parent().and_then(|p| p.parent()).and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                 // Piping and shaft-mounted pulleys hang on their connections.
-                let hanging = matches!(Kind::of_asset(&o.asset), Some(Kind::Ceiling | Kind::Beam))
+                let hanging = super::assetgen::hangs(&o.asset)
                     || matches!(
                         crate::plant::parts::Spec::of_asset(&o.asset).map(|s| s.role()),
                         Some(crate::plant::ports::Role::Fitting | crate::plant::ports::Role::Valve | crate::plant::ports::Role::Rotor)
                     );
-                Obj { entity: e, name: o.name.clone(), asset, min, max, hanging }
+                Obj { entity: e, name: o.name.clone(), asset, path: o.asset.clone(), min, max, hanging }
             })
             .collect()
     };
@@ -128,7 +129,9 @@ pub fn verify_scene(world: &mut World) -> Value {
             }
             // A surface crossing the object (e.g. a shelf deck cutting through a
             // box placed at the wrong height). Open structures contain things by design.
-            if !is_open(&o.asset) {
+            // Nor do walls and columns count: roof beams bear on them.
+            let carries_roof = matches!(Kind::of_asset(&o.path), Some(Kind::Wall | Kind::Column));
+            if !is_open(&o.asset) && !carries_roof {
                 let origin = Vec3::new(c.x, base + 0.01, c.z);
                 let first = ray_cast.cast_ray(Ray3d::new(origin, Dir3::Y), &settings).first().map(|(e, h)| (*e, h.point.y));
                 if let Some((e, hit_y)) = first
@@ -155,10 +158,14 @@ pub fn verify_scene(world: &mut World) -> Value {
     // Interpenetration of solid (closed) objects. Parts joined port to port
     // touch by design, and piping is checked by the plant checks below.
     let links = world.resource::<crate::plant::Links>().clone();
-    let piping = |o: &Obj| o.hanging && !matches!(o.asset.as_str(), "ceiling" | "beam");
+    let piping = |o: &Obj| (o.hanging && !super::assetgen::hangs(&o.path)) || super::assetgen::is_photo_standin(&o.path);
     for (i, a) in objs.iter().enumerate() {
         for b in &objs[i + 1..] {
             if is_open(&a.asset) || is_open(&b.asset) {
+                continue;
+            }
+            // Walls meet at corners, and the bounds of angled ones overlap widely.
+            if Kind::of_asset(&a.path) == Some(Kind::Wall) && Kind::of_asset(&b.path) == Some(Kind::Wall) {
                 continue;
             }
             if piping(a) || piping(b) || links.0.iter().any(|l| l.touches(&a.name) && l.touches(&b.name)) {
@@ -186,6 +193,19 @@ pub fn verify_scene(world: &mut World) -> Value {
 
     // Alignment with reference photos.
     let alignment = photo_alignment(world, &mut issues);
+
+    // A rebuilt room has a roof: the photo rarely shows enough of one to
+    // measure, so this is where forgetting it gets caught.
+    if !objs.is_empty() && !objs.iter().any(|o| Kind::of_asset(&o.path) == Some(Kind::Ceiling)) {
+        let photos = scenes().lock().unwrap();
+        let live = |sc: &&PhotoScene| sc.placed.keys().any(|n| objs.iter().any(|o| o.name == *n));
+        if let Some(sc) = photos.values().filter(|sc| !sc.no_ceiling).find(|sc| live(sc)) {
+            issues.push(format!(
+                "the rebuild of {} has no ceiling: add_structure {{from_photo: \"{}\"}} (or kind \"ceiling\" with height_m). If the photo really is outdoors, pass ceiling false.",
+                sc.image_id, sc.image_id
+            ));
+        }
+    }
 
     // Connected systems: misaligned links, open pipe ends, undriven pumps,
     // unlinked conveyor transfers, pipes through objects, plant alarms.
@@ -313,6 +333,11 @@ pub fn optimize_photo_layout(world: &mut World, image: &str) -> Result<Value, St
             let asset = o.asset.parent().and_then(|p| p.parent()).and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let open = is_open(&asset);
             others.push((e, mn, mx, open));
+            // Stand-ins already sit exactly where the photo camera sees them, and
+            // locked objects stay where the user wants them.
+            if super::assetgen::is_photo_standin(&o.asset) || o.locked {
+                continue;
+            }
             if let Some(&id) = sc.placed.get(&o.name)
                 && let Some(det) = sc.objects.get(id)
             {
@@ -321,7 +346,10 @@ pub fn optimize_photo_layout(world: &mut World, image: &str) -> Result<Value, St
         }
     }
     if items.is_empty() {
-        return Err("no objects placed from this photo yet".into());
+        if sc.placed.is_empty() {
+            return Err("no objects placed from this photo yet".into());
+        }
+        return Ok(json!({ "image_id": image, "note": "nothing to optimize: photo stand-ins already line up by construction" }));
     }
     let bounds = |local: &[Vec3; 8], t: &Transform| {
         let mut mn = Vec3::splat(f32::MAX);

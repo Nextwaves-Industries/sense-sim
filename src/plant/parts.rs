@@ -31,7 +31,8 @@ pub enum Spec {
     /// Ball valve with a lever (0° open, 90° closed).
     Valve { d: f32 },
     /// Centrifugal pump; with its own motor, or a bare shaft to be driven.
-    Pump { d: f32, motor: bool },
+    /// `base`: height of the concrete plinth it stands on (0 = none).
+    Pump { d: f32, motor: bool, base: f32 },
     /// Vertical tank on legs: shell diameter, shell height, nozzle diameter.
     Tank { dia: f32, h: f32, d: f32 },
     /// Electric motor; `d` is the shaft diameter.
@@ -43,6 +44,10 @@ pub enum Spec {
     /// Roller conveyor along X: length, belt width, belt height.
     Conveyor { len: f32, w: f32, h: f32 },
 }
+
+/// Second line of every generated USD file: bump it when part geometry
+/// changes so cached files are rebuilt.
+const PART_REV: &str = "# sensesim-part rev 2";
 
 /// Roller radius of generated conveyors.
 pub const ROLLER_R: f32 = 0.03;
@@ -92,7 +97,7 @@ impl Spec {
             Self::Tee { d } => Self::Tee { d: mm(d) },
             Self::Reducer { d1, d2 } => Self::Reducer { d1: mm(d1), d2: mm(d2) },
             Self::Valve { d } => Self::Valve { d: mm(d) },
-            Self::Pump { d, motor } => Self::Pump { d: mm(d), motor },
+            Self::Pump { d, motor, base } => Self::Pump { d: mm(d), motor, base: if base > 0.0 { mm(base) } else { 0.0 } },
             Self::Tank { dia, h, d } => Self::Tank { dia: mm(dia.max(0.2)), h: mm(h.max(0.2)), d: mm(d) },
             Self::Motor { d } => Self::Motor { d: mm(d) },
             Self::Pulley { dia, d } => Self::Pulley { dia: mm(dia.max(d * 1.5)), d: mm(d) },
@@ -107,7 +112,8 @@ impl Spec {
             Self::Elbow { d, angle } => format!("d{d:.3}_a{angle:.0}"),
             Self::Tee { d } | Self::Valve { d } | Self::Motor { d } => format!("d{d:.3}"),
             Self::Reducer { d1, d2 } => format!("d{d1:.3}_e{d2:.3}"),
-            Self::Pump { d, motor } => format!("d{d:.3}_m{}", *motor as u8),
+            Self::Pump { d, motor, base } if *base > 0.0 => format!("d{d:.3}_m{}_b{base:.3}", *motor as u8),
+            Self::Pump { d, motor, .. } => format!("d{d:.3}_m{}", *motor as u8),
             Self::Tank { dia, h, d } => format!("w{dia:.3}_h{h:.3}_d{d:.3}"),
             Self::Pulley { dia, d } => format!("w{dia:.3}_d{d:.3}"),
             Self::Engine { n } => format!("n{n}"),
@@ -130,7 +136,7 @@ impl Spec {
             "tee" => Self::Tee { d: g('d')? },
             "reducer" => Self::Reducer { d1: g('d')?, d2: g('e')? },
             "valve" => Self::Valve { d: g('d')? },
-            "pump" => Self::Pump { d: g('d')?, motor: g('m')? > 0.5 },
+            "pump" => Self::Pump { d: g('d')?, motor: g('m')? > 0.5, base: g('b').unwrap_or(0.0) },
             "tank" => Self::Tank { dia: g('w')?, h: g('h')?, d: g('d')? },
             "motor" => Self::Motor { d: g('d')? },
             "pulley" => Self::Pulley { dia: g('w')?, d: g('d')? },
@@ -155,7 +161,9 @@ impl Spec {
         let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
         let dir = PathBuf::from(base).join("SenseSim").join("plant").join(spec.kind()).join(spec.params());
         let path = dir.join(format!("{}.usda", spec.kind()));
-        if !path.exists() {
+        // Rewritten when the geometry code changed since the file was made.
+        let current = std::fs::read_to_string(&path).is_ok_and(|t| t.lines().nth(1).is_some_and(|l| l.trim() == PART_REV));
+        if !current {
             std::fs::create_dir_all(&dir)?;
             let tmp = dir.join(format!("{}.tmp", spec.kind()));
             std::fs::write(&tmp, usda(spec.kind(), &spec.build()))?;
@@ -216,7 +224,7 @@ impl Spec {
             Self::Tee { d } => build_tee(&mut b, d),
             Self::Reducer { d1, d2 } => build_reducer(&mut b, d1, d2),
             Self::Valve { d } => build_valve(&mut b, d),
-            Self::Pump { d, motor } => build_pump(&mut b, d, motor),
+            Self::Pump { d, motor, base } => build_pump(&mut b, d, motor, base),
             Self::Tank { dia, h, d } => build_tank(&mut b, dia, h, d),
             Self::Motor { d } => build_motor(&mut b, d),
             Self::Pulley { dia, d } => build_pulley(&mut b, dia, d),
@@ -382,14 +390,17 @@ impl Builder {
             m.tri(base, base + 2, base + 3);
         }
     }
+    /// Flange disc from `at` to `at + dir·t`. Callers pass the port face minus
+    /// one thickness, so the outer face is the port face and two mated
+    /// flanges meet face to face.
     fn flange(&mut self, at: Vec3, dir: Vec3, d: f32) {
-        let t = (d * 0.12).clamp(0.006, 0.03);
-        self.cyl(at - dir * t, at, d * 0.8, STEEL);
+        let t = flange_t(d);
+        self.cyl(at, at + dir * t, d * 0.8, STEEL);
     }
     /// Swept tube along an arc: center `c`, from radial `u` towards `v`.
     fn torus_arc(&mut self, c: Vec3, u: Vec3, v: Vec3, big_r: f32, r: f32, angle: f32, col: Rgb) {
         let segs = ((angle / 10.0).ceil() as u32).max(4);
-        let ring = 20u32;
+        let ring = 24u32;
         let m = self.m();
         let base = m.pos.len() as u32;
         let axis = u.cross(v).normalize();
@@ -448,13 +459,18 @@ fn build_pipe(b: &mut Builder, d: f32, len: f32) {
     let (a, e) = (Vec3::new(-len * 0.5, 0.0, 0.0), Vec3::new(len * 0.5, 0.0, 0.0));
     b.cyl(a, e, r, PIPE);
     if len > 0.08 {
-        b.flange(a + Vec3::X * (d * 0.12).clamp(0.006, 0.03), -Vec3::X, d);
-        b.flange(e - Vec3::X * (d * 0.12).clamp(0.006, 0.03), Vec3::X, d);
+        b.flange(a + Vec3::X * flange_t(d), -Vec3::X, d);
+        b.flange(e - Vec3::X * flange_t(d), Vec3::X, d);
     }
     b.port("a", PortKind::Pipe, a, -Vec3::X, d);
     b.port("b", PortKind::Pipe, e, Vec3::X, d);
     b.path("a", vec![Vec3::ZERO, a]);
     b.path("b", vec![Vec3::ZERO, e]);
+}
+
+/// Flange thickness for a pipe diameter.
+fn flange_t(d: f32) -> f32 {
+    (d * 0.12).clamp(0.006, 0.03)
 }
 
 /// Elbow radius for a pipe diameter.
@@ -470,6 +486,9 @@ fn build_elbow(b: &mut Builder, d: f32, angle: f32) {
     let th = angle.to_radians();
     let end = c + Vec3::new(th.sin(), -th.cos(), 0.0) * big;
     let end_dir = Vec3::new(th.cos(), th.sin(), 0.0);
+    let t = flange_t(d);
+    b.flange(Vec3::X * t, -Vec3::X, d);
+    b.flange(end - end_dir * t, end_dir, d);
     b.port("a", PortKind::Pipe, Vec3::ZERO, -Vec3::X, d);
     b.port("b", PortKind::Pipe, end, end_dir, d);
     let mid = th * 0.5;
@@ -487,7 +506,7 @@ fn build_tee(b: &mut Builder, d: f32) {
     let (a, e, top) = (Vec3::new(-h, 0.0, 0.0), Vec3::new(h, 0.0, 0.0), Vec3::new(0.0, h, 0.0));
     b.cyl(a, e, d * 0.5, PIPE);
     b.cyl(Vec3::ZERO, top, d * 0.5, PIPE);
-    let t = (d * 0.12).clamp(0.006, 0.03);
+    let t = flange_t(d);
     b.flange(a + Vec3::X * t, -Vec3::X, d);
     b.flange(e - Vec3::X * t, Vec3::X, d);
     b.flange(top - Vec3::Y * t, Vec3::Y, d);
@@ -506,8 +525,8 @@ fn build_reducer(b: &mut Builder, d1: f32, d2: f32) {
     b.cyl(a, a + Vec3::X * q, d1 * 0.5, PIPE);
     b.frustum(a + Vec3::X * q, e - Vec3::X * q, d1 * 0.5, d2 * 0.5, false, PIPE);
     b.cyl(e - Vec3::X * q, e, d2 * 0.5, PIPE);
-    b.flange(a + Vec3::X * (d1 * 0.12).clamp(0.006, 0.03), -Vec3::X, d1);
-    b.flange(e - Vec3::X * (d2 * 0.12).clamp(0.006, 0.03), Vec3::X, d2);
+    b.flange(a + Vec3::X * flange_t(d1), -Vec3::X, d1);
+    b.flange(e - Vec3::X * flange_t(d2), Vec3::X, d2);
     b.port("a", PortKind::Pipe, a, -Vec3::X, d1);
     b.port("b", PortKind::Pipe, e, Vec3::X, d2);
     b.path("a", vec![Vec3::ZERO, a]);
@@ -515,21 +534,32 @@ fn build_reducer(b: &mut Builder, d1: f32, d2: f32) {
 }
 
 fn build_valve(b: &mut Builder, d: f32) {
+    // Flanged ball valve, 3d face to face: end necks, a bulbous body around
+    // the ball, a bonnet with the stem, and a quarter-turn lever.
     let len = d * 3.0;
     let r = d * 0.5;
     let (a, e) = (Vec3::new(-len * 0.5, 0.0, 0.0), Vec3::new(len * 0.5, 0.0, 0.0));
-    b.cyl(a, e, r, STEEL);
-    b.cyl(Vec3::new(-d * 0.6, 0.0, 0.0), Vec3::new(d * 0.6, 0.0, 0.0), r * 1.45, BLUE);
-    let t = (d * 0.12).clamp(0.006, 0.03);
+    let t = flange_t(d);
+    let (rn, rb, x0) = (r * 1.08, r * 1.6, d * 0.8);
+    let xi = x0 * 0.4;
+    b.cyl(a, Vec3::new(-x0, 0.0, 0.0), rn, BLUE);
+    b.frustum(Vec3::new(-x0, 0.0, 0.0), Vec3::new(-xi, 0.0, 0.0), rn, rb, false, BLUE);
+    b.cyl(Vec3::new(-xi, 0.0, 0.0), Vec3::new(xi, 0.0, 0.0), rb, BLUE);
+    b.frustum(Vec3::new(xi, 0.0, 0.0), Vec3::new(x0, 0.0, 0.0), rb, rn, false, BLUE);
+    b.cyl(Vec3::new(x0, 0.0, 0.0), e, rn, BLUE);
     b.flange(a + Vec3::X * t, -Vec3::X, d);
     b.flange(e - Vec3::X * t, Vec3::X, d);
-    let stem_top = r * 1.45 + (0.6 * d).max(0.03);
-    b.cyl(Vec3::new(0.0, r * 1.2, 0.0), Vec3::new(0.0, stem_top, 0.0), (d * 0.12).max(0.006), STEEL);
-    // Lever: along the pipe when open.
+    // Bonnet and stem.
+    let bonnet = rb + (0.25 * d).max(0.012);
+    b.cyl(Vec3::new(0.0, rb * 0.8, 0.0), Vec3::new(0.0, bonnet, 0.0), r * 0.6, BLUE);
+    let stem_top = bonnet + (0.3 * d).max(0.015);
+    b.cyl(Vec3::new(0.0, bonnet, 0.0), Vec3::new(0.0, stem_top, 0.0), (d * 0.12).max(0.006), STEEL);
+    // Lever: along the pipe when open, across it when closed (quarter turn).
     let lever = b.body("lever");
-    let lv = (3.0 * d).max(0.12);
+    let lv = (3.0 * d).max(0.15);
     let w = (d * 0.25).max(0.012);
     b.cuboid(Vec3::new(lv * 0.5 - w, stem_top + w * 0.5, 0.0), Vec3::new(lv * 0.5, w * 0.5, w * 0.6), Quat::IDENTITY, RED);
+    b.cyl(Vec3::new(0.0, stem_top - w * 0.2, 0.0), Vec3::new(0.0, stem_top + w * 1.1, 0.0), w * 0.9, STEEL);
     b.joint("lever", true, None, lever, Vec3::new(0.0, stem_top, 0.0), 'Y', Some((0.0, 90.0)));
     b.body("static");
     b.port("a", PortKind::Pipe, a, -Vec3::X, d);
@@ -538,13 +568,23 @@ fn build_valve(b: &mut Builder, d: f32) {
     b.path("b", vec![Vec3::ZERO, e]);
 }
 
-fn build_pump(b: &mut Builder, d: f32, motor: bool) {
+/// Height of a pump's suction axis above its feet (without a plinth).
+pub fn pump_axis(d: f32) -> f32 {
+    0.22 * (d / 0.05).clamp(0.6, 4.0)
+}
+
+fn build_pump(b: &mut Builder, d: f32, motor: bool, base: f32) {
     let k = (d / 0.05).clamp(0.6, 4.0);
-    let h = 0.22 * k;
+    // Concrete plinth; everything else stands on it.
+    let y0 = base.max(0.0);
+    if y0 > 0.0 {
+        b.cuboid(Vec3::new(-0.1 * k, y0 * 0.5, 0.0), Vec3::new(0.44 * k, y0 * 0.5, 0.2 * k), Quat::IDENTITY, GREY);
+    }
+    let h = y0 + pump_axis(d);
     // Base plate.
-    b.cuboid(Vec3::new(-0.1 * k, 0.02 * k, 0.0), Vec3::new(0.4 * k, 0.02 * k, 0.17 * k), Quat::IDENTITY, DARK);
+    b.cuboid(Vec3::new(-0.1 * k, y0 + 0.02 * k, 0.0), Vec3::new(0.4 * k, 0.02 * k, 0.17 * k), Quat::IDENTITY, DARK);
     if motor {
-        b.cuboid(Vec3::new(-0.31 * k, 0.07 * k, 0.0), Vec3::new(0.17 * k, 0.03 * k, 0.1 * k), Quat::IDENTITY, GREEN);
+        b.cuboid(Vec3::new(-0.31 * k, y0 + 0.07 * k, 0.0), Vec3::new(0.17 * k, 0.03 * k, 0.1 * k), Quat::IDENTITY, GREEN);
         b.cyl(Vec3::new(-0.48 * k, h, 0.0), Vec3::new(-0.14 * k, h, 0.0), 0.12 * k, GREEN);
         b.cyl(Vec3::new(-0.52 * k, h, 0.0), Vec3::new(-0.48 * k, h, 0.0), 0.1 * k, DARK);
         for i in 0..8 {
@@ -553,15 +593,15 @@ fn build_pump(b: &mut Builder, d: f32, motor: bool) {
         }
     }
     // Bearing bracket and volute.
-    b.cuboid(Vec3::new(-0.02 * k, 0.1 * k, 0.0), Vec3::new(0.05 * k, 0.06 * k, 0.07 * k), Quat::IDENTITY, BLUE);
+    b.cuboid(Vec3::new(-0.02 * k, y0 + 0.1 * k, 0.0), Vec3::new(0.05 * k, 0.06 * k, 0.07 * k), Quat::IDENTITY, BLUE);
     b.cyl(Vec3::new(0.0, h, 0.0), Vec3::new(0.12 * k, h, 0.0), 0.14 * k, BLUE);
     // Suction (axial, +X) and discharge (up) nozzles.
     let s_end = Vec3::new(0.24 * k, h, 0.0);
     b.cyl(Vec3::new(0.12 * k, h, 0.0), s_end, d * 0.5, BLUE);
-    b.flange(s_end - Vec3::X * (d * 0.12).clamp(0.006, 0.03), Vec3::X, d);
+    b.flange(s_end - Vec3::X * flange_t(d), Vec3::X, d);
     let d_end = Vec3::new(0.06 * k, h + 0.26 * k, 0.0);
     b.cyl(Vec3::new(0.06 * k, h, 0.0), d_end, d * 0.5, BLUE);
-    b.flange(d_end - Vec3::Y * (d * 0.12).clamp(0.006, 0.03), Vec3::Y, d);
+    b.flange(d_end - Vec3::Y * flange_t(d), Vec3::Y, d);
     // Rotor: shaft and a coupling with lugs, so you can see it turn.
     let rotor = b.body("rotor");
     let x0 = if motor { -0.14 * k } else { -0.3 * k };
@@ -587,6 +627,11 @@ pub fn tank_shell(dia: f32, h: f32) -> (f32, f32, f32) {
     (legs, dia * 0.5, h)
 }
 
+/// Height of a generated tank's side nozzles (outlet, return) above its feet.
+pub fn tank_nozzle_y(dia: f32, h: f32, d: f32) -> f32 {
+    tank_shell(dia, h).0 + (0.1 * h).max(d)
+}
+
 fn build_tank(b: &mut Builder, dia: f32, h: f32, d: f32) {
     let (y0, r, h) = tank_shell(dia, h);
     for (sx, sz) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
@@ -600,15 +645,15 @@ fn build_tank(b: &mut Builder, dia: f32, h: f32, d: f32) {
     let top = y0 + h + 0.15 * r;
     let inlet = Vec3::new(0.0, top + 0.1, 0.0);
     b.cyl(Vec3::new(0.0, top - 0.05, 0.0), inlet, d * 0.5, STEEL);
-    b.flange(inlet - Vec3::Y * (d * 0.12).clamp(0.006, 0.03), Vec3::Y, d);
-    let oy = y0 + (0.1 * h).max(d);
+    b.flange(inlet - Vec3::Y * flange_t(d), Vec3::Y, d);
+    let oy = tank_nozzle_y(dia, h, d);
     let outlet = Vec3::new(r + 0.12, oy, 0.0);
     b.cyl(Vec3::new(r - 0.02, oy, 0.0), outlet, d * 0.5, STEEL);
-    b.flange(outlet - Vec3::X * (d * 0.12).clamp(0.006, 0.03), Vec3::X, d);
+    b.flange(outlet - Vec3::X * flange_t(d), Vec3::X, d);
     // Return nozzle opposite the outlet.
     let ret = Vec3::new(-r - 0.12, oy, 0.0);
     b.cyl(Vec3::new(-r + 0.02, oy, 0.0), ret, d * 0.5, STEEL);
-    b.flange(ret + Vec3::X * (d * 0.12).clamp(0.006, 0.03), -Vec3::X, d);
+    b.flange(ret + Vec3::X * flange_t(d), -Vec3::X, d);
     b.port("inlet", PortKind::Pipe, inlet, Vec3::Y, d);
     b.port("outlet", PortKind::Pipe, outlet, Vec3::X, d);
     b.port("return", PortKind::Pipe, ret, -Vec3::X, d);
@@ -764,7 +809,7 @@ fn build_conveyor(b: &mut Builder, len: f32, w: f32, h: f32) {
 // USD
 
 fn usda(name: &str, b: &Built) -> String {
-    let mut s = format!("#usda 1.0\n(\n    defaultPrim = \"{name}\"\n    metersPerUnit = 1\n    upAxis = \"Y\"\n)\n\ndef Xform \"{name}\" (\n    kind = \"component\"\n)\n{{\n");
+    let mut s = format!("#usda 1.0\n{PART_REV}\n(\n    defaultPrim = \"{name}\"\n    metersPerUnit = 1\n    upAxis = \"Y\"\n)\n\ndef Xform \"{name}\" (\n    kind = \"component\"\n)\n{{\n");
     for (bname, m) in &b.bodies {
         if m.idx.is_empty() {
             continue;
@@ -812,7 +857,7 @@ mod tests {
         for spec in [
             Spec::Pipe { d: 0.1, len: 2.345 },
             Spec::Elbow { d: 0.05, angle: 90.0 },
-            Spec::Pump { d: 0.065, motor: false },
+            Spec::Pump { d: 0.065, motor: false, base: 0.0 },
             Spec::Tank { dia: 1.2, h: 1.5, d: 0.05 },
             Spec::Engine { n: 4 },
             Spec::Pulley { dia: 0.2, d: 0.03 },
@@ -839,6 +884,29 @@ mod tests {
     }
 
     #[test]
+    fn flanges_sit_flush_on_their_port_faces() {
+        // The flange disc (wider than the pipe) must reach each pipe port's
+        // face, so two mated parts meet flange to flange with no gap.
+        for spec in [Spec::Pipe { d: 0.05, len: 1.0 }, Spec::Valve { d: 0.05 }, Spec::Elbow { d: 0.05, angle: 90.0 }, Spec::Tee { d: 0.05 }, Spec::Pump { d: 0.05, motor: true, base: 0.15 }, Spec::Tank { dia: 1.0, h: 1.2, d: 0.05 }] {
+            let b = spec.normalized().built();
+            let pts: Vec<Vec3> = b.bodies.iter().filter(|(n, _)| n == "static").flat_map(|(_, m)| m.pos.iter().copied()).collect();
+            for p in b.ports.iter().filter(|p| p.kind == PortKind::Pipe) {
+                // Points of the flange rim: in the port's plane region, well outside the bore.
+                let reach = pts
+                    .iter()
+                    .filter(|v| {
+                        let rel = **v - p.pos;
+                        let along = rel.dot(p.dir);
+                        (rel - p.dir * along).length() > p.size * 0.7 && along > -0.05 && along < 0.01
+                    })
+                    .map(|v| (*v - p.pos).dot(p.dir))
+                    .fold(f32::MIN, f32::max);
+                assert!(reach.abs() < 5e-4, "{} port {}: flange face {reach:.4} m from the port face", spec.kind(), p.id);
+            }
+        }
+    }
+
+    #[test]
     fn every_part_loads_through_the_usd_loader() {
         let dir = std::env::temp_dir().join(format!("sense_sim_parts_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -848,7 +916,7 @@ mod tests {
             Spec::Tee { d: 0.05 },
             Spec::Reducer { d1: 0.08, d2: 0.05 },
             Spec::Valve { d: 0.05 },
-            Spec::Pump { d: 0.05, motor: true },
+            Spec::Pump { d: 0.05, motor: true, base: 0.15 },
             Spec::Tank { dia: 1.0, h: 1.2, d: 0.05 },
             Spec::Motor { d: 0.03 },
             Spec::Pulley { dia: 0.12, d: 0.03 },
