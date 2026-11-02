@@ -8,6 +8,7 @@ use std::time::Duration;
 use crossbeam_channel::{RecvTimeoutError, Sender};
 use serde_json::Value;
 
+use super::gate::{CallCtx, Origin};
 use super::llm::{Block, Message, Provider, ToolDef};
 use super::tools::{self, ToolJob, ToolOutput};
 use super::{Event, images, toolmaker};
@@ -59,6 +60,11 @@ impl TurnLog {
         let new = log.entries[log.seen..].to_vec();
         log.seen = log.entries.len();
         new
+    }
+
+    /// Whether a script ran in this turn, so nothing since can count as measured.
+    pub fn ran_script(&self) -> bool {
+        self.0.lock().map(|l| l.entries.iter().any(|e| e.name == "python_run")).unwrap_or(true)
     }
 
     #[cfg(test)]
@@ -156,13 +162,12 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
         checks.before_tools(&uses.iter().map(|(_, n, _)| n.as_str()).collect::<Vec<_>>());
 
         let (tx, mcp, cancel, ev, log) = (&turn.tx, &turn.mcp, &turn.cancel, &turn.ev, &turn.log);
+        // Everything goes through the bridge, where the gate is: external tools too.
         let run = |name: &str, input: &Value| {
             if cancel.load(Ordering::Relaxed) {
                 ToolOutput::err("cancelled by the user")
-            } else if let Some(o) = mcp.call(name, input) {
-                o
             } else {
-                tools::call_logged(tx, name, input.clone(), false, Some(cancel), Some(log))
+                tools::call_ctx(tx, name, input.clone(), CallCtx { origin: Origin::Assistant, log: Some(log.clone()), cancel: Some(cancel.clone()) })
             }
         };
         // Lookups, downloads and external MCP tools don't touch the scene:

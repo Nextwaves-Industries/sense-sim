@@ -7,6 +7,7 @@ pub mod assetgen;
 pub mod catalog;
 mod checks;
 pub mod config;
+pub mod gate;
 pub mod harness;
 pub mod knowledge;
 pub mod llm;
@@ -57,6 +58,8 @@ pub struct Question {
     pub input: String,
     pub answer: Option<String>,
     pub reply: Option<Sender<ToolOutput>>,
+    /// Asked by the gate, not the model: the app wants permission for something.
+    pub approval: bool,
 }
 
 impl Question {
@@ -106,6 +109,10 @@ pub struct Agent {
     events: Option<Receiver<Event>>,
     /// New chat was pressed during a run: what that run still reports belongs to the old chat.
     discard_run: bool,
+    /// What the user has allowed for this chat: the gate's keys.
+    pub approved: std::collections::HashSet<String>,
+    /// The folder of the open layout, which counts as the project.
+    pub project_dir: Option<std::path::PathBuf>,
 }
 
 impl Agent {
@@ -134,6 +141,8 @@ impl Agent {
             cancel: Arc::default(),
             events: None,
             discard_run: false,
+            approved: Default::default(),
+            project_dir: None,
         }
     }
 
@@ -287,6 +296,7 @@ impl Agent {
         self.transcript.clear();
         self.questions.clear();
         self.plan.clear();
+        self.approved.clear();
     }
 }
 

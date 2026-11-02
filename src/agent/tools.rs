@@ -15,7 +15,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use serde_json::{Value, json};
 
 use super::catalog::{self, Catalog};
-use super::harness::TurnLog;
+use super::gate::{self, CallCtx, Origin, Policy, Verdict};
 use super::llm::{Block, ToolDef};
 use super::{Agent, ChatItem, Question, assetgen, images, photocheck, toolmaker};
 use crate::library::Library;
@@ -61,10 +61,8 @@ pub struct ToolJob {
     pub name: String,
     pub input: Value,
     pub reply: Sender<ToolOutput>,
-    /// Shown in the assistant transcript (calls from MCP clients).
-    pub from_mcp: bool,
-    /// Where calls made on this one's behalf (a macro's steps) are recorded.
-    pub log: Option<TurnLog>,
+    /// Who asked, and what a macro's steps inherit.
+    pub ctx: CallCtx,
 }
 
 #[derive(Resource, Clone)]
@@ -82,18 +80,24 @@ impl Default for ToolBridge {
 
 /// Blocking call from a worker thread. Returns early if `cancel` is set.
 pub fn call(tx: &Sender<ToolJob>, name: &str, input: Value, from_mcp: bool, cancel: Option<&AtomicBool>) -> ToolOutput {
-    call_logged(tx, name, input, from_mcp, cancel, None)
+    let origin = if from_mcp { Origin::Mcp } else { Origin::Assistant };
+    send_and_wait(tx, name, input, CallCtx { origin, ..Default::default() }, cancel)
 }
 
-/// As [`call`], with somewhere to record what this call goes on to do.
-pub fn call_logged(tx: &Sender<ToolJob>, name: &str, input: Value, from_mcp: bool, cancel: Option<&AtomicBool>, log: Option<&TurnLog>) -> ToolOutput {
+/// As [`call`], saying who is asking and what their calls should carry.
+pub fn call_ctx(tx: &Sender<ToolJob>, name: &str, input: Value, ctx: CallCtx) -> ToolOutput {
+    let cancel = ctx.cancel.clone();
+    send_and_wait(tx, name, input, ctx, cancel.as_deref())
+}
+
+fn send_and_wait(tx: &Sender<ToolJob>, name: &str, input: Value, ctx: CallCtx, cancel: Option<&AtomicBool>) -> ToolOutput {
     // Waiting has to happen on this thread, not in the app's update loop.
     #[cfg(feature = "antenna-studio")]
     if name == crate::antenna::assist::WAIT {
         return crate::antenna::assist::wait(tx, &input, cancel);
     }
     let (rtx, rrx) = unbounded();
-    if tx.send(ToolJob { name: name.into(), input, reply: rtx, from_mcp, log: log.cloned() }).is_err() {
+    if tx.send(ToolJob { name: name.into(), input, reply: rtx, ctx }).is_err() {
         return ToolOutput::err("viewer is shutting down");
     }
     loop {
@@ -642,6 +646,9 @@ enum Wait {
     /// `compare`: the photo to set the capture against.
     Screenshot { slot: Option<Arc<Mutex<Option<Image>>>>, settled: u32, reply: Sender<ToolOutput>, started: Instant, compare: Option<String> },
     Download { folders: Vec<String>, reply: Sender<ToolOutput>, started: Instant },
+    /// The gate asked the user. `answer` is the question card's reply; (label, key) is what a
+    /// "for this chat" answer would remember.
+    Approval { job: ToolJob, answer: Receiver<ToolOutput>, remember: Option<(String, String)> },
 }
 
 #[derive(Resource, Default)]
@@ -650,14 +657,11 @@ pub struct PendingTools(Vec<Wait>, Option<Instant>);
 pub fn run_tool_jobs(world: &mut World) {
     let jobs: Vec<ToolJob> = world.resource::<ToolBridge>().rx.try_iter().collect();
     for job in jobs {
-        if job.from_mcp {
+        if job.ctx.origin == Origin::Mcp {
             let summary = format!("{} {}", job.name, short(&job.input.to_string(), 160));
             world.resource_mut::<Agent>().transcript.push(ChatItem::Info(format!("MCP client → {summary}")));
         }
-        let reply = job.reply.clone();
-        if let Some(out) = start(world, job) {
-            let _ = reply.send(out);
-        }
+        run_gated(world, job);
     }
     let waits = std::mem::take(&mut world.resource_mut::<PendingTools>().0);
     let mut keep = Vec::new();
@@ -668,6 +672,48 @@ pub fn run_tool_jobs(world: &mut World) {
     }
     world.resource_mut::<PendingTools>().0.extend(keep);
 }
+
+/// The one way into [`start`]: every call the bridge carries is judged here first.
+fn run_gated(world: &mut World, job: ToolJob) {
+    let reply = job.reply.clone();
+    // A call can still be queued after Stop: its caller has gone, and it mustn't act now.
+    if job.ctx.cancelled() {
+        let _ = reply.send(ToolOutput::err("cancelled by the user"));
+        return;
+    }
+    let verdict = {
+        let agent = world.resource::<Agent>();
+        let mut roots = vec![gate::workspace_root()];
+        roots.extend(agent.project_dir.clone());
+        gate::decide(&job.name, &job.input, &job.ctx, &Policy { mode: agent.config.approval, approved: &agent.approved, roots: &roots, external: agent.mcp.has_tool(&job.name) })
+    };
+    match verdict {
+        Verdict::Run => {
+            if let Some(out) = start(world, job) {
+                let _ = reply.send(out);
+            }
+        }
+        Verdict::Refuse(why) => {
+            let _ = reply.send(ToolOutput::err(why));
+        }
+        // Parked, never waited on: this is the main thread.
+        Verdict::Ask(approval) => {
+            let (tx, answer) = unbounded();
+            let mut options = vec![ALLOW.to_string()];
+            options.extend(approval.remember.as_ref().map(|(label, _)| label.clone()));
+            options.push("Deny".to_string());
+            let question = Question { text: approval.text, options, candidates: Vec::new(), allow_text: false, input: String::new(), answer: None, reply: Some(tx), approval: true };
+            let mut agent = world.resource_mut::<Agent>();
+            agent.questions.push(question);
+            let idx = agent.questions.len() - 1;
+            agent.transcript.push(ChatItem::Question(idx));
+            agent.open = true;
+            let _ = defer(world, Wait::Approval { job, answer, remember: approval.remember });
+        }
+    }
+}
+
+const ALLOW: &str = "Allow";
 
 fn short(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s.to_string() }
@@ -1051,6 +1097,7 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
                 input: String::new(),
                 answer: None,
                 reply: Some(reply),
+                approval: false,
             };
             let mut agent = world.resource_mut::<Agent>();
             agent.questions.push(q);
@@ -1431,9 +1478,9 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
         },
         other if other.starts_with(toolmaker::PREFIX) => {
             // Its steps come back through this bridge, so it can't block the frame.
-            let (name, input, tx, log) = (other.to_string(), i.clone(), world.resource::<ToolBridge>().tx.clone(), job.log.clone());
+            let (name, input, tx, ctx) = (other.to_string(), i.clone(), world.resource::<ToolBridge>().tx.clone(), job.ctx.clone());
             std::thread::spawn(move || {
-                let _ = reply.send(toolmaker::run(&name, &input, tx, log));
+                let _ = reply.send(toolmaker::run(&name, &input, tx, ctx));
             });
             return None;
         }
@@ -1459,6 +1506,14 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             None => ToolOutput::err(format!("unknown tool '{other}'")),
         },
         other if super::knowledge::is_tool(other) => super::knowledge::run(other, i),
+        // External MCP servers answer over the network, so never on this thread.
+        other if world.get_resource::<Agent>().is_some_and(|a| a.mcp.has_tool(other)) => {
+            let (hub, name, input) = (world.resource::<Agent>().mcp.clone(), other.to_string(), i.clone());
+            std::thread::spawn(move || {
+                let _ = reply.send(hub.call(&name, &input).unwrap_or_else(|| ToolOutput::err(format!("the MCP server for '{name}' has gone"))));
+            });
+            return None;
+        }
         other => ToolOutput::err(format!("unknown tool '{other}'")),
     };
     Some(out)
@@ -1472,6 +1527,28 @@ fn defer(world: &mut World, w: Wait) -> Option<ToolOutput> {
 /// Checks a parked job; returns it back if it still has to wait.
 fn poll(world: &mut World, w: Wait) -> Option<Wait> {
     match w {
+        Wait::Approval { job, answer, remember } => {
+            let said = match answer.try_recv() {
+                Ok(out) => out.summary(),
+                Err(crossbeam_channel::TryRecvError::Empty) if !job.ctx.cancelled() => return Some(Wait::Approval { job, answer, remember }),
+                // New chat dropped the card, or Stop was pressed: nobody said yes.
+                Err(_) => String::new(),
+            };
+            let once = said == format!("User answered: {ALLOW}");
+            let always = remember.as_ref().filter(|(label, _)| said == format!("User answered: {label}"));
+            if let Some((_, key)) = always {
+                world.resource_mut::<Agent>().approved.insert(key.clone());
+            }
+            let reply = job.reply.clone();
+            if once || always.is_some() {
+                if let Some(out) = start(world, job) {
+                    let _ = reply.send(out);
+                }
+            } else {
+                let _ = reply.send(ToolOutput::err(format!("The user did not allow {}. Don't try to reach the same result another way; say what you wanted to do and why.", job.name)));
+            }
+            None
+        }
         Wait::AssetInfo { usd, thumb, reply, started } => {
             let cache = world.resource::<PrototypeCache>();
             let out = match cache.states.get(&usd) {
@@ -1992,7 +2069,7 @@ mod lock_tests {
 
     fn tool(world: &mut World, name: &str, input: Value) -> ToolOutput {
         let (reply, _rx) = unbounded();
-        start(world, ToolJob { name: name.into(), input, reply, from_mcp: false, log: None }).expect("finishes at once")
+        start(world, ToolJob { name: name.into(), input, reply, ctx: CallCtx::default() }).expect("finishes at once")
     }
 
     #[test]
@@ -2042,6 +2119,10 @@ mod lock_tests {
 }
 
 #[cfg(test)]
+#[path = "gate_tests.rs"]
+mod gate_tests;
+
+#[cfg(test)]
 mod routing_tests {
     use super::*;
 
@@ -2050,7 +2131,7 @@ mod routing_tests {
     fn reaches_a_handler(name: &str) -> bool {
         let mut world = World::new();
         let (tx, _rx) = unbounded();
-        let job = ToolJob { name: name.into(), input: json!({}), reply: tx, from_mcp: false, log: None };
+        let job = ToolJob { name: name.into(), input: json!({}), reply: tx, ctx: CallCtx::default() };
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(&mut world, job))) {
             Ok(Some(out)) => !(out.is_error && out.summary().starts_with("unknown tool")),
             Ok(None) | Err(_) => true,

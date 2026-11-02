@@ -12,7 +12,8 @@ use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::Sender;
 use serde_json::{Map, Value, json};
 
-use super::harness::{TurnLog, Who};
+use super::gate::CallCtx;
+use super::harness::Who;
 use super::llm::{Block, ToolDef};
 use super::tools::{self, ToolJob, ToolOutput};
 
@@ -355,7 +356,7 @@ pub fn delete(name: &str) -> Result<()> {
 
 /// Runs a made tool's steps one by one, on a worker thread: each goes through
 /// the bridge like any other call. Stops at the first failing step.
-pub fn run(name: &str, input: &Value, tx: Sender<ToolJob>, log: Option<TurnLog>) -> ToolOutput {
+pub fn run(name: &str, input: &Value, tx: Sender<ToolJob>, ctx: CallCtx) -> ToolOutput {
     let bare = name.strip_prefix(PREFIX).unwrap_or(name);
     let Some(spec) = find(bare) else { return ToolOutput::err(format!("unknown tool '{name}'")) };
     let params = spec["parameters"].as_object().cloned().unwrap_or_default();
@@ -376,9 +377,14 @@ pub fn run(name: &str, input: &Value, tx: Sender<ToolJob>, log: Option<TurnLog>)
         if barred_from_macros(tool, &call) {
             return ToolOutput::err(format!("{name}: step {n}: a made tool can't call {tool}"));
         }
-        let out = tools::call_logged(&tx, tool, call.clone(), false, None, log.as_ref());
+        if ctx.cancelled() {
+            content.push(Block::Text(format!("{name} was stopped before step {n}; the earlier steps stay applied.")));
+            return ToolOutput { content, is_error: true };
+        }
+        // A step inherits who asked, so a macro can't launder an MCP client's call.
+        let out = tools::call_ctx(&tx, tool, call.clone(), ctx.clone());
         // The self-checks judge what actually changed, not the macro's name.
-        if let Some(log) = &log {
+        if let Some(log) = &ctx.log {
             log.push(Who::Macro, tool, &call, &out);
         }
         content.push(Block::Text(format!("step {n} ({tool}):")));

@@ -573,6 +573,7 @@ pub fn ui_system(
     // A sample or a new scene has no file yet, so anything in it would be lost.
     let unsaved = undo_stack.dirty() || (state.layout_path.is_none() && object_count > 0);
     tabs.mirror(&state.scene_name, state.layout_path.as_ref(), unsaved);
+    agent.project_dir = state.layout_path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
     let selected_name = selection.selected.and_then(|e| objects.get(e).ok()).map(|(_, o, _, _)| o.name.clone());
     let selected_more = selection.group.iter().filter(|e| Some(**e) != selection.selected).count();
     // Nothing of the scene is drawn while a workspace has the canvas, so "0 of N triangles" would only mislead.

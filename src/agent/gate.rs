@@ -1,0 +1,438 @@
+//! Decides whether a tool call may run. Every call passes here: the assistant's own, a macro's
+//! steps, and calls from MCP clients. The model only supplies arguments, so the text a person
+//! is asked to approve is written here, never by the model.
+
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::harness::TurnLog;
+
+/// How much the assistant may do without asking. Measurements and outside systems always ask.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Anything that changes something asks.
+    Ask,
+    /// Edits to the scene and project run; files elsewhere and external tools ask.
+    #[default]
+    Edits,
+    /// Only measurements and outside systems ask.
+    All,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 3] = [Mode::Ask, Mode::Edits, Mode::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Ask => "Ask before any change",
+            Mode::Edits => "Edits run, riskier actions ask",
+            Mode::All => "Only measurements and outside systems ask",
+        }
+    }
+}
+
+/// Where a call came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Origin {
+    /// The assistant's model.
+    #[default]
+    Assistant,
+    /// A client of the MCP server: no login, and nobody watching to approve.
+    Mcp,
+    /// The harness itself, checking the model's work. It decides these calls, not the model.
+    Harness,
+}
+
+/// What travels with a call, and with any calls it makes in turn.
+#[derive(Clone, Default)]
+pub struct CallCtx {
+    pub origin: Origin,
+    pub log: Option<TurnLog>,
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl CallCtx {
+    pub fn harness(cancel: Arc<AtomicBool>) -> Self {
+        Self { origin: Origin::Harness, log: None, cancel: Some(cancel) }
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+}
+
+/// What a tool does, for deciding who has to agree to it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Class {
+    /// Looks at things. Includes `ask_user` and `update_plan`, which only talk to the user.
+    Read,
+    /// Changes what is in the scene.
+    Scene,
+    /// Moves the camera or captures the view. Harmless, but two callers would disturb each other.
+    View,
+    /// Changes other project state: designs, studies, runs, saved tools, predictions.
+    Project,
+    /// Writes a file outside the project and the workspace.
+    Files,
+    /// Aims the app at a real system outside it.
+    Outside,
+    /// Records something as a real measurement.
+    Measurement,
+    /// A tool from an external MCP server: it could do anything.
+    External,
+    /// A macro. Runs freely: each of its steps comes back through the gate.
+    Macro,
+    /// Nobody has said what this does, so nobody may assume.
+    Unknown,
+}
+
+/// What a tool does, ignoring where it writes. Input matters for a few that do different things.
+pub fn class_of(name: &str, input: &Value) -> Class {
+    use Class::*;
+    if name.starts_with(super::toolmaker::PREFIX) {
+        return Macro;
+    }
+    match name {
+        // Control and lookups.
+        "ask_user" | "update_plan" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
+        | "search_knowledge" | "read_knowledge" | "list_knowledge" | "design_commands" | "design_bodies" | "design_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
+        | "sim_results" | "sim_probe" | "plant_list_ports" | "plant_status" | "outcomes_ledger" | "site_material_ranges" | "rtls_list_regions" | "rtls_list_profiles" | "rtls_list_devices" | "rtls_status"
+        | "rtls_coverage" | "antenna_assess" | "antenna_calc" | "antenna_sweep_results" | "antenna_converge_results" | "antenna_yield_results" | "antenna_gate_results" | "antenna_list_samples"
+        | "antenna_list_templates" | "antenna_get" | "antenna_results" | "antenna_job_state" | "antenna_wait" | "antenna_reconfig_parts" | "antenna_reconfig_results" | "antenna_reconfig_found"
+        | "antenna_reconfig_tuning" | "antenna_reconfig_spread" => Read,
+
+        // Reading an optimizer's progress is a lookup; applying its result changes the design.
+        "antenna_optimize_status" => {
+            if input["apply"].as_bool().unwrap_or(false) {
+                Project
+            } else {
+                Read
+            }
+        }
+
+        "place_objects" | "update_object" | "delete_objects" | "clear_scene" | "load_template" | "add_photo_backdrop" | "place_from_photo" | "optimize_layout" | "add_structure" | "set_object_material"
+        | "design_send_to_scene" | "plant_add_part" | "plant_route_pipe" | "plant_connect" | "plant_disconnect" | "plant_build" | "plant_set" | "rtls_auto_deploy" | "rtls_add_device" | "rtls_update_device"
+        | "rtls_remove_device" | "rtls_add_zone" | "rtls_optimize_anchors" => Scene,
+
+        "set_camera" | "frame_all" | "screenshot" | "compare_to_photo" | "design_show" | "antenna_reconfig_view" => View,
+
+        "download_assets" | "set_photo_layout" | "create_asset" | "define_tool" | "delete_tool" | "save_layout" | "export_usda" | "design_run" | "sim_study_create" | "sim_study_set" | "sim_run" | "sim_cancel"
+        | "plant_run" | "plant_define_port" | "design_uwb_bias" | "design_shelf" | "design_aoa" | "design_integrate" | "design_tag" | "design_coexist" | "design_field_yield" | "design_tunnel"
+        | "design_medical_coexist" | "design_sar" | "site_survey_plan" | "site_trace" | "site_guess_materials" | "site_survey_clear" | "site_survey_practice" | "site_stress" | "site_set_material"
+        | "site_conditions" | "site_erces" | "site_compare_tech" | "site_acceptance_plan" | "site_acceptance_preview" | "site_anchor_practice" | "site_battery" | "site_esl" | "site_route_coverage"
+        | "site_proximity" | "site_set_antenna" | "site_import_bim" | "rtls_set_region" | "rtls_run" | "rtls_control" | "antenna_spec" | "antenna_sweep" | "antenna_converge" | "antenna_match" | "antenna_yield"
+        | "antenna_array" | "antenna_save_pattern" | "antenna_import_cad" | "antenna_states" | "antenna_gate_test" | "antenna_find_phases" | "antenna_open_sample" | "antenna_new" | "antenna_set" | "antenna_run"
+        | "antenna_optimize" | "antenna_cancel" | "antenna_reconfig_set" | "antenna_reconfig_solve" | "antenna_reconfig_search" => Project,
+
+        // Where results go: webhooks, Modbus, UDP, writes to a real energy system.
+        "rtls_configure_outputs" => Outside,
+        "rtls_openems" => {
+            if input["action"] == "status" {
+                Read
+            } else {
+                Outside
+            }
+        }
+
+        // A number recorded here counts as measured from then on.
+        "outcomes_check" | "site_survey_fit" | "site_anchor_fit" | "site_acceptance_score" | "site_drift_baseline" | "site_drift_check" | "design_fit_measured" => Measurement,
+
+        _ => Unknown,
+    }
+}
+
+/// The file a tool would write, if it was given one.
+fn written_path<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
+    let key = match name {
+        "save_layout" | "export_usda" | "site_survey_practice" | "site_anchor_practice" | "site_acceptance_plan" | "site_acceptance_preview" => "path",
+        "site_acceptance_score" => "report_path",
+        _ => return None,
+    };
+    input[key].as_str().filter(|s| !s.is_empty())
+}
+
+/// Where this app's own working files go.
+pub fn workspace_root() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    Path::new(&base).join("SenseSim").join("agent")
+}
+
+/// Whether `path` is inside `root`, spelling aside. A path this can't be sure about isn't inside.
+pub fn is_under(path: &str, root: &Path) -> bool {
+    let plain = |p: &Path| -> Option<String> {
+        let abs = std::path::absolute(p).ok()?;
+        // Windows resolves `..` above; a verbatim path (`\\?\`) keeps it, and means what it says.
+        if abs.components().any(|c| c == Component::ParentDir) || abs.to_string_lossy().starts_with(r"\\?\") {
+            return None;
+        }
+        Some(abs.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase())
+    };
+    match (plain(Path::new(path)), plain(root)) {
+        (Some(p), Some(r)) => p == r || p.starts_with(&format!("{r}\\")),
+        _ => false,
+    }
+}
+
+/// A question for the user, and what they can make it stop asking.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Approval {
+    pub text: String,
+    /// (button label, key in the chat's approved set).
+    pub remember: Option<(String, String)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Run,
+    Ask(Approval),
+    Refuse(String),
+}
+
+/// What a decision depends on besides the call.
+pub struct Policy<'a> {
+    pub mode: Mode,
+    /// What the user has allowed for this chat.
+    pub approved: &'a HashSet<String>,
+    /// Folders that count as the project.
+    pub roots: &'a [PathBuf],
+    /// The tool belongs to an external MCP server.
+    pub external: bool,
+}
+
+const REMEMBER_EDITS: &str = "edits";
+
+fn details(input: &Value) -> String {
+    let text = serde_json::to_string_pretty(input).unwrap_or_default();
+    if text.chars().count() > 1200 {
+        format!("{}\n…", text.chars().take(1200).collect::<String>())
+    } else {
+        text
+    }
+}
+
+pub fn decide(name: &str, input: &Value, ctx: &CallCtx, policy: &Policy) -> Verdict {
+    if ctx.origin == Origin::Harness {
+        return Verdict::Run;
+    }
+    let mut class = if policy.external { Class::External } else { class_of(name, input) };
+
+    // A script's output must never become a measurement, whatever anyone clicks: the person
+    // approving can't tell a generated file from a real one.
+    if class == Class::Measurement {
+        if ctx.log.as_ref().is_some_and(TurnLog::ran_script) {
+            return Verdict::Refuse(format!("{name} records real measurements, and a script ran in this turn, so its data can't be told from a real one. Ask the user to run this in a new message, with data from the instrument."));
+        }
+        let root = workspace_root();
+        for key in ["path", "plan_path"] {
+            if let Some(file) = input[key].as_str().filter(|f| is_under(f, &root)) {
+                return Verdict::Refuse(format!("{file} is in the assistant's own workspace, so {name} can't take it as a real measurement. It needs the file the instrument wrote."));
+            }
+        }
+    }
+    let written = written_path(name, input).filter(|w| !policy.roots.iter().any(|r| is_under(w, r)));
+    let folder = written.map(|w| Path::new(w).parent().unwrap_or(Path::new(w)).to_string_lossy().to_lowercase());
+    if written.is_some() && matches!(class, Class::Project) {
+        class = Class::Files;
+    }
+
+    let (asks, text, remember) = match class {
+        Class::Read | Class::Macro => (false, String::new(), None),
+        Class::Scene | Class::View | Class::Project => (policy.mode == Mode::Ask, format!("Allow the assistant to run {name}?"), Some(("Allow edits for this chat".to_string(), REMEMBER_EDITS.to_string()))),
+        Class::Files => (
+            policy.mode != Mode::All,
+            format!("Allow the assistant to write a file outside this project?\n{}", written.unwrap_or_default()),
+            folder.map(|f| ("Allow this folder for this chat".to_string(), format!("folder:{f}"))),
+        ),
+        Class::External => {
+            let server = name.split("__").next().unwrap_or(name);
+            (policy.mode != Mode::All, format!("Allow the external tool {name}, from the MCP server \"{server}\"? It isn't part of this app, and could do anything that server can."), Some(("Allow this server for this chat".to_string(), format!("server:{server}"))))
+        }
+        Class::Outside => (true, format!("Allow the assistant to connect this app to a system outside it? {name} sends data out or starts a server. Check the addresses below."), None),
+        Class::Measurement => (true, format!("Allow the assistant to record this as a real measurement? Only allow it if these numbers or this file came from a real instrument. {name} will count them as measured from now on."), None),
+        Class::Unknown => (true, format!("The app doesn't know what {name} does. Allow it?"), None),
+    };
+    if !asks || remember.as_ref().is_some_and(|(_, key)| policy.approved.contains(key)) {
+        return Verdict::Run;
+    }
+    // Nobody is there to ask, and Stop couldn't release the call if it waited.
+    if ctx.origin == Origin::Mcp {
+        return Verdict::Refuse(format!("{name} needs the user's approval, which an MCP client can't ask for. Use the assistant in the app for this."));
+    }
+    Verdict::Ask(Approval { text: format!("{text}\n\n{}", details(input)), remember })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::agent::harness::Who;
+    use crate::agent::tools::ToolOutput;
+
+    fn verdict(name: &str, input: Value, origin: Origin, mode: Mode) -> Verdict {
+        let roots = [workspace_root()];
+        let approved = HashSet::new();
+        decide(name, &input, &CallCtx { origin, ..Default::default() }, &Policy { mode, approved: &approved, roots: &roots, external: false })
+    }
+
+    fn runs(v: &Verdict) -> bool {
+        *v == Verdict::Run
+    }
+    fn asks(v: &Verdict) -> bool {
+        matches!(v, Verdict::Ask(_))
+    }
+    fn refused(v: &Verdict) -> bool {
+        matches!(v, Verdict::Refuse(_))
+    }
+
+    /// A new tool has to be given a class: until then it asks, and this fails to say so.
+    #[test]
+    fn every_tool_has_a_class() {
+        let unknown: Vec<String> = crate::agent::tools::tool_defs(true).into_iter().map(|d| d.name).filter(|n| class_of(n, &json!({})) == Class::Unknown).collect();
+        assert!(unknown.is_empty(), "add these to class_of in gate.rs: {unknown:?}");
+    }
+
+    /// The plan's table, one row per class and one column per mode.
+    #[test]
+    fn modes_ask_for_what_they_say() {
+        let o = Origin::Assistant;
+        for mode in Mode::ALL {
+            assert!(runs(&verdict("get_scene", json!({}), o, mode)), "lookups never ask");
+            assert!(runs(&verdict("custom_shelf", json!({}), o, mode)), "macro steps are judged one by one");
+            assert!(asks(&verdict("rtls_configure_outputs", json!({}), o, mode)), "outside systems always ask");
+            assert!(asks(&verdict("outcomes_check", json!({ "measured": 1.0 }), o, mode)), "measurements always ask");
+            assert!(asks(&verdict("something_new", json!({}), o, mode)), "unknown tools always ask");
+        }
+        for (name, input) in [("place_objects", json!({})), ("screenshot", json!({})), ("antenna_set", json!({}))] {
+            assert!(asks(&verdict(name, input.clone(), o, Mode::Ask)), "{name}");
+            assert!(runs(&verdict(name, input.clone(), o, Mode::Edits)), "{name}");
+            assert!(runs(&verdict(name, input, o, Mode::All)), "{name}");
+        }
+        let outside = json!({ "path": r"C:\Windows\x.json" });
+        assert!(asks(&verdict("save_layout", outside.clone(), o, Mode::Ask)));
+        assert!(asks(&verdict("save_layout", outside.clone(), o, Mode::Edits)));
+        assert!(runs(&verdict("save_layout", outside, o, Mode::All)));
+    }
+
+    #[test]
+    fn the_default_is_edits_and_old_settings_files_keep_working() {
+        assert_eq!(Mode::default(), Mode::Edits);
+        assert_eq!(serde_json::to_value(Mode::Edits).unwrap(), json!("edits"));
+        assert_eq!(serde_json::from_value::<Mode>(json!("all")).unwrap(), Mode::All);
+    }
+
+    #[test]
+    fn the_input_can_change_what_a_tool_is() {
+        assert_eq!(class_of("rtls_openems", &json!({ "action": "status" })), Class::Read);
+        assert_eq!(class_of("rtls_openems", &json!({ "action": "start" })), Class::Outside);
+        assert_eq!(class_of("rtls_openems", &json!({})), Class::Outside, "no action isn't a safe action");
+        assert_eq!(class_of("antenna_optimize_status", &json!({})), Class::Read);
+        assert_eq!(class_of("antenna_optimize_status", &json!({ "apply": true })), Class::Project);
+    }
+
+    #[test]
+    fn mcp_clients_are_refused_instead_of_left_waiting() {
+        let o = Origin::Mcp;
+        assert!(runs(&verdict("get_scene", json!({}), o, Mode::Edits)));
+        assert!(runs(&verdict("place_objects", json!({}), o, Mode::Edits)), "ordinary MCP use keeps working");
+        assert!(refused(&verdict("rtls_configure_outputs", json!({}), o, Mode::All)));
+        assert!(refused(&verdict("outcomes_check", json!({}), o, Mode::All)));
+        assert!(refused(&verdict("save_layout", json!({ "path": r"C:\Windows\x.json" }), o, Mode::Edits)));
+        assert!(refused(&verdict("place_objects", json!({}), o, Mode::Ask)));
+    }
+
+    #[test]
+    fn the_harness_checking_the_models_work_isnt_stopped() {
+        assert!(runs(&verdict("screenshot", json!({}), Origin::Harness, Mode::Ask)));
+        assert!(runs(&verdict("set_camera", json!({}), Origin::Harness, Mode::Ask)));
+    }
+
+    #[test]
+    fn inside_means_inside() {
+        let root = PathBuf::from(r"C:\Data\Project");
+        for p in [r"C:\Data\Project\a.json", r"c:\data\PROJECT\sub\a.json", r"C:\Data\Project", "C:/Data/Project/a.json", r"C:\Data\Project\x\..\a.json"] {
+            assert!(is_under(p, &root), "{p}");
+        }
+        for p in [r"C:\Data\Project2\a.json", r"C:\Data\Other\a.json", r"C:\Data\Project\..\Other\a.json", r"\\?\C:\Data\Project\..\Other\a.json", r"\\server\share\a.json", ""] {
+            assert!(!is_under(p, &root), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_file_in_the_project_needs_no_approval_and_one_elsewhere_does() {
+        let inside = workspace_root().join("chat").join("a.json").to_string_lossy().to_string();
+        assert!(runs(&verdict("save_layout", json!({ "path": inside }), Origin::Assistant, Mode::Edits)));
+        for (tool, key) in [("export_usda", "path"), ("site_survey_practice", "path"), ("site_anchor_practice", "path"), ("site_acceptance_plan", "path"), ("site_acceptance_preview", "path")] {
+            assert!(asks(&verdict(tool, json!({ key: r"C:\Windows\x" }), Origin::Assistant, Mode::Edits)), "{tool}");
+        }
+        assert!(runs(&verdict("site_acceptance_plan", json!({}), Origin::Assistant, Mode::Edits)), "no file, nothing to approve");
+    }
+
+    #[test]
+    fn allowing_for_the_chat_is_remembered_only_where_offered() {
+        let roots = [workspace_root()];
+        let input = json!({ "path": r"C:\Reports\x.json" });
+        let ctx = CallCtx::default();
+        let no = HashSet::new();
+        let Verdict::Ask(a) = decide("save_layout", &input, &ctx, &Policy { mode: Mode::Edits, approved: &no, roots: &roots, external: false }) else { panic!() };
+        let (_, key) = a.remember.expect("a folder can be allowed");
+        assert!(a.text.contains(r"C:\Reports\x.json"));
+        let yes: HashSet<String> = [key].into();
+        let p = Policy { mode: Mode::Edits, approved: &yes, roots: &roots, external: false };
+        assert_eq!(decide("save_layout", &input, &ctx, &p), Verdict::Run);
+        assert!(asks(&decide("save_layout", &json!({ "path": r"C:\Other\x.json" }), &ctx, &p)), "only that folder");
+
+        // Measurements and outside systems ask every time.
+        let Verdict::Ask(m) = verdict("outcomes_check", json!({}), Origin::Assistant, Mode::Edits) else { panic!() };
+        assert!(m.remember.is_none());
+        let Verdict::Ask(o) = verdict("rtls_configure_outputs", json!({}), Origin::Assistant, Mode::Edits) else { panic!() };
+        assert!(o.remember.is_none());
+    }
+
+    #[test]
+    fn external_tools_ask_once_per_server() {
+        let roots = [workspace_root()];
+        let ctx = CallCtx::default();
+        let no = HashSet::new();
+        let p = Policy { mode: Mode::Edits, approved: &no, roots: &roots, external: true };
+        let Verdict::Ask(a) = decide("github__create_issue", &json!({}), &ctx, &p) else { panic!() };
+        let (_, key) = a.remember.unwrap();
+        assert_eq!(key, "server:github");
+        let yes: HashSet<String> = [key].into();
+        let p = Policy { mode: Mode::Edits, approved: &yes, roots: &roots, external: true };
+        assert_eq!(decide("github__list_prs", &json!({}), &ctx, &p), Verdict::Run);
+        assert!(asks(&decide("other__x", &json!({}), &ctx, &p)));
+    }
+
+    /// Keeps the rule that synthetic data never counts as calibration.
+    #[test]
+    fn a_script_cant_turn_its_output_into_a_measurement() {
+        let in_workspace = workspace_root().join("chat").join("walk.csv").to_string_lossy().to_string();
+        for key in ["path", "plan_path"] {
+            assert!(refused(&verdict("site_survey_fit", json!({ key: in_workspace }), Origin::Assistant, Mode::All)), "{key}");
+        }
+        assert!(asks(&verdict("site_survey_fit", json!({ "path": r"C:\Survey\walk.csv" }), Origin::Assistant, Mode::All)));
+
+        let log = TurnLog::default();
+        log.push(Who::Model, "python_run", &json!({}), &ToolOutput::text("{}"));
+        let ctx = CallCtx { log: Some(log), ..Default::default() };
+        let roots = [workspace_root()];
+        let no = HashSet::new();
+        let p = Policy { mode: Mode::All, approved: &no, roots: &roots, external: false };
+        assert!(refused(&decide("outcomes_check", &json!({ "measured": 1.0 }), &ctx, &p)));
+    }
+
+    #[test]
+    fn the_card_shows_the_arguments_and_a_long_one_is_cut() {
+        let Verdict::Ask(a) = verdict("rtls_configure_outputs", json!({ "webhook": "http://attacker.example" }), Origin::Assistant, Mode::Edits) else { panic!() };
+        assert!(a.text.contains("http://attacker.example"), "{}", a.text);
+        let Verdict::Ask(b) = verdict("rtls_configure_outputs", json!({ "x": "y".repeat(5000) }), Origin::Assistant, Mode::Edits) else { panic!() };
+        assert!(b.text.chars().count() < 1500);
+    }
+}

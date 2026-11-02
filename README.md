@@ -136,6 +136,14 @@ assistant back to fix what it finds (up to 4 rounds).
 Ollama / LM Studio (no key). **Custom OpenAI-compatible** reaches any other server or vendor,
 with a key if it needs one. Muse's `-contributor` models are cheaper because Meta may train on
 what you send; the settings page warns when one is selected.
+
+**Approvals** (Settings → AI assistant) set what the assistant may do without asking. The default
+lets it edit the scene and project, and asks before it writes files elsewhere or uses an external
+MCP tool. Anything that aims the app at an outside system (`rtls_configure_outputs`, starting
+OpenEMS), or records a real measurement (`outcomes_check`, `site_survey_fit`, `site_anchor_fit`,
+`site_acceptance_score`, drift tools, `design_fit_measured`), asks in every mode. MCP clients can't
+be asked, so those calls are refused for them.
+
 Local models must support tool calling and vision, for example `qwen2.5vl`. **Test connection**
 checks the key and model. Settings are stored in `%APPDATA%/SenseSim/agent.json`; a copy next
 to the exe takes precedence. Transient API errors (429/5xx) are retried with backoff.

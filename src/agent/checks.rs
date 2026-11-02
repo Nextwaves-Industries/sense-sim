@@ -3,6 +3,7 @@
 
 use serde_json::json;
 
+use super::gate::CallCtx;
 use super::harness::{LogEntry, OnStop, StopChecks, Turn, Who};
 use super::llm::{Block, Provider};
 use super::{Event, photocheck, toolmaker, tools};
@@ -80,10 +81,12 @@ impl StopChecks for SelfChecks {
     }
 
     fn on_stop(&mut self, provider: &dyn Provider, turn: &Turn) -> OnStop {
-        let (tx, cancel, ev) = (&turn.tx, &turn.cancel, &turn.ev);
+        let (tx, ev) = (&turn.tx, &turn.ev);
+        // These checks are the harness's own: asking the user to allow them would make no sense.
+        let own = CallCtx::harness(turn.cancel.clone());
         if self.changed_scene {
             self.changed_scene = false;
-            let out = tools::call(tx, "verify_scene", json!({}), false, Some(cancel));
+            let out = tools::call_ctx(tx, "verify_scene", json!({}), own.clone());
             let report = out.summary();
             if out.is_error {
                 self.checks += 1;
@@ -131,12 +134,12 @@ impl StopChecks for SelfChecks {
         }
         // A photo rebuild is judged against the photo by someone who didn't build it.
         if let Some(image) = self.photo.due() {
-            let cmp = tools::call(tx, "compare_to_photo", json!({ "image_id": image }), false, Some(cancel));
+            let cmp = tools::call_ctx(tx, "compare_to_photo", json!({ "image_id": image }), own.clone());
             let shot = cmp.content.iter().find_map(|b| if let Block::Image { data, mime } = b { Some((data.clone(), mime.clone())) } else { None });
             // The second view can't be flattered by pictures that line up with the photo.
             let side = photocheck::side_view(&cmp.summary()).and_then(|view| {
-                tools::call(tx, "set_camera", view, false, Some(cancel));
-                let s = tools::call(tx, "screenshot", json!({}), false, Some(cancel));
+                tools::call_ctx(tx, "set_camera", view, own.clone());
+                let s = tools::call_ctx(tx, "screenshot", json!({}), own.clone());
                 s.content.iter().find_map(|b| if let Block::Image { data, mime } = b { Some((data.clone(), mime.clone())) } else { None })
             });
             let verdict = match shot.as_ref().filter(|_| !cmp.is_error) {
@@ -144,7 +147,7 @@ impl StopChecks for SelfChecks {
                 None => Err(anyhow::anyhow!("{}", cmp.summary())),
             };
             // Depth is one more witness for the review: it places nothing.
-            let depth = tools::call(tx, "check_against_depth", json!({ "image_id": image }), false, Some(cancel));
+            let depth = tools::call_ctx(tx, "check_against_depth", json!({ "image_id": image }), own.clone());
             let depth_note = (!depth.is_error).then(|| photocheck::depth_note(&depth.summary())).flatten();
             match verdict {
                 Ok(c) if c.passes() => {

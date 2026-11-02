@@ -393,15 +393,17 @@ fn summarize(name: &str, input: &str, output: &str, is_error: bool) -> String {
 }
 
 fn question(ui: &mut egui::Ui, q: &mut super::Question, library: &mut Library) {
+    // Amber means attention: the app is asking for permission, not the model for an opinion.
+    let (accent, mark) = if q.approval { (theme::WARNING, icon::WARNING) } else { (theme::ONLINE, icon::CHAT_CIRCLE_DOTS) };
     egui::Frame::new()
         .fill(theme::RAISED)
-        .stroke(egui::Stroke::new(1.0, theme::ONLINE))
+        .stroke(egui::Stroke::new(1.0, accent))
         .corner_radius(10)
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(icon::CHAT_CIRCLE_DOTS).color(theme::ONLINE));
+                ui.label(RichText::new(mark).color(accent));
                 ui.add(egui::Label::new(RichText::new(&q.text).color(theme::TEXT)).wrap());
             });
             if let Some(a) = &q.answer {
@@ -656,6 +658,13 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
         });
         theme::setting_row(ui, "Max steps", "Model calls per request before it stops", |ui| {
             changed |= ui.add(egui::DragValue::new(&mut cfg.max_steps).range(5..=300)).lost_focus();
+        });
+        theme::setting_row(ui, "Approvals", "What the assistant may do without asking", |ui| {
+            egui::ComboBox::from_id_salt("approval").selected_text(cfg.approval.label()).width(280.0).show_ui(ui, |ui| {
+                for m in super::gate::Mode::ALL {
+                    changed |= ui.selectable_value(&mut cfg.approval, m, m.label()).changed();
+                }
+            });
         });
     }
     ui.horizontal(|ui| {

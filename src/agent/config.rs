@@ -158,6 +158,9 @@ pub struct AgentConfig {
     pub mcp_servers: BTreeMap<String, McpServerCfg>,
     #[serde(default = "default_steps")]
     pub max_steps: usize,
+    /// What the assistant may do without asking.
+    #[serde(default)]
+    pub approval: super::gate::Mode,
     /// Attach clearly relevant knowledge base passages to each message.
     #[serde(default = "yes")]
     pub knowledge_auto: bool,
@@ -187,6 +190,7 @@ impl Default for AgentConfig {
             mcp_port: default_port(),
             mcp_servers: BTreeMap::new(),
             max_steps: default_steps(),
+            approval: Default::default(),
             knowledge_auto: true,
         }
     }
