@@ -6,10 +6,9 @@
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
-use solidcraft_doc::Mat;
-use solidcraft_geom::Vec3;
+use solidcraft_doc::motion::ExplodedView;
 
-use super::{Plan, drive_with_contact, explode_moves, exploded_at, motion_plan, sample_count, view_index};
+use super::{Plan, drive_with_contact, explode_moves, exploded_at, motion_plan, sample_count, storyboard, view_index};
 use crate::capture::{self, Renderer};
 use crate::params::{bad, str_};
 use crate::render::Camera;
@@ -19,8 +18,56 @@ use crate::{Result, Session};
 enum Motion {
     /// A study played or a joint driven: the values driven, and what they are at each frame.
     Drive(BTreeSet<(u64, usize)>, Plan),
-    /// An exploded view's moves coming apart, and back together when true.
-    Explode(Vec<(u64, Mat, Vec3)>, bool),
+    /// An exploded view coming apart, and back together when true.
+    Explode(ExplodedView, bool),
+}
+
+/// What the parameters of one clip show, and how many frames it takes unless told.
+fn clip(s: &Session, p: &Value, cmd: &str) -> Result<(usize, Motion)> {
+    Ok(match (p.get("view"), p.get("study").or(p.get("joint"))) {
+        (Some(_), Some(_)) => return Err(bad(cmd, "give an exploded `view`, a `study` or a `joint`: one of them")),
+        (Some(_), None) => {
+            let back = match p.get("back") {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => return Err(bad(cmd, "`back` must be true or false")),
+            };
+            let v = s.doc.assembly.exploded.get(view_index(s, p, cmd)?).ok_or_else(|| bad(cmd, "view"))?;
+            (if back { 81 } else { 41 }, Motion::Explode(v.clone(), back))
+        }
+        (None, driven) => {
+            if driven.is_none() {
+                return Err(bad(cmd, "give a `study`, a `joint` with `from` and `to`, an exploded `view` or a `storyboard`"));
+            }
+            if p.get("back").is_some() {
+                return Err(bad(cmd, "`back` goes with an exploded `view`"));
+            }
+            let (default, given, plan) = motion_plan(s, p, cmd)?;
+            (default, Motion::Drive(given, plan))
+        }
+    })
+}
+
+/// `total` frames shared between clips in proportion to what each would take, at least 2 each.
+pub(super) fn share(defaults: &[usize], total: usize) -> Vec<usize> {
+    let wanted: usize = defaults.iter().sum::<usize>().max(1);
+    let mut counts: Vec<usize> = defaults.iter().map(|d| (d * total / wanted).max(2)).collect();
+    // Rounding down leaves frames over, and the floors can overshoot: the longest clips even it out.
+    let mut sum: usize = counts.iter().sum();
+    while sum != total {
+        match counts.iter_mut().max() {
+            Some(longest) if sum < total => {
+                *longest += 1;
+                sum += 1;
+            }
+            Some(longest) if *longest > 2 => {
+                *longest -= 1;
+                sum -= 1;
+            }
+            _ => break,
+        }
+    }
+    counts
 }
 
 /// Most frames of one animation.
@@ -75,41 +122,46 @@ pub(super) fn export_with(s: &Session, p: &Value, renderer: Option<&Renderer>) -
         Some(_) => Err(bad(cmd, format!("`{key}` must be true or false"))),
     };
     let guides = crate::view::Guides { grid: flag("grid", true)?, axes: flag("axes", true)? };
-    let (default, motion) = match (p.get("view"), p.get("study").or(p.get("joint"))) {
-        (Some(_), Some(_)) => return Err(bad(cmd, "give an exploded `view`, a `study` or a `joint`: one of them")),
-        (Some(_), None) => {
-            let back = flag("back", false)?;
-            let v = s.doc.assembly.exploded.get(view_index(s, p, cmd)?).ok_or_else(|| bad(cmd, "view"))?;
-            (if back { 81 } else { 41 }, Motion::Explode(explode_moves(s, v), back))
+    let clips = match p.get("storyboard") {
+        Some(_) if p.get("view").or(p.get("study")).or(p.get("joint")).is_some() => {
+            return Err(bad(cmd, "give a `storyboard`, an exploded `view`, a `study` or a `joint`: one of them"));
         }
-        (None, driven) => {
-            if driven.is_none() {
-                return Err(bad(cmd, "give a `study`, a `joint` with `from` and `to`, or an exploded `view`"));
-            }
-            if p.get("back").is_some() {
-                return Err(bad(cmd, "`back` goes with an exploded `view`"));
-            }
-            let (default, given, plan) = motion_plan(s, p, cmd)?;
-            (default, Motion::Drive(given, plan))
-        }
+        Some(_) => storyboard::clips(s, p, cmd)?.iter().map(|c| clip(s, c, cmd)).collect::<Result<Vec<_>>>()?,
+        None => vec![clip(s, p, cmd)?],
     };
-    let home = || match &motion {
-        // Framing both ends: every frame lies between the parts assembled and exploded.
-        Motion::Explode(moves, _) => {
-            let mut t = s.scratch();
-            t.pending_moves.clear();
-            let assembled = crate::view::bounds(&t);
-            t.pending_moves = exploded_at(moves, 1.0);
-            let mut c = crate::view::home_camera(&t);
-            c.fit(&assembled.union(&crate::view::bounds(&t)));
-            c
+    let home = || {
+        let views: Vec<&ExplodedView> = clips
+            .iter()
+            .filter_map(|(_, m)| match m {
+                Motion::Explode(v, _) => Some(v),
+                Motion::Drive(..) => None,
+            })
+            .collect();
+        if views.is_empty() {
+            return crate::view::home_camera(s);
         }
-        Motion::Drive(..) => crate::view::home_camera(s),
+        // Framing both ends: every frame lies between the parts assembled and exploded.
+        let mut t = s.scratch();
+        t.pending_moves.clear();
+        let mut whole = crate::view::bounds(&t);
+        for v in views {
+            t.pending_moves = exploded_at(&explode_moves(s, v), 1.0);
+            whole = whole.union(&crate::view::bounds(&t));
+        }
+        let mut c = crate::view::home_camera(&t);
+        c.fit(&whole);
+        c
     };
     let cam = camera(s, home, p.get("camera"), cmd)?;
     // At least 4 frames fit even at the largest size.
     let max = MAX_FRAMES.min(if gif { MAX_GIF_PIXELS } else { MAX_PNG_PIXELS } / (width as usize * height as usize));
-    let n = sample_count(p, default.min(max), max, cmd).map_err(|_| bad(cmd, format!("`samples` must be 2…{max} for {width} × {height} frames")))?;
+    let defaults: Vec<usize> = clips.iter().map(|(d, _)| *d).collect();
+    let total = sample_count(p, defaults.iter().sum::<usize>().min(max), max, cmd)
+        .map_err(|_| bad(cmd, format!("`samples` must be 2…{max} for {width} × {height} frames")))?;
+    if clips.len() * 2 > total {
+        return Err(bad(cmd, format!("{} clips need at least {} frames, and {total} fit at {width} × {height}", clips.len(), clips.len() * 2)));
+    }
+    let counts = share(&defaults, total);
     let renderer = renderer.ok_or_else(|| bad(cmd, "no renderer is installed to draw pictures in this process"))?;
     // A destination outside an agent's folders is refused before anything is drawn.
     let io = |e: std::io::Error| bad(cmd, format!("{path}: {e}"));
@@ -129,34 +181,44 @@ pub(super) fn export_with(s: &Session, p: &Value, renderer: Option<&Renderer>) -
     t.pending_moves.clear();
     let (mut frames, mut bytes, mut drawn_by) = (Vec::new(), 0, "");
     let mut stop = (Value::Null, Value::Null, Value::Null);
-    for k in 0..n {
-        match &motion {
-            Motion::Drive(given, plan) => {
-                let want = plan(&t, k, n);
-                let (r, _) = drive_with_contact(&mut t, &want, given)?;
-                if stop.0.is_null() && (r["stopped_by_loop"].is_object() || r["stopped_by_contact"].is_object()) {
-                    stop = (json!(k), r["stopped_by_loop"].clone(), r["stopped_by_contact"].clone());
+    let mut drawn = 0;
+    for ((_, motion), &n) in clips.iter().zip(&counts) {
+        // A clip follows on from the last: a view comes apart from where the joints were left.
+        let opening = match motion {
+            Motion::Explode(v, _) => explode_moves(&t, v),
+            Motion::Drive(..) => Vec::new(),
+        };
+        for k in 0..n {
+            match motion {
+                Motion::Drive(given, plan) => {
+                    t.pending_moves.clear();
+                    let want = plan(&t, k, n);
+                    let (r, _) = drive_with_contact(&mut t, &want, given)?;
+                    if stop.0.is_null() && (r["stopped_by_loop"].is_object() || r["stopped_by_contact"].is_object()) {
+                        stop = (json!(drawn), r["stopped_by_loop"].clone(), r["stopped_by_contact"].clone());
+                    }
+                }
+                // Shown as explode.show shows it, the way out at a steady pace (and back).
+                Motion::Explode(_, back) => {
+                    let u = k as f64 / (n - 1) as f64;
+                    t.pending_moves = exploded_at(&opening, if *back { 1.0 - (2.0 * u - 1.0).abs() } else { u });
                 }
             }
-            // Shown as explode.show shows it, the way out at a steady pace (and back).
-            Motion::Explode(moves, back) => {
-                let u = k as f64 / (n - 1) as f64;
-                t.pending_moves = exploded_at(moves, if *back { 1.0 - (2.0 * u - 1.0).abs() } else { u });
+            let scene = crate::view::scene_with_guides(&t, &cam, s.section, guides);
+            let picture = capture::rgba_with(Some(renderer), &scene, &cam, width, height).map_err(|e| bad(cmd, e))?;
+            drawn_by = picture.renderer;
+            drawn += 1;
+            if gif {
+                frames.push(picture.rgba);
+            } else {
+                let png = crate::render::png(width as usize, height as usize, picture.rgba).ok_or_else(|| bad(cmd, "PNG encoding failed"))?;
+                let file = frame_path(drawn);
+                solidcraft_io::vfs::write(&file, &png).map_err(|e| bad(cmd, format!("{file}: {e}")))?;
+                bytes += png.len();
             }
         }
-        let scene = crate::view::scene_with_guides(&t, &cam, s.section, guides);
-        let picture = capture::rgba_with(Some(renderer), &scene, &cam, width, height).map_err(|e| bad(cmd, e))?;
-        drawn_by = picture.renderer;
-        if gif {
-            frames.push(picture.rgba);
-        } else {
-            let png = crate::render::png(width as usize, height as usize, picture.rgba).ok_or_else(|| bad(cmd, "PNG encoding failed"))?;
-            let file = frame_path(k + 1);
-            solidcraft_io::vfs::write(&file, &png).map_err(|e| bad(cmd, format!("{file}: {e}")))?;
-            bytes += png.len();
-        }
     }
-    let mut out = json!({"path": path, "format": if gif { "gif" } else { "png" }, "frames": n, "width": width, "height": height});
+    let mut out = json!({"path": path, "format": if gif { "gif" } else { "png" }, "frames": drawn, "width": width, "height": height});
     if gif {
         // GIF counts in hundredths of a second, and viewers slow anything under 2 down.
         let delay = (100.0 / fps).round().clamp(2.0, 100.0) as u16;

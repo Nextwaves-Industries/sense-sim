@@ -5150,7 +5150,7 @@
   "ui.workspace_design_description": "Sketch, model, assemble and inspect",
   "ui.workspace_design_tabs": "Model · Surface · Assemble · Insert · Inspect · Manage · View",
   "ui.workspace_drawing_description": "2D drawings with views, dimensions and title blocks",
-  "ui.workspace_footer": "Every workspace works on the same design, history and selection; only the ribbon tabs change. The switcher is locked while a sketch or feature is being edited.",
+  "ui.workspace_footer": "Every workspace works on the same design. The switcher is locked while a sketch or feature is being edited.",
   "ui.workspace_layout": "Workspace layout",
   "ui.workspace_manufacture_description": "Slicing, toolpaths and setup",
   "ui.workspace_planned": "Planned",

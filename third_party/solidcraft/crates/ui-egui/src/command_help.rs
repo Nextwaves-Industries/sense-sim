@@ -263,6 +263,7 @@ pub const DOCUMENTED: &[&str] = &[
     "solid.thread",
     "solid.torus",
     "solid.web",
+    "storyboard.create",
     "surface.blend",
     "surface.boundary",
     "surface.extend",

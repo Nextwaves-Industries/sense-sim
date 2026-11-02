@@ -1441,7 +1441,11 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         if render {
             crate::ui_kit::StageBar::workspace(ui, ws, "ws_render", app.tr("ui.render"), app.tr("ui.ribbon_workspace"));
         } else {
-            let workspace_icon = if render { "ws_render" } else { "ws_design" };
+            let (workspace_icon, workspace_name) = match crate::workspace::current(app) {
+                "animation" => ("ws_animate", app.tr_label("Animation")),
+                "manufacture" => ("ws_manufacture", app.tr_label("Manufacture")),
+                _ => ("ws_design", app.tr("ui.design")),
+            };
             icons::paint_icon(
                 &painter,
                 Rect::from_center_size(pos2(ws.center().x, ws.top() + if labels { 39.0 } else { 25.0 }), vec2(30.0, 30.0)),
@@ -1451,7 +1455,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             ribbon_text(
                 ui,
                 pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }),
-                app.tr(if render { "ui.render" } else { "ui.design" }),
+                workspace_name,
                 t.font_button,
                 t.text,
                 true,

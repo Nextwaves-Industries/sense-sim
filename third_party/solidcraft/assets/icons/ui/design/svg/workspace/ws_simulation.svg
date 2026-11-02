@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Simulation workspace</title>
+  <circle cx="33.11" cy="32" r="11.5" fill="#b8c3cf" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M22.3 28.09A11.5 11.5 0 0 1 43.92 28.09Z" fill="#e2e8ef"/>
+  <circle cx="33.11" cy="32" r="11.5" fill="none" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M5.11 21C17.11 21 20.11 12 33.11 12C44.11 12 46.11 21 53.11 21" fill="none" stroke="#ffffff" stroke-width="6.45" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M5.11 21C17.11 21 20.11 12 33.11 12C44.11 12 46.11 21 53.11 21" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M62.11 21L53.11 25.5L53.11 16.5Z" fill="#236ead"/>
+  <path d="M5.11 43C17.11 43 20.11 52 33.11 52C44.11 52 46.11 43 53.11 43" fill="none" stroke="#ffffff" stroke-width="6.45" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M5.11 43C17.11 43 20.11 52 33.11 52C44.11 52 46.11 43 53.11 43" fill="none" stroke="#236ead" stroke-width="4.25" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M62.11 43L53.11 47.5L53.11 38.5Z" fill="#236ead"/>
+</svg>

@@ -408,18 +408,25 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::Toolbar => crate::toolbar_custom::toolbar_items(app),
         Target::HistoryControls => crate::timeline::transport_items(app),
         Target::Workspace => {
-            let rendering = crate::render_workspace::active(app);
-            let mut v = vec![
-                act("ui.workspace.design", "Design", "ws_design").with(json!({"workspace":"design"})).key(if rendering { "" } else { "current" }),
-                act("ui.workspace.render", "Render", "ws_render")
-                    .with(json!({"workspace":"render"}))
-                    .key(if rendering { "current" } else { "" })
-                    .on(app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()),
-            ];
-            for (w, icon) in [("Animation", "ws_animate"), ("Simulation", ""), ("Manufacture", ""), ("Drawing", "ws_drawing")] {
-                v.push(act("ui.workspace", w, icon).key("coming later").on(false));
-            }
-            v
+            let now = crate::workspace::current(app);
+            let free = crate::workspace::can_switch(app);
+            let row = |id: &str, label: &str, icon: &str, slug: &str| {
+                act(id, label, icon).with(json!({"workspace": slug})).key(if now == slug { "current" } else { "" })
+            };
+            let planned = |label: &str, icon: &str| act("ui.workspace", label, icon).key("coming later").on(false);
+            vec![
+                // The way back from Render, whatever Render has open.
+                row("ui.workspace.design", "Design", "ws_design", "design").on(free || matches!(now, "design" | "render")),
+                row("ui.workspace.render", "Render", "ws_render", "render").on(free),
+                row("ui.workspace.animation", "Animation", "ws_animate", "animation").on(free || now == "animation"),
+                if app.host_simulation {
+                    row("ui.workspace.simulation", "Simulation", "ws_simulation", "simulation").on(free)
+                } else {
+                    planned("Simulation", "ws_simulation")
+                },
+                row("ui.workspace.manufacture", "Manufacture", "ws_manufacture", "manufacture").on(free || now == "manufacture"),
+                planned("Drawing", "ws_drawing"),
+            ]
         }
         Target::Units => crate::prefs::UNITS
             .iter()
@@ -1699,9 +1706,14 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
             }
         }
         "ui.historyShowHidden" => app.tree.history_show_hidden = p["show"].as_bool().unwrap_or(false),
-        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" => {
+        "ui.workspace"
+        | "ui.workspace.design"
+        | "ui.workspace.render"
+        | "ui.workspace.animation"
+        | "ui.workspace.simulation"
+        | "ui.workspace.manufacture" => {
             if let Some(workspace) = p.get("workspace").and_then(Value::as_str)
-                && let Err(e) = crate::render_workspace::enter(app, workspace == "render")
+                && let Err(e) = crate::workspace::enter(app, workspace)
             {
                 app.set_status(e, true);
             }
@@ -3115,9 +3127,10 @@ mod workspace_menu_tests {
         assert!(rows.windows(2).all(|pair| pair[0].bottom() <= pair[1].top()));
         assert!(rows[0].top() > opener.bottom());
         assert_eq!(rows[0].width(), 450.0);
-        assert!(items(&h.app, &Target::Workspace).iter().skip(2).all(|item| !item.enabled));
-        h.step(&json!({"click":{"handle":"workspace:menu:animation"}})).unwrap();
-        assert!(!crate::render_workspace::active(&h.app));
+        // What isn't built stays inert: a click changes nothing and leaves the menu open.
+        assert!(!items(&h.app, &Target::Workspace).iter().find(|i| i.label == "Drawing").unwrap().enabled);
+        h.step(&json!({"click":{"handle":"workspace:menu:drawing"}})).unwrap();
+        assert_eq!(crate::workspace::current(&h.app), "design");
         assert!(h.app.viewport.context_menu.is_some());
         h.step(&json!({"click":{"handle":"workspace:menu:render"}})).unwrap();
         assert!(crate::render_workspace::active(&h.app));

@@ -8,11 +8,10 @@ bodies or on USD objects from the scene, from the Simulations panel or from the 
 
 | Where | What |
 |---|---|
-| `third_party/solidcraft` | SolidCraft, pinned to a commit, with one local change: `SolveApp::host_chrome` (see below). Path dependencies; its build scripts need the whole tree. |
+| `third_party/solidcraft` | SolidCraft, at upstream 176c22ac with two local changes: `SolveApp::host_chrome` and the workspace menu (see below). Plain source, not a submodule. Path dependencies; its build scripts need the whole tree. |
 | `src/design/` | The Design workspace. `host.rs` runs SolidCraft's UI off-screen with no Bevy in it; `mod.rs` shows the picture and passes input. |
 | `crates/sim-core/` | Solvers' input, output and running, and looking inside results (`post.rs`). No Bevy or egui, so its tests need no window. |
 | `src/sim/` | The dialog, panel, result view, scene objects as bodies (`scene_body.rs`), saving (`persist.rs`), the assistant's tools (`tools.rs`). |
-| `scripts/port-design-sim.ps1` | Brings all of this into a checkout. Safe to repeat. Run it on a copy of a moving tree first. |
 
 ## How the design workspace is hosted
 
@@ -28,7 +27,18 @@ application bar (name, version, Report a bug, its own tabs and menus), while the
 SolidCraft's `embedded` flag won't do, because it takes the ribbon too. Its File menu is still SolidCraft's,
 opened from the shell's design strip (`src/ui/design_bar.rs`), which replaces the scene tabs and has the
 design tabs, Save, Undo, Redo, Send to scene, settings and Licences. The strip and the workspace talk
-through `shell.rs`, kept in `scripts/design_shell.rs` until the port, as it needs the workbench shell's types.
+through `shell.rs`, as it needs the workbench shell's types.
+
+The workspace menu is the second local change. Before adding to a row, check what upstream has by then, since
+duplicating its work would fork both the code and users' files:
+
+| Row | What it does | Why it stops there, at upstream 176c22ac |
+|---|---|---|
+| Design, Render | SolidCraft's own | |
+| Animation | Motion tools, exploded views and storyboards | Upstream only has an RFC (#8330), so storyboards are built here. They live in design metadata under `com.sensesim.storyboards`, so the file format doesn't change. |
+| Simulation | `host_workspace_request` asks the shell for Sense Sim's Simulation workbench, through `Benches::request` | Upstream's #4356 is airflow only and stale |
+| Manufacture | Sending to a slicer, no toolpaths | The CAM PRs (#5751, #2881, #2620, #4158) are unmerged, and upstream hasn't assigned their format number |
+| Drawing | Shown as Planned | Upstream is building it on its `drawings` branch (#5349, #4895). Take theirs. |
 
 Keyboard input is taken from the host context before its UI runs (`steal_input`), so Ctrl+S in a
 design doesn't also save the layout.

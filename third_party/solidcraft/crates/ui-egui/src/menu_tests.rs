@@ -1235,13 +1235,120 @@ fn toolbar_pins_removes_reorders_and_keeps_its_layout() {
 }
 
 #[test]
-fn the_workspace_menu_lists_design_and_render_and_greys_future_workspaces() {
-    let app = sample_app();
+fn the_workspace_menu_offers_what_is_built_and_greys_the_rest() {
+    let mut app = sample_app();
     let items = context_menu::items(&app, &Target::Workspace);
-    assert!(find(&items, "Design").enabled);
-    assert!(find(&items, "Render").enabled);
-    assert!(!find(&items, "Animation").enabled);
+    for built in ["Design", "Render", "Animation", "Manufacture"] {
+        assert!(find(&items, built).enabled, "{built}");
+    }
+    for planned in ["Simulation", "Drawing"] {
+        assert!(!find(&items, planned).enabled, "{planned}");
+        assert_eq!(find(&items, planned).shortcut, "coming later", "{planned}");
+    }
     assert!(!items.iter().any(|i| i.label.contains("Generative")));
+
+    // Simulation is the host's to offer.
+    app.host_simulation = true;
+    let items = context_menu::items(&app, &Target::Workspace);
+    assert!(find(&items, "Simulation").enabled);
+    assert_eq!(find(&items, "Simulation").shortcut, "");
+}
+
+/// The menu's footer: nothing switches while a sketch is being edited, by the menu or by automation.
+#[test]
+fn a_sketch_locks_the_switcher() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.host_simulation = true;
+    h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+    h.frames(2);
+    let items = context_menu::items(&h.app, &Target::Workspace);
+    for locked in ["Render", "Animation", "Simulation", "Manufacture"] {
+        let row = find(&items, locked);
+        assert!(!row.enabled, "{locked}");
+        assert_ne!(row.shortcut, "coming later", "{locked} is only locked: it still reads as available");
+    }
+    for workspace in ["render", "animation", "simulation", "manufacture"] {
+        assert!(crate::workspace::enter(&mut h.app, workspace).is_err(), "{workspace}");
+    }
+    assert_eq!(h.app.host_workspace_request, None);
+    assert_eq!(crate::workspace::current(&h.app), "design");
+}
+
+/// Real clicks on the menu's rows: into each task workspace, across, and home to the tab it left.
+#[test]
+fn task_workspaces_change_the_ribbon_and_come_home_to_the_tab_they_left() {
+    let mut h = crate::scenario::Harness::new();
+    h.call("ui.resize", json!({"width": 1200, "height": 1000}));
+    h.app.ui.tab = "INSPECT".into();
+    let go = |h: &mut crate::scenario::Harness, slug: &str| {
+        h.step(&json!({"click": {"handle": "ribbon:workspace"}})).unwrap();
+        h.step(&json!({"click": {"handle": format!("workspace:menu:{slug}")}})).unwrap();
+        h.frames(2);
+    };
+
+    go(&mut h, "animation");
+    assert_eq!(crate::workspace::current(&h.app), "animation");
+    assert_eq!(crate::workspace::visible_tabs(&h.app), crate::workspace::ANIMATION_TABS);
+    assert!(crate::toolbar_custom::panel_lists(&h.app.ui.tab).iter().any(|(_, cmds, _)| cmds.iter().any(|c| c.id == "motion.study")));
+
+    go(&mut h, "manufacture");
+    assert_eq!(crate::workspace::current(&h.app), "manufacture");
+    assert_eq!(crate::workspace::visible_tabs(&h.app), crate::workspace::MANUFACTURE_TABS);
+    assert!(crate::toolbar_custom::panel_lists(&h.app.ui.tab).iter().any(|(_, cmds, _)| cmds.iter().any(|c| c.id == "file.send_to_slicer")));
+
+    go(&mut h, "design");
+    assert_eq!(crate::workspace::current(&h.app), "design");
+    assert_eq!(h.app.ui.tab, "INSPECT", "back on the tab it was opened from, after going across");
+
+    // Through Render and out the other side.
+    go(&mut h, "render");
+    assert_eq!(crate::workspace::current(&h.app), "render");
+    go(&mut h, "animation");
+    assert_eq!(crate::workspace::current(&h.app), "animation");
+    assert!(!crate::render_workspace::active(&h.app));
+    go(&mut h, "render");
+    assert_eq!(crate::workspace::current(&h.app), "render");
+    go(&mut h, "design");
+    assert_eq!(crate::workspace::current(&h.app), "design");
+}
+
+/// A sketch opened from a task workspace has the ribbon while it lasts, and gives it back.
+#[test]
+fn finishing_a_sketch_returns_to_the_task_workspace() {
+    let mut h = crate::scenario::Harness::new();
+    crate::workspace::enter(&mut h.app, "animation").unwrap();
+    h.frames(2);
+    h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+    h.frames(2);
+    assert_eq!(h.app.ui.tab, "SKETCH");
+    h.app.run("sketch.finish", json!({})).unwrap();
+    h.frames(2);
+    assert_eq!(crate::workspace::current(&h.app), "animation");
+}
+
+/// Simulation hands over: nothing changes here but the request, which the host takes.
+#[test]
+fn the_simulation_row_asks_the_host() {
+    let mut h = crate::scenario::Harness::new();
+    h.call("ui.resize", json!({"width": 1200, "height": 1000}));
+    assert!(crate::workspace::enter(&mut h.app, "simulation").is_err(), "no host, no simulation");
+
+    h.app.host_simulation = true;
+    h.frames(1);
+    h.step(&json!({"click": {"handle": "ribbon:workspace"}})).unwrap();
+    h.step(&json!({"click": {"handle": "workspace:menu:simulation"}})).unwrap();
+    h.frames(1);
+    assert_eq!(h.app.host_workspace_request.take(), Some("simulation"));
+    assert_eq!(crate::workspace::current(&h.app), "design");
+}
+
+/// Automation reaches the same switch, and hears where it landed.
+#[test]
+fn the_control_channel_switches_task_workspaces() {
+    let mut h = crate::scenario::Harness::new();
+    assert_eq!(h.call("ui.workspace", json!({"workspace": "manufacture"}))["result"]["workspace"], "manufacture");
+    assert_eq!(h.call("ui.workspace", json!({}))["result"]["workspace"], "manufacture");
+    assert_eq!(h.call("ui.workspace", json!({"workspace": "design"}))["result"]["workspace"], "design");
 }
 
 /// A right-click on a construction plane's browser row opens its menu, like a body's or a

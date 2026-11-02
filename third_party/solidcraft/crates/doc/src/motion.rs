@@ -83,6 +83,32 @@ pub struct ExplodedView {
     pub moves: Vec<(u64, Vec3)>,
 }
 
+/// Where storyboards live: a key of the host application's in the design's metadata. A design with
+/// one is an ordinary file of its format, and any SolidCraft opens it and keeps the key.
+pub const STORYBOARDS_KEY: &str = "com.sensesim.storyboards";
+
+/// One clip of a storyboard, by the stable id of the study or view it plays.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StoryboardClip {
+    /// A motion study, played from start to end.
+    Study { study: u64 },
+    /// An exploded view coming apart, and back together when `back`.
+    View { view: u64, back: bool },
+}
+
+/// Clips in the order they are shown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Storyboard {
+    pub name: String,
+    pub clips: Vec<StoryboardClip>,
+}
+
+/// The design's storyboards. Anything else under the key (a hostile or foreign file) reads as none.
+pub fn storyboards(metadata: &crate::Metadata) -> Vec<Storyboard> {
+    metadata.0.get(STORYBOARDS_KEY).and_then(|v| v.get("boards")).and_then(|b| serde_json::from_value(b.clone()).ok()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

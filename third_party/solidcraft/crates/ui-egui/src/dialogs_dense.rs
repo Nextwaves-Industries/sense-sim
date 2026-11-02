@@ -11,6 +11,7 @@ pub(super) fn command(kind: &Kind) -> Option<&'static str> {
             crate::dialogs_motion::Mo::ContactSet { .. } => "contact.create",
             crate::dialogs_motion::Mo::MotionStudy { .. } => "motion.study",
             crate::dialogs_motion::Mo::Explode { .. } => "explode.create",
+            crate::dialogs_motion::Mo::Storyboard { .. } => "storyboard.create",
             crate::dialogs_motion::Mo::Configurations { .. } => "config.table",
         }),
         Kind::Part(_) => Some("parts.insert"),

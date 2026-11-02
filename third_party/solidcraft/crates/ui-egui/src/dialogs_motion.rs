@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use solidcraft_engine::Session;
 use solidcraft_engine::doc::Mat;
 use solidcraft_engine::doc::joints::JointKind;
+use solidcraft_engine::doc::motion::{StoryboardClip, storyboards};
 
 use crate::SolveApp;
 use crate::dialogs::{Dialog, Kind, combo, form_row};
@@ -69,6 +70,19 @@ pub enum Mo {
         saved: Option<BTreeMap<u64, Mat>>,
         error: Option<String>,
     },
+    Storyboard {
+        name: String,
+        /// Editing this storyboard (its name).
+        board: Option<String>,
+        clips: Vec<StoryboardClip>,
+        /// How far through the clips, in frames.
+        at: f64,
+        playing: bool,
+        /// The frame the shown pose is for, and the clips it was worked out from.
+        shown: Option<(u64, u64)>,
+        saved: Option<BTreeMap<u64, Mat>>,
+        error: Option<String>,
+    },
     Configurations {
         new_row: String,
         error: Option<String>,
@@ -83,6 +97,8 @@ impl Mo {
             Mo::MotionStudy { study: Some(_), .. } => "EDIT MOTION STUDY",
             Mo::MotionStudy { .. } => "MOTION STUDY",
             Mo::Explode { .. } => "EXPLODED VIEW",
+            Mo::Storyboard { board: Some(_), .. } => "EDIT STORYBOARD",
+            Mo::Storyboard { .. } => "STORYBOARD",
             Mo::Configurations { .. } => "CONFIGURATIONS",
         }
     }
@@ -133,6 +149,20 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
             ],
         ),
         "explode.create" => (Mo::Explode { name: n("Exploded View", "explode.list"), scale: 1.0, shown: None, saved: None, error: None }, vec![]),
+        "storyboard.create" => (
+            Mo::Storyboard {
+                name: n("Storyboard", "storyboard.list"),
+                board: None,
+                // Everything there is, in the order it was made: the usual start.
+                clips: clip_options(&app.session).into_iter().map(|(c, _)| c).filter(|c| !matches!(c, StoryboardClip::View { back: true, .. })).collect(),
+                at: 0.0,
+                playing: false,
+                shown: None,
+                saved: None,
+                error: None,
+            },
+            Vec::new(),
+        ),
         "config.table" | "config.configure" => (Mo::Configurations { new_row: String::new(), error: None, rule_editor: Default::default() }, vec![]),
         _ => return None,
     };
@@ -374,6 +404,7 @@ pub fn closed(app: &mut SolveApp, d: &mut Dialog, applied: bool) {
         Mo::MotionStudy { saved, .. } => restore(app, saved),
         // OK shows the new view itself (explode.show).
         Mo::Explode { saved, .. } if !applied => restore(app, saved),
+        Mo::Storyboard { saved, .. } => restore(app, saved),
         _ => {}
     }
 }
@@ -398,12 +429,13 @@ fn study_pose(app: &SolveApp, params: &Value, step: u32) -> Result<BTreeMap<u64,
     Ok(moved(&app.session, &sc))
 }
 
-/// Save the study being edited as an animated GIF, seen from the viewport's camera. Drawn on a
-/// scratch copy, so the dialog's keys need not be saved first and the design is not changed.
-fn export_animation(app: &mut SolveApp, params: Value, name: &str) {
+/// Save what the dialog is editing as an animated GIF, seen from the viewport's camera: `make` makes
+/// it on a scratch copy and replies with its name for the exporter under `what`. So the dialog's
+/// work need not be saved first, and the design is not changed.
+fn export_animation(app: &mut SolveApp, make: &'static str, what: &'static str, params: Value, name: &str, untitled: &str) {
     // The view as the viewport shows it: its camera, and its grid and axes on or off.
     let (camera, guides) = (app.cam, crate::control::window_guides(app));
-    let file = format!("{}.gif", Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or("Motion Study"));
+    let file = format!("{}.gif", Some(name.trim()).filter(|n| !n.is_empty()).unwrap_or(untitled));
     app.pick_save(&file, &["gif"], move |app, path| {
         let Some(mut path) = path else { return };
         // A name typed without the extension is still a GIF (not a folder of frames).
@@ -413,11 +445,10 @@ fn export_animation(app: &mut SolveApp, params: Value, name: &str) {
         let mut sc = app.session.scratch();
         // Cut as the viewport is (a copy leaves the section out).
         sc.section = app.session.section;
-        let made = sc.execute("motion.study", &params).and_then(|r| {
-            sc.execute(
-                "motion.export_animation",
-                &json!({"study": r["study"], "path": path, "camera": camera, "grid": guides.grid, "axes": guides.axes}),
-            )
+        let made = sc.execute(make, &params).and_then(|r| {
+            let mut export = json!({"path": path, "camera": camera, "grid": guides.grid, "axes": guides.axes});
+            export[what] = r[what].clone();
+            sc.execute("motion.export_animation", &export)
         });
         match made {
             Ok(_) => app.set_status(crate::i18n::format("ui.saved_to", &[("path", &path)]), false),
@@ -438,6 +469,198 @@ fn explode_pose(app: &SolveApp, scale: f64) -> Result<BTreeMap<u64, Mat>, String
     sc.execute("explode.create", &json!({"name": "__preview", "scale": scale})).map_err(|e| e.to_string())?;
     sc.execute("explode.show", &json!({ "view": "__preview" })).map_err(|e| e.to_string())?;
     Ok(sc.pending_moves.clone())
+}
+
+// ---- storyboards ----
+
+/// What a storyboard can play, with what the dialog calls it.
+fn clip_options(s: &Session) -> Vec<(StoryboardClip, String)> {
+    let a = &s.doc.assembly;
+    let label = |id: &str, name: &str| crate::i18n::format(id, &[("name", name)]);
+    let studies = a.studies.iter().map(|m| (StoryboardClip::Study { study: m.id }, label("storyboard.clip_study", &m.name)));
+    let views = a.exploded.iter().flat_map(|v| {
+        [
+            (StoryboardClip::View { view: v.id, back: false }, label("storyboard.clip_view", &v.name)),
+            (StoryboardClip::View { view: v.id, back: true }, label("storyboard.clip_view_back", &v.name)),
+        ]
+    });
+    studies.chain(views).collect()
+}
+
+/// The frames a clip takes, as `motion.export_animation` counts them.
+fn clip_frames(s: &Session, c: &StoryboardClip) -> usize {
+    match c {
+        StoryboardClip::Study { study } => s.doc.assembly.studies.iter().find(|m| m.id == *study).map_or(2, |m| m.steps as usize + 1),
+        StoryboardClip::View { back: true, .. } => 81,
+        StoryboardClip::View { .. } => 41,
+    }
+}
+
+/// The pose `at` frames in, on a scratch copy. The clips before leave the joints where they ended,
+/// as they do in the export.
+fn storyboard_pose(app: &SolveApp, clips: &[StoryboardClip], at: usize) -> Result<BTreeMap<u64, Mat>, String> {
+    let mut sc = app.session.scratch();
+    sc.pending_moves.clear();
+    let mut left = at;
+    for c in clips {
+        let frames = clip_frames(&sc, c).max(2);
+        let u = left.min(frames - 1) as f64 / (frames - 1) as f64;
+        match c {
+            StoryboardClip::Study { study } => {
+                let steps = sc.doc.assembly.studies.iter().find(|m| m.id == *study).map_or(0, |m| m.steps);
+                sc.pending_moves.clear();
+                sc.execute("motion.play", &json!({"study": study, "step": u * f64::from(steps)})).map_err(|e| e.to_string())?;
+            }
+            StoryboardClip::View { view, back } => {
+                let amount = if *back { 1.0 - (2.0 * u - 1.0).abs() } else { u };
+                sc.execute("explode.show", &json!({"view": view, "amount": amount})).map_err(|e| e.to_string())?;
+            }
+        }
+        if left < frames {
+            break;
+        }
+        left -= frames;
+    }
+    let mut out = sc.pending_moves.clone();
+    for o in &sc.doc.occurrences {
+        let was = app.session.doc.occurrences.iter().find(|b| b.id == o.id).map(|b| b.transform);
+        if was != Some(o.transform) {
+            out.entry(o.id).or_insert(o.transform);
+        }
+    }
+    Ok(out)
+}
+
+fn storyboard_params(name: &str, board: Option<&str>, clips: &[StoryboardClip]) -> Value {
+    let mut p = json!({"name": name, "clips": clips});
+    if let Some(board) = board {
+        p["storyboard"] = json!(board);
+    }
+    p
+}
+
+fn storyboard_rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, t: Tokens) {
+    let Mo::Storyboard { name, board, clips, at, playing, shown, saved, error } = k else { return };
+    let boards = storyboards(&app.session.doc.metadata);
+    if !boards.is_empty() {
+        let labels: Vec<&str> = std::iter::once("New storyboard").chain(boards.iter().map(|b| b.name.as_str())).collect();
+        let was = board.as_ref().and_then(|n| boards.iter().position(|b| &b.name == n)).map_or(0, |i| i + 1);
+        let mut pick = was;
+        choice_row(ui, "Storyboard", "sb_board", &mut pick, &labels);
+        if pick != was {
+            *board = pick.checked_sub(1).and_then(|i| boards.get(i)).map(|b| {
+                (*name, *clips, *at, *playing) = (b.name.clone(), b.clips.clone(), 0.0, false);
+                b.name.clone()
+            });
+        }
+    }
+    text_row(ui, "Name", name, "");
+    let options = clip_options(&app.session);
+    let labels: Vec<&str> = options.iter().map(|(_, l)| l.as_str()).collect();
+    let (mut remove, mut swap) = (None, None);
+    let count = clips.len();
+    for (i, clip) in clips.iter_mut().enumerate() {
+        let mut pos = options.iter().position(|(c, _)| c == clip).unwrap_or(0);
+        form_row(ui, &crate::i18n::format("storyboard.clip_name", &[("number", &(i + 1).to_string())]), |ui| {
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - 3.0 * (t.control_height + t.space_4)).max(0.0);
+                ui.allocate_ui(vec2(width, t.control_height), |ui| combo(ui, &format!("sb_clip{i}"), &labels, &mut pos));
+                let small = |ui: &mut egui::Ui, text: &str, tip: &str| {
+                    crate::ui_kit::button(ui, crate::i18n::tr_label(text), crate::ui_kit::Button::Small).on_hover_text(crate::i18n::tr_label(tip)).clicked()
+                };
+                if small(ui, "↑", "Move up") && i > 0 {
+                    swap = Some((i - 1, i));
+                }
+                if small(ui, "↓", "Move down") && i + 1 < count {
+                    swap = Some((i, i + 1));
+                }
+                if small(ui, "×", "Remove this clip") {
+                    remove = Some(i);
+                }
+            });
+        });
+        if let Some((c, _)) = options.get(pos) {
+            *clip = c.clone();
+        }
+    }
+    if let Some((a, b)) = swap {
+        clips.swap(a, b);
+    }
+    if let Some(i) = remove {
+        clips.remove(i);
+    }
+    let last = clips.iter().map(|c| clip_frames(&app.session, c)).sum::<usize>().saturating_sub(1) as u32;
+    *at = at.min(f64::from(last));
+    crate::ui_kit::section(ui, "storyboard_playback", "Playback", true, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            if transport(ui, Transport::Start, "To the start").clicked() {
+                (*at, *playing) = (0.0, false);
+            }
+            let (what, tip) = if *playing { (Transport::Stop, "Stop") } else { (Transport::Play, "Play") };
+            if transport(ui, what, tip).clicked() {
+                // Play from the start again when at the end.
+                if !*playing && at.round() >= f64::from(last) {
+                    *at = 0.0;
+                }
+                *playing = !*playing;
+            }
+            if transport(ui, Transport::End, "To the end").clicked() {
+                (*at, *playing) = (f64::from(last), false);
+            }
+        });
+    });
+    form_row(ui, "Frame", |ui| {
+        let style = crate::ui_kit::Slider { show_value: false, integer: true, ..Default::default() };
+        if crate::ui_kit::slider(ui, at, 0.0..=f64::from(last), style).dragged() {
+            *playing = false;
+        }
+    });
+    crate::ui_kit::caption(ui, "Frame", &format!("{} / {last}", at.round() as u32));
+    if *playing {
+        let dt = f64::from(ui.input(|i| i.stable_dt).min(0.1));
+        (*at, *playing) = advance(*at, dt * STEPS_PER_S, last, false);
+        ui.ctx().request_repaint();
+    }
+    let mut export = false;
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            if crate::ui_kit::button(ui, crate::i18n::tr_label("Add Clip"), crate::ui_kit::Button::Normal).clicked()
+                && let Some((c, _)) = options.first()
+            {
+                clips.push(c.clone());
+            }
+            export = crate::ui_kit::button(ui, crate::i18n::tr_label("Export Animation…"), crate::ui_kit::Button::Normal)
+                .on_hover_text(crate::i18n::tr_label("Save the storyboard as an animated GIF, seen as the viewport shows it"))
+                .clicked();
+        });
+    });
+    if export {
+        let params = storyboard_params(name, board.as_deref(), clips);
+        export_animation(app, "storyboard.create", "storyboard", params, name, "Storyboard");
+    }
+    // Show the pose at this frame (again when the frame or the clips change).
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        clips.hash(&mut h);
+        h.finish()
+    };
+    let now = at.round() as u64;
+    if *shown != Some((now, key)) {
+        match storyboard_pose(app, clips, now as usize) {
+            Ok(m) => {
+                display(app, saved, m);
+                *error = None;
+            }
+            Err(e) => *error = Some(e),
+        }
+        *shown = Some((now, key));
+    }
+    if let Some(e) = error {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(crate::i18n::tr_label(e)).color(t.error));
+        });
+    }
 }
 
 // ---- rows ----
@@ -534,6 +757,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, inputs: &mut [Sel
                 });
             }
         }
+        Mo::Storyboard { .. } => storyboard_rows(app, ui, k, t),
         Mo::Configurations { new_row, error, rule_editor } => configurations_rows(app, ui, new_row, error, rule_editor),
     }
     let _ = inputs;
@@ -715,7 +939,7 @@ fn motion_study_rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Mo, inputs: 
     let params = study_params(&app.session, name, study.as_deref(), steps, tracks);
     if export {
         match &params {
-            Ok(p) => export_animation(app, p.clone(), name),
+            Ok(p) => export_animation(app, "motion.study", "study", p.clone(), name, "Motion Study"),
             Err(e) => *error = Some(e.clone()),
         }
     }
@@ -799,6 +1023,7 @@ pub fn commands(app: &SolveApp, k: &Mo, inputs: &[SelInput]) -> Result<Vec<(Stri
         Mo::Explode { name, scale, .. } => {
             vec![("explode.create".into(), json!({"name": name, "scale": scale})), ("explode.show".into(), json!({ "view": name }))]
         }
+        Mo::Storyboard { name, board, clips, .. } => vec![("storyboard.create".into(), storyboard_params(name, board.as_deref(), clips))],
         Mo::Configurations { .. } => Vec::new(),
     })
 }
@@ -1238,6 +1463,117 @@ mod tests {
         assert!(gif.starts_with(b"GIF89a"), "{:?}", h.app.status);
         assert!(h.app.status.as_ref().is_some_and(|s| !s.2), "{:?}", h.app.status);
         assert!(h.app.session.doc.assembly.studies.is_empty(), "exporting saves no study");
+    }
+
+    /// Two components on a revolute joint, with a study and an exploded view to play.
+    fn storyboard_harness() -> crate::scenario::Harness {
+        let mut h = crate::scenario::Harness::new();
+        for (name, x) in [("A", 0), ("B", 30)] {
+            h.app.run("component.activate", json!({"component": "root"})).unwrap();
+            h.app.run("component.create", json!({ "name": name })).unwrap();
+            h.app.run("solid.box", json!({"length": 20, "width": 20, "height": 10, "corner": [x, 0, 0]})).unwrap();
+        }
+        let a = json!({"occurrence": "A:1", "face": [10, 10, 10]});
+        h.app.run("joint.create", json!({"type": "revolute", "a": a, "b": {"occurrence": "B:1", "face": [40, 10, 0]}})).unwrap();
+        let joint = h.app.session.doc.assembly.joints[0].id;
+        h.app.run("motion.study", json!({"name": "Swing", "steps": 4, "keys": [{"joint": joint, "points": [[0, 0], [4, 90]]}]})).unwrap();
+        h.app.run("explode.create", json!({"name": "Apart", "scale": 1.0})).unwrap();
+        h.app.run("explode.show", json!({"view": null})).unwrap();
+        h
+    }
+
+    /// A new storyboard starts with all there is to play. OK saves it, and it opens again to edit.
+    #[test]
+    fn the_storyboard_dialog_makes_one_and_opens_it_again() {
+        let mut h = storyboard_harness();
+        h.app.start("storyboard.create");
+        h.frames(3);
+        let Some(Kind::Motion(Mo::Storyboard { name, clips, .. })) = h.app.dialog.as_ref().map(|d| &d.kind) else {
+            panic!("no Storyboard dialog");
+        };
+        assert_eq!(name, "Storyboard1");
+        assert_eq!(clips.len(), 2, "the study and the view: {clips:?}");
+        h.step(&json!({"click": {"handle": "dialog:OK"}})).unwrap();
+        h.frames(3);
+        assert!(h.app.dialog.is_none(), "{:?}", h.app.status);
+        let boards = storyboards(&h.app.session.doc.metadata);
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].name, "Storyboard1");
+        assert_eq!(boards[0].clips.len(), 2);
+        assert!(h.app.session.pending_moves.is_empty(), "OK leaves no pose on show");
+
+        // It opens again to edit, under its own name, and saving keeps there being one.
+        h.app.start("storyboard.create");
+        h.frames(2);
+        let Some(Kind::Motion(Mo::Storyboard { name, board, clips, .. })) = h.app.dialog.as_mut().map(|d| &mut d.kind) else {
+            panic!("no Storyboard dialog");
+        };
+        assert_eq!(name, "Storyboard2", "a new one, until one is picked");
+        (*name, *board) = ("Storyboard1".into(), Some("Storyboard1".into()));
+        clips.truncate(1);
+        h.frames(2);
+        h.step(&json!({"click": {"handle": "dialog:OK"}})).unwrap();
+        h.frames(3);
+        let boards = storyboards(&h.app.session.doc.metadata);
+        assert_eq!((boards.len(), boards[0].clips.len()), (1, 1), "{boards:?}");
+    }
+
+    /// Export Animation draws the storyboard the dialog shows: it needn't be saved first, and isn't.
+    #[test]
+    fn export_animation_saves_the_dialogs_storyboard_as_a_gif() {
+        #[cfg(not(target_arch = "wasm32"))]
+        if solidcraft_engine::capture::installed().is_none() {
+            solidcraft_engine::capture::install(std::sync::Arc::new(|scene, cam, w, h| {
+                let (rgba, renderer) = solidcraft_gpu::capture::headless_rgba(scene, cam, w, h)?;
+                Ok(solidcraft_engine::capture::Picture { rgba, renderer })
+            }));
+        }
+        let mut h = storyboard_harness();
+        h.app.start("storyboard.create");
+        h.frames(3);
+        let dir = h.dir.clone();
+        h.app.services.pick_save = Some(Box::new(move |name, extensions| {
+            assert_eq!((name, extensions), ("Storyboard1.gif", &["gif"][..]));
+            Box::pin(std::future::ready(Some(dir.join("show").to_string_lossy().into_owned())))
+        }));
+        h.step(&json!({"widget": "Export Animation…"})).unwrap();
+        h.frames(3);
+        let gif = std::fs::read(h.dir.join("show.gif")).unwrap();
+        assert!(gif.starts_with(b"GIF89a"), "{:?}", h.app.status);
+        assert!(h.app.status.as_ref().is_some_and(|s| !s.2), "{:?}", h.app.status);
+        assert!(storyboards(&h.app.session.doc.metadata).is_empty(), "exporting saves no storyboard");
+    }
+
+    /// Showing a storyboard changes what's shown and not the design, and closing puts it back.
+    #[test]
+    fn the_storyboard_dialog_only_shows_its_poses() {
+        let mut h = storyboard_harness();
+        let placed: Vec<_> = h.app.session.doc.occurrences.iter().map(|o| o.transform).collect();
+        h.app.start("storyboard.create");
+        h.frames(2);
+        // The last frame of the view: the study has run and the parts are apart.
+        if let Some(Kind::Motion(Mo::Storyboard { at, .. })) = h.app.dialog.as_mut().map(|d| &mut d.kind) {
+            *at = 45.0;
+        }
+        h.frames(3);
+        assert!(!h.app.session.pending_moves.is_empty(), "the pose is on show");
+        let after: Vec<_> = h.app.session.doc.occurrences.iter().map(|o| o.transform).collect();
+        assert_eq!(placed, after, "the design keeps its placements");
+        crate::dialogs::cancel(&mut h.app);
+        h.frames(2);
+        assert!(h.app.session.pending_moves.is_empty(), "closing takes the pose away");
+    }
+
+    /// The frames the dialog counts for a clip are the exporter's, so its slider covers the export.
+    #[test]
+    fn storyboard_frames_match_the_exporter() {
+        let h = storyboard_harness();
+        let s = &h.app.session;
+        let study = s.doc.assembly.studies[0].id;
+        let view = s.doc.assembly.exploded[0].id;
+        assert_eq!(clip_frames(s, &StoryboardClip::Study { study }), 5);
+        assert_eq!(clip_frames(s, &StoryboardClip::View { view, back: false }), 41);
+        assert_eq!(clip_frames(s, &StoryboardClip::View { view, back: true }), 81);
     }
 
     #[test]

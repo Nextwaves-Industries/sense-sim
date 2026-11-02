@@ -365,13 +365,14 @@ pub(crate) fn workspace_menu(ui: &mut egui::Ui, items: &[Item], key_row: Option<
                 let (slug, description, tabs) = match item.label.as_str() {
                     "Design" => ("design", "ui.workspace_design_description", Some("ui.workspace_design_tabs")),
                     "Render" => ("render", "ui.workspace_render_description", Some("ui.workspace_render_tabs")),
-                    "Animation" => ("animation", "ui.workspace_animation_description", None),
-                    "Simulation" => ("simulation", "ui.workspace_simulation_description", None),
-                    "Manufacture" => ("manufacture", "ui.workspace_manufacture_description", None),
+                    "Animation" => ("animation", "ui.workspace_animation_description", Some("ui.workspace_animation_tabs")),
+                    "Simulation" => ("simulation", "ui.workspace_simulation_description", Some("ui.workspace_simulation_tabs")),
+                    "Manufacture" => ("manufacture", "ui.workspace_manufacture_slicing_description", Some("ui.workspace_manufacture_tabs")),
                     "Drawing" => ("drawing", "ui.workspace_drawing_description", None),
                     _ => continue,
                 };
-                let planned = tabs.is_none();
+                // A row that's only locked for now still looks available.
+                let planned = item.shortcut == "coming later";
                 let current = item.shortcut == "current";
                 let (accent, soft) = if !planned && slug == "render" {
                     (t.render_fill, t.render_soft)
@@ -438,7 +439,7 @@ pub(crate) fn workspace_menu(ui: &mut egui::Ui, items: &[Item], key_row: Option<
                     ui.painter().galley(pos2(x, y), galley, text);
                 };
                 line(crate::i18n::tr(description).to_string(), r.top() + 29.0);
-                if let Some(tabs) = tabs {
+                if let Some(tabs) = tabs.filter(|_| !planned) {
                     // Translate each tab even when this composed message falls back to English.
                     let labels = crate::i18n::tr(tabs).split('·').map(|label| crate::i18n::tr_label(label.trim())).collect::<Vec<_>>().join(" · ");
                     line(labels, r.top() + 47.0);

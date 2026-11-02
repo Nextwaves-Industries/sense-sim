@@ -9,8 +9,84 @@ pub const RENDER_TABS: &[&str] = &["RENDER"];
 pub fn render_tab(tab: &str) -> bool {
     RENDER_TABS.contains(&tab)
 }
+/// Animation's tabs.
+pub const ANIMATION_TABS: &[&str] = &["ANIMATE"];
+/// Manufacture's tabs: the way out to a slicer. There are no toolpaths to offer yet.
+pub const MANUFACTURE_TABS: &[&str] = &["PRINT"];
+
+/// The tab belongs to a workspace that only changes the ribbon.
+fn task_tab(tab: &str) -> bool {
+    ANIMATION_TABS.contains(&tab) || MANUFACTURE_TABS.contains(&tab)
+}
+
 pub fn tab_label(tab: &str) -> &str {
     tab.strip_prefix("RENDER ").unwrap_or(tab)
+}
+
+/// The workspace in front: `design`, `render`, `animation` or `manufacture`. A sketch opened from
+/// a task workspace counts as Design until it is finished, when the ribbon goes back. A host's
+/// workspace is never in front here, since it takes the window away from this UI.
+pub fn current(app: &crate::SolveApp) -> &'static str {
+    let tab = app.ui.tab.as_str();
+    if crate::render_workspace::active(app) {
+        "render"
+    } else if ANIMATION_TABS.contains(&tab) {
+        "animation"
+    } else if MANUFACTURE_TABS.contains(&tab) {
+        "manufacture"
+    } else {
+        "design"
+    }
+}
+
+/// The switcher is locked while a sketch or feature is being edited.
+pub fn can_switch(app: &crate::SolveApp) -> bool {
+    app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()
+}
+
+fn check_can_switch(app: &crate::SolveApp) -> Result<(), String> {
+    if can_switch(app) { Ok(()) } else { Err(crate::i18n::tr("ui.workspace_finish_first").into()) }
+}
+
+/// Back from a task workspace to the Design tab it was opened from.
+fn leave_task(app: &mut crate::SolveApp) -> Result<(), String> {
+    if task_tab(&app.ui.tab) {
+        check_can_switch(app)?;
+        app.ui.tab = app.ui.workspace_return_tab.take().unwrap_or_else(|| "MODEL".into());
+    }
+    Ok(())
+}
+
+/// Workspace switching has one lifecycle for menus and automation.
+pub fn enter(app: &mut crate::SolveApp, workspace: &str) -> Result<(), String> {
+    let first_tab = match workspace {
+        "design" if task_tab(&app.ui.tab) => return leave_task(app),
+        "design" | "render" => {
+            leave_task(app)?;
+            return crate::render_workspace::enter(app, workspace == "render");
+        }
+        "simulation" if app.host_simulation => {
+            check_can_switch(app)?;
+            app.host_workspace_request = Some("simulation");
+            return Ok(());
+        }
+        "animation" => "ANIMATE",
+        "manufacture" => "PRINT",
+        _ => return Err("workspace must be design, render, animation or manufacture".into()),
+    };
+    if current(app) == workspace {
+        return Ok(());
+    }
+    check_can_switch(app)?;
+    if crate::render_workspace::active(app) {
+        crate::render_workspace::enter(app, false)?;
+    }
+    if !task_tab(&app.ui.tab) {
+        app.ui.workspace_return_tab = Some(app.ui.tab.clone());
+    }
+    app.ui.tab = first_tab.into();
+    app.viewport.hover = None;
+    Ok(())
 }
 
 /// A tab's registry name in normal word casing: "SHEET METAL" → "Sheet Metal".
@@ -324,6 +400,12 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "WELDMENTS", panel: "SKETCH", promoted: 1, ids: &["sketch.create"] },
     Section { tab: "WELDMENTS", panel: "CREATE", promoted: 1, ids: &["frame.member"] },
     Section { tab: "WELDMENTS", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
+    // The task workspaces, last: a command's home is the first section listing it, and these only
+    // show tools that already live on a Design tab.
+    Section { tab: "ANIMATE", panel: "MOTION", promoted: 4, ids: &["joint.drive", "joint.motion_link", "motion.study", "motion.trace"] },
+    Section { tab: "ANIMATE", panel: "EXPLODE", promoted: 1, ids: &["explode.create"] },
+    Section { tab: "ANIMATE", panel: "SEQUENCE", promoted: 1, ids: &["storyboard.create"] },
+    Section { tab: "PRINT", panel: "OUTPUT", promoted: 2, ids: &["file.send_to_slicer", "file.save_mesh"] },
 ];
 
 // Migration data only: Render commands remain registered, but have no live ribbon sections.
@@ -383,6 +465,9 @@ const LEGACY_RENDER_SECTIONS: &[Section] = &[
 /// Compact source labels for painted big buttons only. Menus, search and tooltips
 /// retain the engine label. Route these through `tr_label`, like other UI labels.
 pub const RIBBON_LABELS: &[(&str, &str)] = &[
+    ("explode.create", "Explode"),
+    ("file.send_to_slicer", "Slicer"),
+    ("storyboard.create", "Storyboard"),
     ("render.batch", "All Shots"),
     ("render.cancel", "Cancel"),
     ("render.export", "Export Image"),
@@ -669,6 +754,12 @@ pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
     if crate::render_workspace::active(app) {
         return Vec::new();
     }
+    if ANIMATION_TABS.contains(&app.ui.tab.as_str()) {
+        return ANIMATION_TABS.to_vec();
+    }
+    if MANUFACTURE_TABS.contains(&app.ui.tab.as_str()) {
+        return MANUFACTURE_TABS.to_vec();
+    }
     let mut tabs: Vec<_> = TABS.iter().copied().filter(|tab| tab_turned_on(app, tab)).collect();
     if app.preferences.sketch_tab_always {
         // Right after MODEL, whether a sketch is open or not (#7904).
@@ -706,6 +797,11 @@ pub fn sync_context(app: &mut crate::SolveApp) {
     if crate::render_workspace::active(app) {
         return;
     }
+    // Picking a sheet metal body doesn't take a task workspace's ribbon away. Opening a sketch
+    // does, and finishing it comes back.
+    if task_tab(&app.ui.tab) && app.session.active_sketch.is_none() {
+        return;
+    }
     let context = app
         .session
         .active_sketch
@@ -727,9 +823,10 @@ pub fn sync_context(app: &mut crate::SolveApp) {
         };
         app.ui.tab = if app.session.active_sketch.is_some() {
             "SKETCH"
-        } else if let Some(back) = back.as_deref().filter(|t| *t != "SKETCH" && visible_tabs(app).contains(t)) {
+        } else if let Some(back) = back.as_deref().filter(|t| *t != "SKETCH" && (visible_tabs(app).contains(t) || task_tab(t))) {
             // Finishing a sketch goes back to the tab it came from (#3250).
-            visible_tabs(app).into_iter().find(|t| t == &back).unwrap_or_else(|| home_tab(app))
+            let task_tabs = ANIMATION_TABS.iter().chain(MANUFACTURE_TABS).copied();
+            visible_tabs(app).into_iter().chain(task_tabs).find(|t| t == &back).unwrap_or_else(|| home_tab(app))
         } else if context.as_deref().is_some_and(|c| c.starts_with("frame:")) {
             "WELDMENTS"
         } else if context.is_some() {

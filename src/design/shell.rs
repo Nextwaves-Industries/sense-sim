@@ -12,7 +12,7 @@ use solidcraft_ui_egui::toolbar::{self, FileAction};
 
 use super::host::DesignHost;
 use super::{Slot, Workspace};
-use crate::ui::{DesignCommand, DesignInfo, LeftPanelSlot};
+use crate::ui::{DesignCommand, DesignInfo, LeftPanelSlot, Workbench};
 
 /// Runs what the strip asked for and tells it how things stand. True if SolidCraft has something new
 /// to draw.
@@ -44,6 +44,15 @@ pub fn exchange(panel: &mut LeftPanelSlot, shell: &egui::Context, h: &mut Design
         changed = true;
     }
 
+    // The workspace menu's Simulation row: that workbench is the shell's, and it offers this design's
+    // bodies.
+    h.app.host_simulation = true;
+    if h.app.host_workspace_request.take() == Some("simulation") {
+        panel.open_simulations = true;
+        panel.bench.request = Some(Workbench::Simulation);
+        changed = true;
+    }
+
     panel.design_info = DesignInfo {
         designs: documents::tabs_info(&h.app),
         active: h.app.docs.active,
@@ -57,9 +66,14 @@ pub fn exchange(panel: &mut LeftPanelSlot, shell: &egui::Context, h: &mut Design
 
 /// The steps `--design-test` gives the strip, between its own.
 pub const TEST_FIRST: usize = 40;
-pub const TEST_LAST: usize = 61;
+/// Then the workspace menu: a click on the switcher and a click on a row, for each of these.
+const MENU_FIRST: usize = 62;
+const MENU_ROWS: [&str; 5] = ["animation", "manufacture", "render", "design", "simulation"];
+const MENU_STEPS: usize = 8;
+const MENU_END: usize = MENU_FIRST + MENU_ROWS.len() * MENU_STEPS;
+pub const TEST_LAST: usize = MENU_END + 1;
 /// Presses: egui reads a long press as something other than a click, so the release follows quickly.
-pub const TEST_PRESSES: [usize; 2] = [41, 45];
+pub const TEST_PRESSES: [usize; 12] = [41, 45, 63, 66, 71, 74, 79, 82, 87, 90, 95, 98];
 
 /// One step of the strip's test. Returns a check to record, if this step makes one.
 #[allow(clippy::too_many_arguments)]
@@ -149,6 +163,45 @@ pub fn test_step(
         58 => *prompt = Some("Pick the faces to load, then press Done".into()),
         59 => shot("pick"),
         60 => *prompt = None,
+        MENU_FIRST..MENU_END => {
+            let k = step - MENU_FIRST;
+            let row = MENU_ROWS.get(k / MENU_STEPS).copied().unwrap_or_default();
+            let zoom = h.ctx.zoom_factor();
+            let at = |name: &str| {
+                solidcraft_ui_egui::scenario::handle_at(name).map_or(Vec2::ZERO, |p| {
+                    let w = super::input::to_host(p, canvas, zoom);
+                    Vec2::new(w.x, w.y)
+                })
+            };
+            match k % MENU_STEPS {
+                0 => move_to(events, at("ribbon:workspace")),
+                1 | 4 => button(events, ButtonState::Pressed),
+                2 | 5 => button(events, ButtonState::Released),
+                3 => {
+                    if row == "animation" {
+                        shot("workspace_menu");
+                    }
+                    move_to(events, at(&format!("workspace:menu:{row}")));
+                }
+                6 => shot(&format!("workspace_{row}")),
+                _ if row == "simulation" => {
+                    let there = panel.bench.current == Workbench::Simulation && !panel.design_open && !panel.open_simulations;
+                    *workspace = Workspace::Design;
+                    return Some(("the workspace menu's Simulation row opens the Simulation workbench and its panel", there, format!("design open: {}", panel.design_open)));
+                }
+                _ => {
+                    let now = solidcraft_ui_egui::workspace::current(&h.app);
+                    let name = match row {
+                        "animation" => "the workspace menu's Animation row opens Animation",
+                        "manufacture" => "the workspace menu's Manufacture row opens Manufacture",
+                        "render" => "the workspace menu's Render row opens Render",
+                        _ => "the workspace menu's Design row comes back to Design",
+                    };
+                    return Some((name, now == row, format!("in {now}")));
+                }
+            }
+        }
+        MENU_END => return Some(("coming back from the Simulation workbench shows the design again", panel.design_open, String::new())),
         _ => {}
     }
     None

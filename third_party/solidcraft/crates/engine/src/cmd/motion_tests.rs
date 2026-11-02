@@ -851,6 +851,141 @@ fn an_animation_has_the_frames_and_the_size_asked_for() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `rail()` with something to play: the study Push and the exploded view Apart.
+fn rail_with_clips() -> Session {
+    let mut s = rail();
+    run(&mut s, "motion.study", json!({"name": "Push", "steps": 10, "keys": [{"joint": "Rail", "points": [[0, 10], [10, 0]]}]}));
+    run(&mut s, "explode.create", json!({"name": "Apart", "scale": 1}));
+    run(&mut s, "explode.show", json!({"view": null}));
+    s
+}
+
+#[test]
+fn a_storyboard_is_drawn_clip_after_clip() {
+    let mut s = rail_with_clips();
+    let r = run(&mut s, "storyboard.create", json!({"name": "Show", "clips": [{"study": "Push"}, {"view": "Apart", "back": true}]}));
+    assert_eq!((r["storyboard"].as_str(), r["clips"].as_u64()), (Some("Show"), Some(2)), "{r}");
+    let before = s.doc.clone();
+    let dir = out_dir("storyboard");
+    let gif = dir.join("show.gif");
+    // Each clip's own frames, one after another: 11 for the study, 81 for the view there and back.
+    let p = json!({"storyboard": "Show", "path": gif.to_string_lossy(), "width": 32, "height": 32});
+    let r = super::animation::export_with(&s, &p, Some(&cpu)).unwrap();
+    assert_eq!(r["frames"], 92, "{r}");
+    assert_eq!(gif_frames(&std::fs::read(&gif).unwrap()), (32, 32, 92));
+    // Asked for fewer, the clips share them.
+    let p = json!({"storyboard": "Show", "path": gif.to_string_lossy(), "samples": 20, "width": 32, "height": 32});
+    let r = super::animation::export_with(&s, &p, Some(&cpu)).unwrap();
+    assert_eq!(r["frames"], 20, "{r}");
+    assert_eq!(*s.doc, *before, "drawing it changes nothing");
+
+    // In a folder, the frames tell the order: the study pushes, and the view opens from where the
+    // study left the parts rather than from where they were placed.
+    let frames = dir.join("frames");
+    let p = json!({"storyboard": "Show", "path": frames.to_string_lossy(), "samples": 12, "width": 96, "height": 64});
+    super::animation::export_with(&s, &p, Some(&cpu)).unwrap();
+    let frame = |k: usize| std::fs::read(frames.join(format!("frame-{k:04}.png"))).unwrap();
+    assert_eq!((1..=12).filter(|k| frames.join(format!("frame-{k:04}.png")).exists()).count(), 12);
+    assert_ne!(frame(1), frame(2), "the study moves from its first frame");
+    assert_eq!(frame(2), frame(3), "the view starts where the study ended");
+    assert_ne!(frame(4), frame(8), "the view has opened by the middle of its clip");
+    assert_eq!(frame(3), frame(12), "there and back, it ends where the study left it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn storyboard_frames_are_shared_fairly() {
+    use super::animation::share;
+    assert_eq!(share(&[7], 7), [7]);
+    assert_eq!(share(&[11, 81], 92), [11, 81]);
+    let shared = share(&[11, 81], 20);
+    assert_eq!(shared.iter().sum::<usize>(), 20);
+    assert!(shared[0] >= 2 && shared[1] > shared[0], "{shared:?}");
+    // The floor of two frames each gives way last.
+    assert_eq!(share(&[1, 1, 100], 6).iter().sum::<usize>(), 6);
+}
+
+#[test]
+fn storyboards_are_edited_named_and_refused_like_the_rest() {
+    let mut s = rail_with_clips();
+    let bad = |s: &mut Session, p: Value| s.execute("storyboard.create", &p).unwrap_err().to_string();
+    assert!(bad(&mut s, json!({"clips": []})).contains("1…64"));
+    assert!(bad(&mut s, json!({"clips": [{"study": "Nope"}]})).contains("Nope"));
+    assert!(bad(&mut s, json!({"clips": [{"study": "Push", "view": "Apart"}]})).contains("{study}"));
+    assert!(bad(&mut s, json!({"clips": [{"view": "Apart", "back": "yes"}]})).contains("back"));
+
+    // A default name, and no second one by that name.
+    assert_eq!(run(&mut s, "storyboard.create", json!({"clips": [{"study": "Push"}]}))["storyboard"], "Storyboard1");
+    assert_eq!(run(&mut s, "storyboard.create", json!({"clips": [{"study": "Push"}]}))["storyboard"], "Storyboard2");
+    assert!(bad(&mut s, json!({"name": "Storyboard1", "clips": [{"study": "Push"}]})).contains("already"));
+
+    // Editing keeps the name unless given another, and may take its own.
+    assert_eq!(run(&mut s, "storyboard.create", json!({"storyboard": "Storyboard1", "clips": [{"view": "Apart"}]}))["storyboard"], "Storyboard1");
+    assert_eq!(run(&mut s, "storyboard.create", json!({"storyboard": "Storyboard1", "name": "Storyboard1", "clips": [{"view": "Apart"}]}))["clips"], 1);
+    assert_eq!(run(&mut s, "storyboard.create", json!({"storyboard": "Storyboard1", "name": "Open", "clips": [{"view": "Apart"}]}))["storyboard"], "Open");
+    assert!(bad(&mut s, json!({"storyboard": "Gone", "clips": [{"view": "Apart"}]})).contains("Gone"));
+
+    // A study deleted later shows as missing, and the export says what it can't find.
+    run(&mut s, "motion.delete", json!({"study": "Push"}));
+    let list = run(&mut s, "storyboard.list", json!({}));
+    assert_eq!(list["storyboards"][1]["name"], "Storyboard2", "{list}");
+    assert_eq!(list["storyboards"][1]["clips"][0]["missing"], true, "{list}");
+    assert_eq!(list["storyboards"][0]["clips"][0]["missing"], false, "{list}");
+    let dir = out_dir("storyboard_gone");
+    let p = json!({"storyboard": "Storyboard2", "path": dir.join("x.gif").to_string_lossy()});
+    let Err(e) = super::animation::export_with(&s, &p, Some(&cpu)) else { panic!("a missing clip draws nothing") };
+    assert!(e.to_string().contains("motion study"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Exactly one thing to draw.
+    let p = json!({"storyboard": "Open", "view": "Apart", "path": "x.gif"});
+    let Err(e) = super::animation::export_with(&s, &p, Some(&cpu)) else { panic!("two things to draw") };
+    assert!(e.to_string().contains("one of them"), "{e}");
+}
+
+/// In the metadata: undone like any change, saved in the design, and gone from it with the last one.
+#[test]
+fn storyboards_live_in_the_design_without_changing_its_format() {
+    use solidcraft_doc::motion::{STORYBOARDS_KEY, storyboards};
+    let mut s = rail_with_clips();
+    let format = s.doc.format.clone();
+    run(&mut s, "storyboard.create", json!({"name": "Show", "clips": [{"study": "Push"}]}));
+    assert_eq!(s.doc.format, format);
+    assert_eq!(storyboards(&s.doc.metadata).len(), 1);
+
+    // Saved and read back whole.
+    let saved = serde_json::to_string(&*s.doc).unwrap();
+    let read = solidcraft_doc::format::read(&saved).unwrap();
+    assert_eq!(storyboards(&read.metadata), storyboards(&s.doc.metadata));
+
+    run(&mut s, "edit.undo", json!({}));
+    assert!(storyboards(&s.doc.metadata).is_empty(), "one undo step");
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(storyboards(&s.doc.metadata).len(), 1);
+
+    assert_eq!(run(&mut s, "storyboard.delete", json!({"storyboard": "Show"}))["deleted"], "Show");
+    assert!(!s.doc.metadata.0.contains_key(STORYBOARDS_KEY), "no empty key is left behind");
+    assert!(s.execute("storyboard.delete", &json!({"storyboard": "Show"})).is_err());
+
+    // What another tool left under the key reads as none, and isn't a crash.
+    let mut foreign = s.doc.metadata.clone();
+    foreign.0.insert(STORYBOARDS_KEY.into(), json!({"boards": "not a list"}));
+    assert!(storyboards(&foreign).is_empty());
+}
+
+#[test]
+fn a_view_opens_part_way_when_asked() {
+    let mut s = rail_with_clips();
+    run(&mut s, "explode.show", json!({"view": "Apart", "amount": 0}));
+    let closed = s.pending_moves.clone();
+    run(&mut s, "explode.show", json!({"view": "Apart", "amount": 1}));
+    let open = s.pending_moves.clone();
+    run(&mut s, "explode.show", json!({"view": "Apart"}));
+    assert_eq!(s.pending_moves, open, "all the way unless told");
+    assert_ne!(closed, open);
+    assert!(s.execute("explode.show", &json!({"view": "Apart", "amount": 2})).is_err());
+}
+
 #[test]
 fn a_two_frame_drive_gives_two_different_frames() {
     let s = rail();

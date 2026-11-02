@@ -343,6 +343,9 @@ pub struct UiState {
     /// Not saved: it only lives while a sketch is open.
     #[serde(skip)]
     pub sketch_return_tab: Option<String>,
+    /// The Design tab a task workspace was opened from (see [`workspace::enter`]).
+    #[serde(skip)]
+    pub workspace_return_tab: Option<String>,
     /// Last contextual body/sketch, only used to select on entry.
     #[serde(skip)]
     pub ribbon_context: Option<String>,
@@ -405,6 +408,7 @@ impl Default for UiState {
             tab: "MODEL".into(),
             ribbon_context: None,
             sketch_return_tab: None,
+            workspace_return_tab: None,
             show_browser: true,
             show_timeline: true,
             show_grid: true,
@@ -516,6 +520,10 @@ pub struct SolveApp {
     /// A host application draws the bars above this UI: no application bar here. The modelling
     /// ribbon stays, and the host opens the File menu with [`toolbar::toggle_file_menu`].
     pub host_chrome: bool,
+    /// The host has simulation of its own, so the workspace menu offers it.
+    pub host_simulation: bool,
+    /// A workspace the host was asked to show, for it to take.
+    pub host_workspace_request: Option<&'static str>,
     pub session: Session,
     pub ui: UiState,
     pub(crate) shell: shell::State,
@@ -902,6 +910,8 @@ impl SolveApp {
             flat_view: Default::default(),
             embedded: false,
             host_chrome: false,
+            host_simulation: false,
+            host_workspace_request: None,
             home: home::HomeState::default(),
             space_mouse: Default::default(),
             file_load: file_load::FileLoad::default(),

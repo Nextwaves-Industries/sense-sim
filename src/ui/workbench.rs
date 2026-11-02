@@ -161,6 +161,8 @@ pub struct Benches {
     pub current: Workbench,
     /// The design code is in this build; until it says so the tab stays hidden.
     pub design_ready: bool,
+    /// A workspace asked for this workbench, for `follow` to bring to the front.
+    pub request: Option<Workbench>,
     /// Where leaving a full-canvas workbench goes back to.
     previous: Workbench,
     cards: [Option<Page>; Workbench::ALL.len()],
@@ -168,7 +170,7 @@ pub struct Benches {
 
 impl Default for Benches {
     fn default() -> Self {
-        Self { current: Workbench::default(), design_ready: false, previous: Workbench::default(), cards: Workbench::ALL.map(Workbench::first_card) }
+        Self { current: Workbench::default(), design_ready: false, request: None, previous: Workbench::default(), cards: Workbench::ALL.map(Workbench::first_card) }
     }
 }
 
@@ -248,6 +250,10 @@ pub fn switch(slot: &mut LeftPanelSlot, rtls: &mut RtlsUiState, to: Workbench) {
 /// Something outside the ribbon opened a card or a full-canvas workspace, or closed
 /// one: the workbench that owns it comes to the front.
 pub fn follow(slot: &mut LeftPanelSlot, rtls: &mut RtlsUiState) {
+    if let Some(to) = slot.bench.request.take() {
+        switch(slot, rtls, to);
+        return;
+    }
     let current = slot.bench.current;
     if slot.studio_open && current != Workbench::Antenna {
         switch(slot, rtls, Workbench::Antenna);

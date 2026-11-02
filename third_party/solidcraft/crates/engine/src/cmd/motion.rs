@@ -22,6 +22,8 @@ mod animation;
 pub(crate) mod associative;
 #[path = "contact_sweep.rs"]
 pub(crate) mod contact_sweep;
+#[path = "motion_storyboard.rs"]
+mod storyboard;
 #[path = "motion_sweep.rs"]
 mod sweep;
 
@@ -71,9 +73,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("motion.export_animation", "Export Motion Animation", animation::export).icon("export").noundo().params(
         "study: id|name, or joint: id|name with from and to (degrees for angles, mm for distances, or expressions) and index?, or \
          view: id|name (an exploded view, coming apart from the assembled placement) with back? (default false; true: back together \
-         too, exploded at the middle frame of an odd count); path: a .gif file, or a folder for PNG frames (frame-0001.png, \
-         frame-0002.png, …); samples? (frames, 2…1000; default the study's steps + 1, 100 for a joint, 41 for a view or 81 with \
-         back); width?, height? (16…4096 pixels, default 800 × 500); camera?: {target, yaw, pitch, roll?, distance, fov?, up?} \
+         too, exploded at the middle frame of an odd count), or storyboard: name (its clips one after another); path: a .gif file, \
+         or a folder for PNG frames (frame-0001.png, frame-0002.png, …); samples? (frames, 2…1000; default the study's steps + 1, \
+         100 for a joint, 41 for a view or 81 with back; a storyboard's clips share them); width?, height? (16…4096 pixels, default 800 × 500); camera?: {target, yaw, pitch, roll?, distance, fov?, up?} \
          (ui.camera's reply; fields left out keep the default view: view.apply's camera, or the home view framing the model, for a \
          view both assembled and exploded); fps? (1…50, default 20); grid?, axes? (default true: the ground grid and the origin's \
          axes) - draws the study as it plays, the joint as it is driven or the view as it explodes, with the headless renderer → \
@@ -110,9 +112,19 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("explode.show", "Show Exploded View", explode_show)
         .icon("explode")
         .noundo()
-        .params("view: id|name (or none: back to the assembled placement) — shown only; the design keeps its placements"),
+        .params("view: id|name (or none: back to the assembled placement); amount? (0…1, default 1: how far apart) — shown only; the design keeps its placements"),
     CommandSpec::new("explode.list", "List Exploded Views", explode_list).icon("list").noundo(),
     CommandSpec::new("explode.delete", "Delete Exploded View", explode_delete).icon("delete").params("view"),
+    CommandSpec::new("storyboard.create", "Storyboard", storyboard::create).icon("timeline_play").enabled(storyboard::has_something_to_play).params(
+        "clips: [{study: id|name} or {view: id|name, back?: bool}] (1…64, in the order they are shown; a study plays from start to \
+         end, a view comes apart, and back together with back); name? (default StoryboardN); storyboard?: name (edit that one). \
+         Kept in the design's metadata; motion.export_animation draws it → storyboard, clips",
+    ),
+    CommandSpec::new("storyboard.delete", "Delete Storyboard", storyboard::delete).icon("delete").params("storyboard: name"),
+    CommandSpec::new("storyboard.list", "List Storyboards", storyboard::list)
+        .icon("list")
+        .noundo()
+        .params("→ storyboards: [{name, clips: [{study or view, back, name, missing}]}] (missing: its study or view was deleted)"),
 ];
 
 const MAX_ITEMS: usize = 10_000;
@@ -1111,7 +1123,11 @@ fn explode_show(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let i = view_index(s, p, cmd)?;
     let v = s.doc.assembly.exploded.get(i).cloned().ok_or_else(|| bad(cmd, "view"))?;
-    s.pending_moves = exploded_at(&explode_moves(s, &v), 1.0);
+    let amount = match p.get("amount") {
+        None => 1.0,
+        Some(a) => a.as_f64().filter(|a| (0.0..=1.0).contains(a)).ok_or_else(|| bad(cmd, "`amount` must be 0…1"))?,
+    };
+    s.pending_moves = exploded_at(&explode_moves(s, &v), amount);
     s.revision += 1;
     Ok(json!({"view": v.id, "name": v.name}))
 }
