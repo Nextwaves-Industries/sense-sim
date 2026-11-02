@@ -15,6 +15,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use serde_json::{Value, json};
 
 use super::catalog::{self, Catalog};
+use super::harness::TurnLog;
 use super::llm::{Block, ToolDef};
 use super::{Agent, ChatItem, Question, assetgen, images, photocheck, toolmaker};
 use crate::library::Library;
@@ -62,6 +63,8 @@ pub struct ToolJob {
     pub reply: Sender<ToolOutput>,
     /// Shown in the assistant transcript (calls from MCP clients).
     pub from_mcp: bool,
+    /// Where calls made on this one's behalf (a macro's steps) are recorded.
+    pub log: Option<TurnLog>,
 }
 
 #[derive(Resource, Clone)]
@@ -79,13 +82,18 @@ impl Default for ToolBridge {
 
 /// Blocking call from a worker thread. Returns early if `cancel` is set.
 pub fn call(tx: &Sender<ToolJob>, name: &str, input: Value, from_mcp: bool, cancel: Option<&AtomicBool>) -> ToolOutput {
+    call_logged(tx, name, input, from_mcp, cancel, None)
+}
+
+/// As [`call`], with somewhere to record what this call goes on to do.
+pub fn call_logged(tx: &Sender<ToolJob>, name: &str, input: Value, from_mcp: bool, cancel: Option<&AtomicBool>, log: Option<&TurnLog>) -> ToolOutput {
     // Waiting has to happen on this thread, not in the app's update loop.
     #[cfg(feature = "antenna-studio")]
     if name == crate::antenna::assist::WAIT {
         return crate::antenna::assist::wait(tx, &input, cancel);
     }
     let (rtx, rrx) = unbounded();
-    if tx.send(ToolJob { name: name.into(), input, reply: rtx, from_mcp }).is_err() {
+    if tx.send(ToolJob { name: name.into(), input, reply: rtx, from_mcp, log: log.cloned() }).is_err() {
         return ToolOutput::err("viewer is shutting down");
     }
     loop {
@@ -1423,9 +1431,9 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
         },
         other if other.starts_with(toolmaker::PREFIX) => {
             // Its steps come back through this bridge, so it can't block the frame.
-            let (name, input, tx) = (other.to_string(), i.clone(), world.resource::<ToolBridge>().tx.clone());
+            let (name, input, tx, log) = (other.to_string(), i.clone(), world.resource::<ToolBridge>().tx.clone(), job.log.clone());
             std::thread::spawn(move || {
-                let _ = reply.send(toolmaker::run(&name, &input, tx));
+                let _ = reply.send(toolmaker::run(&name, &input, tx, log));
             });
             return None;
         }
@@ -1984,7 +1992,7 @@ mod lock_tests {
 
     fn tool(world: &mut World, name: &str, input: Value) -> ToolOutput {
         let (reply, _rx) = unbounded();
-        start(world, ToolJob { name: name.into(), input, reply, from_mcp: false }).expect("finishes at once")
+        start(world, ToolJob { name: name.into(), input, reply, from_mcp: false, log: None }).expect("finishes at once")
     }
 
     #[test]
@@ -2042,7 +2050,7 @@ mod routing_tests {
     fn reaches_a_handler(name: &str) -> bool {
         let mut world = World::new();
         let (tx, _rx) = unbounded();
-        let job = ToolJob { name: name.into(), input: json!({}), reply: tx, from_mcp: false };
+        let job = ToolJob { name: name.into(), input: json!({}), reply: tx, from_mcp: false, log: None };
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(&mut world, job))) {
             Ok(Some(out)) => !(out.is_error && out.summary().starts_with("unknown tool")),
             Ok(None) | Err(_) => true,

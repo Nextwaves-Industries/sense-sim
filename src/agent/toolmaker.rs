@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::Sender;
 use serde_json::{Map, Value, json};
 
+use super::harness::{TurnLog, Who};
 use super::llm::{Block, ToolDef};
 use super::tools::{self, ToolJob, ToolOutput};
 
@@ -354,7 +355,7 @@ pub fn delete(name: &str) -> Result<()> {
 
 /// Runs a made tool's steps one by one, on a worker thread: each goes through
 /// the bridge like any other call. Stops at the first failing step.
-pub fn run(name: &str, input: &Value, tx: Sender<ToolJob>) -> ToolOutput {
+pub fn run(name: &str, input: &Value, tx: Sender<ToolJob>, log: Option<TurnLog>) -> ToolOutput {
     let bare = name.strip_prefix(PREFIX).unwrap_or(name);
     let Some(spec) = find(bare) else { return ToolOutput::err(format!("unknown tool '{name}'")) };
     let params = spec["parameters"].as_object().cloned().unwrap_or_default();
@@ -375,7 +376,11 @@ pub fn run(name: &str, input: &Value, tx: Sender<ToolJob>) -> ToolOutput {
         if barred_from_macros(tool, &call) {
             return ToolOutput::err(format!("{name}: step {n}: a made tool can't call {tool}"));
         }
-        let out = tools::call(&tx, tool, call, false, None);
+        let out = tools::call_logged(&tx, tool, call.clone(), false, None, log.as_ref());
+        // The self-checks judge what actually changed, not the macro's name.
+        if let Some(log) = &log {
+            log.push(Who::Macro, tool, &call, &out);
+        }
         content.push(Block::Text(format!("step {n} ({tool}):")));
         let failed = out.is_error;
         content.extend(out.content);

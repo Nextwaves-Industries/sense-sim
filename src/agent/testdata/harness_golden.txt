@@ -1,0 +1,772 @@
+=== plain answer
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+ tool jobs:
+ events:
+  assistant "hello"
+  finished error=None
+    user: text "the user's request"
+    assistant: text "hello"
+
+=== self-check sends back, then passes
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "done"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "done"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 update_object {"name":"a"}
+    user: result t0 error=false [text "{}"]
+ tool jobs:
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+  tool job update_object {"name":"a"}
+  tool job verify_scene {}
+ events:
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "done"
+  info "Self-check found 2 issue(s); sending the assistant back to fix them (round 1/4)."
+  tool start update_object {"name":"a"}
+  tool end error=false "{}"
+  assistant "fixed"
+  info "Self-check passed: nothing floating, sunk or intersecting, and every connection lines up."
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "done"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 update_object {"name":"a"}
+    user: result t0 error=false [text "{}"]
+    assistant: text "fixed"
+
+=== self-check gives up after its rounds
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "2"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "2"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "2"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "3"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "2"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "3"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "2"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "3"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "4"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "2"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "3"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "4"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+ tool jobs:
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+ events:
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "1"
+  info "Self-check found 2 issue(s); sending the assistant back to fix them (round 1/4)."
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "2"
+  info "Self-check found 2 issue(s); sending the assistant back to fix them (round 2/4)."
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "3"
+  info "Self-check found 2 issue(s); sending the assistant back to fix them (round 3/4)."
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "4"
+  info "Self-check found 2 issue(s); sending the assistant back to fix them (round 4/4)."
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "5"
+  info "Self-check still reports 2 issue(s) after 4 rounds; stopping here."
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "1"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "2"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "3"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "4"
+    user: text "[Automatic self-check] Before finishing, verify_scene measured these problems in the scene:\n{\"issue_count\":2,\"issues\":[\"a floats\",\"b is sunk\"]}\nFix every issue (move, re-stack or delete objects; use get_scene for exact positions), then call verify_scene to confirm. Only leave an issue if it is intentional, and say why."
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "5"
+
+=== rtls target missed, then met
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"floor_coverage\":0.8,\"predicted_p95_m\":0.42,\"targets_met\":false,\"test\":{\"cep95_m\":0.55,\"located\":7,\"tags\":9}}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"floor_coverage\":0.8,\"predicted_p95_m\":0.42,\"targets_met\":false,\"test\":{\"cep95_m\":0.55,\"located\":7,\"tags\":9}}"]
+    assistant: text "placed"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 42 cm, simulated CEP95 55 cm, floor coverage 80%, tags located 7/9\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"floor_coverage\":0.8,\"predicted_p95_m\":0.42,\"targets_met\":false,\"test\":{\"cep95_m\":0.55,\"located\":7,\"tags\":9}}"]
+    assistant: text "placed"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 42 cm, simulated CEP95 55 cm, floor coverage 80%, tags located 7/9\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.25}"]
+ tool jobs:
+  tool job rtls_auto_deploy {"target_cm":30}
+  tool job rtls_run {}
+ events:
+  tool start rtls_auto_deploy {"target_cm":30}
+  tool end error=false "{\"floor_coverage\":0.8,\"predicted_p95_m\":0.42,\"targets_met\":false,\"test\":{\"cep95_m\":0.55,\"located\":7,\"tags\":9}}"
+  assistant "placed"
+  info "RTLS accuracy target not met; sending the assistant back to improve the deployment (round 1/3)."
+  tool start rtls_run {}
+  tool end error=false "{\"cep95_m\":0.25}"
+  assistant "met"
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"floor_coverage\":0.8,\"predicted_p95_m\":0.42,\"targets_met\":false,\"test\":{\"cep95_m\":0.55,\"located\":7,\"tags\":9}}"]
+    assistant: text "placed"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 42 cm, simulated CEP95 55 cm, floor coverage 80%, tags located 7/9\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.25}"]
+    assistant: text "met"
+
+=== rtls gives up after its rounds
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+    assistant: text "1"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 no result, simulated CEP95 no result, floor coverage 0%, tags located null/null\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+    assistant: text "1"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 no result, simulated CEP95 no result, floor coverage 0%, tags located null/null\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+    assistant: text "1"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 no result, simulated CEP95 no result, floor coverage 0%, tags located null/null\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "2"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+    assistant: text "1"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 no result, simulated CEP95 no result, floor coverage 0%, tags located null/null\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "2"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+    assistant: text "1"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 no result, simulated CEP95 no result, floor coverage 0%, tags located null/null\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "2"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "3"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+    assistant: text "1"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 no result, simulated CEP95 no result, floor coverage 0%, tags located null/null\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "2"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "3"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+ tool jobs:
+  tool job rtls_auto_deploy {"target_cm":30}
+  tool job rtls_run {}
+  tool job rtls_run {}
+  tool job rtls_run {}
+ events:
+  tool start rtls_auto_deploy {"target_cm":30}
+  tool end error=false "{\"targets_met\":false}"
+  assistant "1"
+  info "RTLS accuracy target not met; sending the assistant back to improve the deployment (round 1/3)."
+  tool start rtls_run {}
+  tool end error=false "{\"cep95_m\":0.9}"
+  assistant "2"
+  info "RTLS accuracy target not met; sending the assistant back to improve the deployment (round 2/3)."
+  tool start rtls_run {}
+  tool end error=false "{\"cep95_m\":0.9}"
+  assistant "3"
+  info "RTLS accuracy target not met; sending the assistant back to improve the deployment (round 3/3)."
+  tool start rtls_run {}
+  tool end error=false "{\"cep95_m\":0.9}"
+  assistant "4"
+  info "RTLS target still not met after several rounds; stopping here."
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 rtls_auto_deploy {"target_cm":30}
+    user: result t0 error=false [text "{\"targets_met\":false}"]
+    assistant: text "1"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; predicted p95 no result, simulated CEP95 no result, floor coverage 0%, tags located null/null\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "2"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "3"
+    user: text "[Automatic check] The positioning system does not meet its target yet: target p95 30 cm; latest rtls_run UWB CEP95 90 cm\nImprove it before finishing: add or move UWB anchors / BLE beacons / RFID readers where coverage is weak (rtls_coverage shows where; rtls_optimize_anchors with target_coverage helps; search_knowledge has placement rules and troubleshooting), then rtls_run again. If the target is physically unreachable, explain why and what would fix it."
+    assistant: use t0 rtls_run {}
+    user: result t0 error=false [text "{\"cep95_m\":0.9}"]
+    assistant: text "4"
+
+=== plant changed, run fails, then runs clean
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 plant_add_part {}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 plant_add_part {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "added"
+    user: text "[Automatic check] The connected system was changed but not simulated since (plant_run).\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 plant_add_part {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "added"
+    user: text "[Automatic check] The connected system was changed but not simulated since (plant_run).\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+    assistant: use t0 plant_run {}
+    user: result t0 error=false [text "{\"alarms\":[{\"alarm\":\"dry pump\"}],\"ok\":false,\"open_pipe_ports\":[\"P1.out\"]}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 plant_add_part {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "added"
+    user: text "[Automatic check] The connected system was changed but not simulated since (plant_run).\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+    assistant: use t0 plant_run {}
+    user: result t0 error=false [text "{\"alarms\":[{\"alarm\":\"dry pump\"}],\"ok\":false,\"open_pipe_ports\":[\"P1.out\"]}"]
+    assistant: text "ran"
+    user: text "[Automatic check] The last plant_run reported problems: dry pump; open pipe end P1.out.\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 plant_add_part {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "added"
+    user: text "[Automatic check] The connected system was changed but not simulated since (plant_run).\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+    assistant: use t0 plant_run {}
+    user: result t0 error=false [text "{\"alarms\":[{\"alarm\":\"dry pump\"}],\"ok\":false,\"open_pipe_ports\":[\"P1.out\"]}"]
+    assistant: text "ran"
+    user: text "[Automatic check] The last plant_run reported problems: dry pump; open pipe end P1.out.\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+    assistant: use t0 plant_run {}
+    user: result t0 error=false [text "{\"ok\":true}"]
+ tool jobs:
+  tool job plant_add_part {}
+  tool job verify_scene {}
+  tool job plant_run {}
+  tool job plant_run {}
+ events:
+  tool start plant_add_part {}
+  tool end error=false "{}"
+  assistant "added"
+  info "Self-check passed: nothing floating, sunk or intersecting, and every connection lines up."
+  info "Connected system not proven yet; sending the assistant back to run and fix it (round 1/3)."
+  tool start plant_run {}
+  tool end error=false "{\"alarms\":[{\"alarm\":\"dry pump\"}],\"ok\":false,\"open_pipe_ports\":[\"P1.out\"]}"
+  assistant "ran"
+  info "Connected system not proven yet; sending the assistant back to run and fix it (round 2/3)."
+  tool start plant_run {}
+  tool end error=false "{\"ok\":true}"
+  assistant "clean"
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 plant_add_part {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "added"
+    user: text "[Automatic check] The connected system was changed but not simulated since (plant_run).\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+    assistant: use t0 plant_run {}
+    user: result t0 error=false [text "{\"alarms\":[{\"alarm\":\"dry pump\"}],\"ok\":false,\"open_pipe_ports\":[\"P1.out\"]}"]
+    assistant: text "ran"
+    user: text "[Automatic check] The last plant_run reported problems: dry pump; open pipe end P1.out.\nMake it work before finishing: call plant_run, then fix every leak, open pipe end, undriven pump, dry pump, closed path or misaligned link it reports (plant_route_pipe, plant_connect, plant_add_part, plant_set), and run again until ok is true. If something is intentional (e.g. a valve kept closed), say so."
+    assistant: use t0 plant_run {}
+    user: result t0 error=false [text "{\"ok\":true}"]
+    assistant: text "clean"
+
+=== antenna not judged, not met, mesh reminder
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 antenna_new {}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 antenna_new {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "made"
+    user: text "[Automatic check] The antenna design or its requirements changed and antenna_assess hasn't judged a run since. If no requirements are set yet, set them with antenna_spec from what the user asked for.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 antenna_new {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "made"
+    user: text "[Automatic check] The antenna design or its requirements changed and antenna_assess hasn't judged a run since. If no requirements are set yet, set them with antenna_spec from what the user asked for.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"checks\":[{\"measured\":\"-3 dB\",\"name\":\"match\",\"pass\":false,\"required\":\"-10 dB\"}],\"diagnosis\":[\"Too long.\"],\"next\":[\"Shorten it.\"],\"verdict\":\"not_met\"}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 antenna_new {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "made"
+    user: text "[Automatic check] The antenna design or its requirements changed and antenna_assess hasn't judged a run since. If no requirements are set yet, set them with antenna_spec from what the user asked for.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"checks\":[{\"measured\":\"-3 dB\",\"name\":\"match\",\"pass\":false,\"required\":\"-10 dB\"}],\"diagnosis\":[\"Too long.\"],\"next\":[\"Shorten it.\"],\"verdict\":\"not_met\"}"]
+    assistant: text "assessed"
+    user: text "[Automatic check] antenna_assess says the requirements aren't met: match: -3 dB (needs -10 dB). Diagnosis: Too long. Next: Shorten it.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 antenna_new {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "made"
+    user: text "[Automatic check] The antenna design or its requirements changed and antenna_assess hasn't judged a run since. If no requirements are set yet, set them with antenna_spec from what the user asked for.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"checks\":[{\"measured\":\"-3 dB\",\"name\":\"match\",\"pass\":false,\"required\":\"-10 dB\"}],\"diagnosis\":[\"Too long.\"],\"next\":[\"Shorten it.\"],\"verdict\":\"not_met\"}"]
+    assistant: text "assessed"
+    user: text "[Automatic check] antenna_assess says the requirements aren't met: match: -3 dB (needs -10 dB). Diagnosis: Too long. Next: Shorten it.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"verdict\":\"met_mesh_unchecked\"}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 antenna_new {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "made"
+    user: text "[Automatic check] The antenna design or its requirements changed and antenna_assess hasn't judged a run since. If no requirements are set yet, set them with antenna_spec from what the user asked for.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"checks\":[{\"measured\":\"-3 dB\",\"name\":\"match\",\"pass\":false,\"required\":\"-10 dB\"}],\"diagnosis\":[\"Too long.\"],\"next\":[\"Shorten it.\"],\"verdict\":\"not_met\"}"]
+    assistant: text "assessed"
+    user: text "[Automatic check] antenna_assess says the requirements aren't met: match: -3 dB (needs -10 dB). Diagnosis: Too long. Next: Shorten it.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"verdict\":\"met_mesh_unchecked\"}"]
+    assistant: text "again"
+    user: text "[Automatic check] The requirements are met, but on a mesh nobody has checked. Run antenna_converge, or if it would take too long say plainly that the mesh wasn't checked.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+ tool jobs:
+  tool job antenna_new {}
+  tool job antenna_assess {}
+  tool job antenna_assess {}
+ events:
+  tool start antenna_new {}
+  tool end error=false "{}"
+  assistant "made"
+  info "Antenna not proven yet; sending the assistant back to check it (round 1/4)."
+  tool start antenna_assess {}
+  tool end error=false "{\"checks\":[{\"measured\":\"-3 dB\",\"name\":\"match\",\"pass\":false,\"required\":\"-10 dB\"}],\"diagnosis\":[\"Too long.\"],\"next\":[\"Shorten it.\"],\"verdict\":\"not_met\"}"
+  assistant "assessed"
+  info "Antenna not proven yet; sending the assistant back to check it (round 2/4)."
+  tool start antenna_assess {}
+  tool end error=false "{\"verdict\":\"met_mesh_unchecked\"}"
+  assistant "again"
+  info "Antenna not proven yet; sending the assistant back to check it (round 3/4)."
+  assistant "done"
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 antenna_new {}
+    user: result t0 error=false [text "{}"]
+    assistant: text "made"
+    user: text "[Automatic check] The antenna design or its requirements changed and antenna_assess hasn't judged a run since. If no requirements are set yet, set them with antenna_spec from what the user asked for.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"checks\":[{\"measured\":\"-3 dB\",\"name\":\"match\",\"pass\":false,\"required\":\"-10 dB\"}],\"diagnosis\":[\"Too long.\"],\"next\":[\"Shorten it.\"],\"verdict\":\"not_met\"}"]
+    assistant: text "assessed"
+    user: text "[Automatic check] antenna_assess says the requirements aren't met: match: -3 dB (needs -10 dB). Diagnosis: Too long. Next: Shorten it.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: use t0 antenna_assess {}
+    user: result t0 error=false [text "{\"verdict\":\"met_mesh_unchecked\"}"]
+    assistant: text "again"
+    user: text "[Automatic check] The requirements are met, but on a mesh nobody has checked. Run antenna_converge, or if it would take too long say plainly that the mesh wasn't checked.\nBefore finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. If the requirements can't be reached, stop trying and say so: name the limit (size, Q, material loss), the best result you reached, and what would have to change. Never present a number from a run that assess calls not_trustworthy as a result."
+    assistant: text "done"
+
+=== plan left open, then finished
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 update_plan {"steps":[{"status":"in_progress","step":"do it"}]}
+    user: result t0 error=false [text "{}"]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 update_plan {"steps":[{"status":"in_progress","step":"do it"}]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "stopping"
+    user: text "[Automatic check] You stopped, but your plan still has unfinished steps: \"do it\" (in progress).\nKeep working on them now. Do not end your turn to ask something in plain text: if you really need the user's input, call ask_user (it waits for the answer and you continue). When a step is done or no longer applies, call update_plan and mark it done (or failed, saying why in the step text). Finish only when every step is done or failed."
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 update_plan {"steps":[{"status":"in_progress","step":"do it"}]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "stopping"
+    user: text "[Automatic check] You stopped, but your plan still has unfinished steps: \"do it\" (in progress).\nKeep working on them now. Do not end your turn to ask something in plain text: if you really need the user's input, call ask_user (it waits for the answer and you continue). When a step is done or no longer applies, call update_plan and mark it done (or failed, saying why in the step text). Finish only when every step is done or failed."
+    assistant: use t0 update_plan {"steps":[{"status":"done","step":"do it"}]}
+    user: result t0 error=false [text "{}"]
+ tool jobs:
+  tool job update_plan {"steps":[{"status":"in_progress","step":"do it"}]}
+  tool job update_plan {"steps":[{"status":"done","step":"do it"}]}
+ events:
+  tool start update_plan {"steps":[{"status":"in_progress","step":"do it"}]}
+  tool end error=false "{}"
+  assistant "stopping"
+  info "Plan not finished (\"do it\" (in progress)); sending the assistant back to complete it (round 1/4)."
+  tool start update_plan {"steps":[{"status":"done","step":"do it"}]}
+  tool end error=false "{}"
+  assistant "finished"
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 update_plan {"steps":[{"status":"in_progress","step":"do it"}]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "stopping"
+    user: text "[Automatic check] You stopped, but your plan still has unfinished steps: \"do it\" (in progress).\nKeep working on them now. Do not end your turn to ask something in plain text: if you really need the user's input, call ask_user (it waits for the answer and you continue). When a step is done or no longer applies, call update_plan and mark it done (or failed, saying why in the step text). Finish only when every step is done or failed."
+    assistant: use t0 update_plan {"steps":[{"status":"done","step":"do it"}]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "finished"
+
+=== photo review fails, then passes
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 perceive_photo {"image_id":"img1"} | use t1 place_objects {}
+    user: result t0 error=false [text "{}", image 3 bytes image/png] | result t1 error=false [text "{}"]
+  request to reviewer, 0 tools:
+    user: text "Review this rebuild. Reply with the JSON only." | image 3 bytes image/png
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 perceive_photo {"image_id":"img1"} | use t1 place_objects {}
+    user: result t0 error=false [text "{}", image 3 bytes image/png] | result t1 error=false [text "{}"]
+    assistant: text "rebuilt"
+    user: text "[Automatic review] An independent reviewer compared your rebuild with the photo and scored it 4.0/10 (it needs 7 with no major difference).\n- [major] no ceiling (top). Fix: add one\nFix the major differences first, revising your guesses where they were wrong (room size, sizes, positions, materials), and use create_asset, add_structure and set_object_material for what is missing. Check with compare_to_photo. If something can't be fixed with these tools, say so plainly in your summary rather than claiming it matches." | text "[Depth check] The depth model disagrees about these. It built nothing and is often wrong, so don't copy its numbers; look at the photo again and keep your layout if you still believe it:\n- the shelf is further away" | image 3 bytes image/png
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 perceive_photo {"image_id":"img1"} | use t1 place_objects {}
+    user: result t0 error=false [text "{}", image 3 bytes image/png] | result t1 error=false [text "{}"]
+    assistant: text "rebuilt"
+    user: text "[Automatic review] An independent reviewer compared your rebuild with the photo and scored it 4.0/10 (it needs 7 with no major difference).\n- [major] no ceiling (top). Fix: add one\nFix the major differences first, revising your guesses where they were wrong (room size, sizes, positions, materials), and use create_asset, add_structure and set_object_material for what is missing. Check with compare_to_photo. If something can't be fixed with these tools, say so plainly in your summary rather than claiming it matches." | text "[Depth check] The depth model disagrees about these. It built nothing and is often wrong, so don't copy its numbers; look at the photo again and keep your layout if you still believe it:\n- the shelf is further away" | image 3 bytes image/png
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+  request to reviewer, 0 tools:
+    user: text "Review this rebuild. Reply with the JSON only." | image 3 bytes image/png
+ tool jobs:
+  tool job perceive_photo {"image_id":"img1"}
+  tool job place_objects {}
+  tool job verify_scene {}
+  tool job compare_to_photo {"image_id":"img1"}
+  tool job check_against_depth {"image_id":"img1"}
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+  tool job compare_to_photo {"image_id":"img1"}
+  tool job check_against_depth {"image_id":"img1"}
+ events:
+  tool start perceive_photo {"image_id":"img1"}
+  tool end error=false "{} [image]"
+  image
+  tool start place_objects {}
+  tool end error=false "{}"
+  assistant "rebuilt"
+  info "Self-check passed: nothing floating, sunk or intersecting, and every connection lines up."
+  info "Independent review scored 4.0/10 against the photo; sending the assistant back to fix it (round 1/3)."
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "fixed"
+  info "Self-check passed: nothing floating, sunk or intersecting, and every connection lines up."
+  info "Independent review passed: 8.0/10 against the photo."
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 perceive_photo {"image_id":"img1"} | use t1 place_objects {}
+    user: result t0 error=false [text "{}", image 3 bytes image/png] | result t1 error=false [text "{}"]
+    assistant: text "rebuilt"
+    user: text "[Automatic review] An independent reviewer compared your rebuild with the photo and scored it 4.0/10 (it needs 7 with no major difference).\n- [major] no ceiling (top). Fix: add one\nFix the major differences first, revising your guesses where they were wrong (room size, sizes, positions, materials), and use create_asset, add_structure and set_object_material for what is missing. Check with compare_to_photo. If something can't be fixed with these tools, say so plainly in your summary rather than claiming it matches." | text "[Depth check] The depth model disagrees about these. It built nothing and is often wrong, so don't copy its numbers; look at the photo again and keep your layout if you still believe it:\n- the shelf is further away" | image 3 bytes image/png
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "fixed"
+
+=== photo review can't be read, so it counts as unreviewed
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 perceive_photo {"image_id":"img1"}
+    user: result t0 error=false [text "{}", image 3 bytes image/png]
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 perceive_photo {"image_id":"img1"}
+    user: result t0 error=false [text "{}", image 3 bytes image/png]
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+  request to reviewer, 0 tools:
+    user: text "Review this rebuild. Reply with the JSON only." | image 3 bytes image/png
+ tool jobs:
+  tool job perceive_photo {"image_id":"img1"}
+  tool job place_objects {"objects":[]}
+  tool job verify_scene {}
+  tool job compare_to_photo {"image_id":"img1"}
+  tool job check_against_depth {"image_id":"img1"}
+ events:
+  tool start perceive_photo {"image_id":"img1"}
+  tool end error=false "{} [image]"
+  image
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  assistant "rebuilt"
+  info "Self-check passed: nothing floating, sunk or intersecting, and every connection lines up."
+  info "Independent review could not run, so this rebuild is unreviewed: the reviewer's reply was not valid JSON: not json"
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 perceive_photo {"image_id":"img1"}
+    user: result t0 error=false [text "{}", image 3 bytes image/png]
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: text "rebuilt"
+
+=== lookups run together
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 get_scene {} | use t1 search_assets {"query":"x"}
+    user: result t0 error=false [text "{}"] | result t1 error=false [text "[1]"]
+ tool jobs:
+  tool job get_scene {}
+  tool job search_assets {"query":"x"}
+ events:
+  info "Running 2 tool calls in parallel…"
+  tool start get_scene {}
+  tool end error=false "{}"
+  tool start search_assets {"query":"x"}
+  tool end error=false "[1]"
+  assistant "found"
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 get_scene {} | use t1 search_assets {"query":"x"}
+    user: result t0 error=false [text "{}"] | result t1 error=false [text "[1]"]
+    assistant: text "found"
+
+=== a failed tool goes back to the model
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 get_asset_info {"id":"x"}
+    user: result t0 error=true [text "no such asset"]
+ tool jobs:
+  tool job get_asset_info {"id":"x"}
+ events:
+  tool start get_asset_info {"id":"x"}
+  tool end error=true "no such asset"
+  assistant "it failed"
+  finished error=None
+    user: text "the user's request"
+    assistant: use t0 get_asset_info {"id":"x"}
+    user: result t0 error=true [text "no such asset"]
+    assistant: text "it failed"
+
+=== a provider error ends the turn
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+ tool jobs:
+ events:
+  finished error=Some("HTTP 500")
+    user: text "the user's request"
+
+=== the step limit ends the turn
+ model calls:
+  request to main, 2 tools:
+    user: text "the user's request"
+  request to main, 2 tools:
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+ tool jobs:
+  tool job place_objects {"objects":[]}
+  tool job place_objects {"objects":[]}
+ events:
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  tool start place_objects {"objects":[]}
+  tool end error=false "{}"
+  finished error=Some("stopped after 2 steps (raise max_steps in agent.json)")
+    user: text "the user's request"
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+    assistant: use t0 place_objects {"objects":[]}
+    user: result t0 error=false [text "{}"]
+
+=== stopped before the first call
+ model calls:
+ tool jobs:
+ events:
+  finished error=Some("stopped")
+    user: text "the user's request"
