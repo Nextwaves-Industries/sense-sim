@@ -157,6 +157,25 @@ fn param_row(ui: &mut egui::Ui, row: usize, p: &mut Param, value: Option<f64>, t
     remove
 }
 
+/// The rows of the variable table, without the helper values. The Draw page shows them too.
+pub(super) fn variable_rows(ui: &mut egui::Ui, st: &mut Studio, table: &VarTable) {
+    let mut remove = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        var_header(ui);
+        let rows = st.project.params.iter_mut().enumerate().filter(|(_, p)| !p.derived);
+        for (row, (i, p)) in rows.enumerate() {
+            let v = table.value(&p.name);
+            if param_row(ui, row, p, v, table) {
+                remove = Some(i);
+            }
+        }
+    });
+    if let Some(i) = remove {
+        st.project.params.remove(i);
+    }
+}
+
 pub fn variables(ui: &mut egui::Ui, st: &mut Studio) {
     let tmpl = templates::by_id(&st.project.template);
     ui.horizontal(|ui| {
@@ -171,23 +190,9 @@ pub fn variables(ui: &mut egui::Ui, st: &mut Studio) {
         weak(ui, t.blurb);
     }
     weak(ui, "Expressions may use the other variables, er and tand of the substrate, c0, pi, and units such as 12mm or 2.45GHz.");
-    let mut remove = None;
     let show_derived = st.project.params.iter().any(|p| p.derived);
     let table = VarTable::of(&st.project);
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        var_header(ui);
-        let rows = st.project.params.iter_mut().enumerate().filter(|(_, p)| !p.derived);
-        for (row, (i, p)) in rows.enumerate() {
-            let v = table.value(&p.name);
-            if param_row(ui, row, p, v, &table) {
-                remove = Some(i);
-            }
-        }
-    });
-    if let Some(i) = remove {
-        st.project.params.remove(i);
-    }
+    variable_rows(ui, st, &table);
     // Under the rows, so a half-typed word doesn't move the field it's being typed in. A
     // bad table stops the model too, with the same words, and once is enough.
     let table_error = st.project.vars().err().map(|e| format!("{e:#}"));
@@ -211,7 +216,10 @@ pub fn variables(ui: &mut egui::Ui, st: &mut Studio) {
         if ui.button("Reset to the template").clicked() {
             let f0 = st.project.params.iter().find(|p| p.name == "f0").map(|p| p.expr.clone());
             if let Ok(p) = Project::from_template(&st.project.template.clone(), f0.as_deref()) {
+                // A variable of your own stays: what you drew may be written in it.
+                let own: Vec<Param> = st.project.params.iter().filter(|r| !p.params.iter().any(|t| t.name == r.name)).cloned().collect();
                 st.project.params = p.params;
+                st.project.params.extend(own);
                 let _ = st.project.reset_band();
             }
         }
@@ -480,6 +488,12 @@ pub fn parts(ui: &mut egui::Ui, st: &mut Studio) {
 
 pub fn materials(ui: &mut egui::Ui, st: &mut Studio) {
     theme::caption(ui, "This antenna");
+    if !st.project.stack.is_empty() {
+        super::weak(ui, format!("In layers: {}. Change them from Design an RFID tag, or ask the assistant.", st.project.stack.describe()));
+        if ui.button("Take it out of its layers").clicked() {
+            st.project.stack = Default::default();
+        }
+    }
     let lib = material::library();
     let tmpl = templates::by_id(&st.project.template);
     let has_substrate = tmpl.is_some_and(|t| t.substrate != "Air") || st.project.substrate != "Air";

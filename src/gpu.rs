@@ -124,8 +124,7 @@ impl GpuPrefs {
         // WGPU_BACKEND set by the user still wins (WgpuSettings::default reads it).
         if std::env::var_os("WGPU_BACKEND").is_none() {
             match self.backend {
-                // Explicit: SolidCraft's dependencies compile in wgpu's OpenGL backend, and "any"
-                // would then let it be chosen, which is the mix SolidCraft reports crashing.
+                // Explicit: "any" could choose wgpu's OpenGL backend if a dependency compiles it in.
                 Backend::Auto => s.backends = Some(Backends::VULKAN | Backends::DX12),
                 Backend::Dx12 => s.backends = Some(Backends::DX12),
                 Backend::Vulkan => s.backends = Some(Backends::VULKAN),

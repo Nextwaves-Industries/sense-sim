@@ -467,6 +467,11 @@ fn goal_editor(ui: &mut egui::Ui, g: &mut Goal, id: usize) {
                 *tol = t * 1e6;
             }
         }
+        Goal::ChipPowerAbove { f_lo, f_hi, at_least, .. } => {
+            f_field(ui, f_lo);
+            f_field(ui, f_hi);
+            ui.add(egui::DragValue::new(at_least).range(0.05..=1.0).speed(0.01));
+        }
         Goal::GainAbove { f, dbi } => {
             f_field(ui, f);
             ui.add(egui::DragValue::new(dbi).suffix(" dBi").range(-20.0..=40.0));

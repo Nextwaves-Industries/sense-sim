@@ -133,6 +133,11 @@ pub struct Entry {
     pub v: f32,
     /// Its mean pull on the solution: mean weight × error.
     pub b: f32,
+    /// Chance it measures and the solver trusts it, for a link that's normally trustworthy;
+    /// 0 for one that isn't, whose weakness `w` and `v` already say.
+    pub clear: f32,
+    /// Where the device stands on the floor plan (x, z).
+    pub at: [f32; 2],
     /// Unit vector device → point.
     pub u: [f32; 3],
     /// A bearing informs across `u`, a range along it.
@@ -150,13 +155,15 @@ pub struct LinkInfo {
     pub w: f32,
     pub v: f32,
     pub b: f32,
+    /// See `Entry::clear`.
+    pub clear: f32,
     pub bearing: bool,
 }
 
 impl LinkInfo {
     /// From a link's moments, given it exists: weight, E[w·e] and E[(w·e)²].
     fn of(p: f32, w: f32, we: f32, w2e2: f32) -> Self {
-        Self { p, w: p * w, v: (p * w2e2 - (p * we).powi(2)).max(0.0), b: p * we, bearing: false }
+        Self { p, w: p * w, v: (p * w2e2 - (p * we).powi(2)).max(0.0), b: p * we, clear: p, bearing: false }
     }
 
     /// A link the solver weighs with a fixed sigma, whatever the real noise and mean error.
@@ -176,14 +183,16 @@ const EXP_POINTS: [f32; 8] = [0.0645, 0.2076, 0.3747, 0.5754, 0.8267, 1.1632, 1.
 fn twr_moments(dev: &Profile, tag: &Profile, path: &Path) -> (f32, f32, f32) {
     let noise = radio::uwb_range_sigma(dev, tag, path).powi(2);
     let full = 1.0 / radio::twr_solver_sigma(dev, false).powi(2);
+    // What the antennas' shape adds in this direction: the solver can't see it either.
+    let shape = path.antenna_bias_m;
     if path.walls == 0 {
-        return (full, 0.0, full * full * noise);
+        return (full, full * shape, full * full * (noise + shape * shape));
     }
     let flagged = 1.0 / radio::twr_solver_sigma(dev, true).powi(2);
     let (bias, spread) = (path.bias_eq * dev.nlos_bias_m, path.bias_eq * dev.nlos_sigma_m);
     let (mut w2, mut we, mut w2e2) = (0.0, 0.0, 0.0);
     for x in EXP_POINTS {
-        let e = bias + spread * x;
+        let e = bias + spread * x + shape;
         let f = radio::first_path_flag_chance(path, e);
         let mean_w = f * flagged + (1.0 - f) * full;
         let mean_w2 = f * flagged * flagged + (1.0 - f) * full * full;
@@ -193,6 +202,15 @@ fn twr_moments(dev: &Profile, tag: &Profile, path: &Path) -> (f32, f32, f32) {
     }
     let n = EXP_POINTS.len() as f32;
     ((w2 / n).sqrt(), we / n, w2e2 / n)
+}
+
+/// How often the first-path check flags a link, so that the solver all but ignores it.
+fn twr_flagged_share(dev: &Profile, path: &Path) -> f32 {
+    if path.walls == 0 {
+        return 0.0;
+    }
+    let (bias, spread) = (path.bias_eq * dev.nlos_bias_m, path.bias_eq * dev.nlos_sigma_m);
+    EXP_POINTS.iter().map(|x| radio::first_path_flag_chance(path, bias + spread * x + path.antenna_bias_m)).sum::<f32>() / EXP_POINTS.len() as f32
 }
 
 /// (mean, spread) a late first path adds to a range.
@@ -213,7 +231,9 @@ pub fn link_info(m: Method, dev: &Profile, tag: &Profile, path: &Path, angle: f3
                 return None;
             }
             let (w, we, w2e2) = twr_moments(dev, tag, path);
-            LinkInfo::of(1.0 - radio::uwb_drop_probability(dev, path), w, we, w2e2)
+            let p = 1.0 - radio::uwb_drop_probability(dev, path);
+            let trusted = p * (1.0 - twr_flagged_share(dev, path));
+            LinkInfo { clear: if trusted >= 0.5 { trusted } else { 0.0 }, ..LinkInfo::of(p, w, we, w2e2) }
         }
         Method::Tdoa => {
             if !path.uwb_blink_passes(dev, tag) {
@@ -222,7 +242,9 @@ pub fn link_info(m: Method, dev: &Profile, tag: &Profile, path: &Path, angle: f3
             // The TDoA solver has no first-path check: every arrival counts the same.
             let s = radio::uwb_arrival_sigma(dev);
             let (mean, spread) = nlos_excess(dev, path);
-            LinkInfo::fixed(1.0 - radio::uwb_blink_drop_probability(dev, tag, path), s, s * s + spread * spread, mean)
+            let i = LinkInfo::fixed(1.0 - radio::uwb_blink_drop_probability(dev, tag, path), s, s * s + spread * spread, mean + path.antenna_bias_m);
+            // Nothing flags a late arrival here, so a link running long is simply a bad one.
+            LinkInfo { clear: if mean < 0.1 { i.p } else { 0.0 }, ..i }
         }
         Method::Rssi => {
             // A wall reads as distance, and an antenna's gain as closeness: the solver
@@ -246,16 +268,43 @@ pub fn link_info(m: Method, dev: &Profile, tag: &Profile, path: &Path, angle: f3
         }
         Method::Read => {
             let p = radio::rfid_read_probability(dev, tag, path, g_r);
-            LinkInfo { p, w: p, v: p, b: 0.0, bearing: false }
+            LinkInfo { p, w: p, v: p, b: 0.0, clear: p, bearing: false }
         }
     };
     (info.p >= 0.02).then_some(info)
+}
+
+/// A link that is `clear` most of the time and `busy` for a share `q` of it. Its moments are
+/// the mixture's, so a link somebody often stands in counts for what it's really worth.
+fn mix(clear: Option<LinkInfo>, busy: Option<LinkInfo>, q: f32) -> Option<LinkInfo> {
+    let none = LinkInfo { p: 0.0, w: 0.0, v: 0.0, b: 0.0, clear: 0.0, bearing: clear.or(busy)?.bearing };
+    let (a, c) = (clear.unwrap_or(none), busy.unwrap_or(none));
+    let at = |x: f32, y: f32| (1.0 - q) * x + q * y;
+    let b = at(a.b, c.b);
+    let second = at(a.v + a.b * a.b, c.v + c.b * c.b);
+    // Only a link that's normally trustworthy can be let down by a person.
+    let trusted = if a.clear > 0.0 { at(a.clear, c.clear) } else { 0.0 };
+    Some(LinkInfo { p: at(a.p, c.p), w: at(a.w, c.w), v: (second - b * b).max(0.0), b, clear: trusted, bearing: a.bearing }).filter(|i| i.p >= 0.02)
 }
 
 /// The Entry list of one device over all the points. `gain(fwd, dir)` is the
 /// antenna gain on the link: the reader's alone for RFID, both ends otherwise.
 #[allow(clippy::too_many_arguments)]
 pub fn column<S: RadioScene, G: Fn(&Profile, Vec3, Vec3) -> f32 + Sync>(scene: &S, pts: &[Point], method: Method, dev: &Profile, tag: &Profile, pos: Vec3, fwd: Vec3, gain: &G) -> Column {
+    column_shaped(scene, pts, method, dev, tag, pos, fwd, gain, &|_, _| 0.0)
+}
+
+/// The same with `shape(fwd, dir)`, the range shift the antennas' shape puts on a UWB link in
+/// that direction, as the simulation applies it. Under the conditions in force: with people
+/// about, a link is sometimes blocked by one, as in the simulation.
+#[allow(clippy::too_many_arguments)]
+pub fn column_shaped<S: RadioScene, G: Fn(&Profile, Vec3, Vec3) -> f32 + Sync, B: Fn(Vec3, Vec3) -> f32 + Sync>(scene: &S, pts: &[Point], method: Method, dev: &Profile, tag: &Profile, pos: Vec3, fwd: Vec3, gain: &G, shape: &B) -> Column {
+    column_in(radio::SiteConditions::current(), scene, pts, method, dev, tag, pos, fwd, gain, shape)
+}
+
+/// The same with the conditions given.
+#[allow(clippy::too_many_arguments)]
+pub fn column_in<S: RadioScene, G: Fn(&Profile, Vec3, Vec3) -> f32 + Sync, B: Fn(Vec3, Vec3) -> f32 + Sync>(site: radio::SiteConditions, scene: &S, pts: &[Point], method: Method, dev: &Profile, tag: &Profile, pos: Vec3, fwd: Vec3, gain: &G, shape: &B) -> Column {
     let fwd = fwd.normalize_or(Vec3::NEG_Y);
     let one = |(k, pt): (usize, &Point)| -> Option<Entry> {
         let d = pt.pos - pos;
@@ -269,9 +318,19 @@ pub fn column<S: RadioScene, G: Fn(&Profile, Vec3, Vec3) -> f32 + Sync>(scene: &
         let g_r = if method == Method::Read { g } else { 0.0 };
         if method != Method::Read {
             path.gain_db = g;
+            path.antenna_bias_m = shape(fwd, u);
         }
-        let i = link_info(method, dev, tag, &path, fwd.angle_between(u), g_r)?;
-        Some(Entry { pt: k as u32, p: i.p, w: i.w, v: i.v, b: i.b, u: u.to_array(), bearing: i.bearing })
+        let angle = fwd.angle_between(u);
+        let clear = link_info(method, dev, tag, &path, angle, g_r);
+        let i = if method != Method::Read && site.people_per_100m2 > 0.0 {
+            // As the simulation has it: someone in the link is a thick obstruction.
+            let mut busy = path;
+            busy.cross_weighted(radio::Material::Generic, 1.5);
+            mix(clear, link_info(method, dev, tag, &busy, angle, g_r), site.person_in_path(path.distance))?
+        } else {
+            clear?
+        };
+        Some(Entry { pt: k as u32, p: i.p, w: i.w, v: i.v, b: i.b, clear: i.clear, at: [pos.x, pos.z], u: u.to_array(), bearing: i.bearing })
     };
     pts.par_iter().enumerate().filter_map(one).collect()
 }
@@ -328,6 +387,12 @@ pub struct Config {
     /// Spots taken by other technologies' devices: nothing may land on them,
     /// neither in the search nor when fine-tuning.
     pub avoid: Vec<Vec3>,
+    /// Judge coverage and p95 by each point's weight, not by counting points: a share of
+    /// where tags really are, instead of a share of the floor.
+    pub weighted: bool,
+    /// Which condition of the site each point stands in (parallel to the points; empty = one).
+    /// A plan is then judged on its worst condition, not on the average of them.
+    pub condition_of: Vec<u8>,
 }
 
 impl Default for Config {
@@ -351,6 +416,8 @@ impl Default for Config {
             zone_count: 0,
             force_add: 0,
             avoid: Vec::new(),
+            weighted: false,
+            condition_of: Vec::new(),
         }
     }
 }
@@ -383,12 +450,45 @@ pub struct Acc {
     pub n: u16,
     /// Σ ln(1 − p): the chance every device misses.
     miss: f64,
+    /// Σp and Σp(1 − p): how many devices measure at a given moment, and how that varies.
+    heard: f64,
+    heard_var: f64,
+    /// The same counting only measurements the solver trusts, and how many devices it normally
+    /// can trust here.
+    trusted: f64,
+    trusted_var: f64,
+    steady: u16,
+    /// Σx, Σz, Σx², Σxz and Σz² of where the devices counted in `n` stand.
+    layout: [f64; 5],
     /// The most informative device: losing it is the worst single failure.
     top: Option<(u32, Entry)>,
 }
 
+/// Devices closer to a straight line than this (RMS, m) can't tell a tag which side it's on: the
+/// mirror image fits their ranges nearly as well. With 10 cm ranges that takes a good 30 cm off
+/// the line when the tag is about as far from the line as the anchors are from each other.
+pub const MIRROR_SPREAD_M: f32 = 0.4;
+
+/// Chance a sum of independent on-off draws with this mean and variance reaches `need`.
+fn at_least(mean: f64, var: f64, need: usize) -> f32 {
+    let var = var.max(0.0);
+    if var < 1e-9 {
+        return if mean + 1e-6 >= need as f64 { 1.0 } else { 0.0 };
+    }
+    radio::normal_cdf(((mean - need as f64 + 0.5) / var.sqrt()) as f32)
+}
+
 impl Acc {
     fn apply(&mut self, e: &Entry, sign: f64) {
+        let p = e.p as f64;
+        self.heard += sign * p;
+        self.heard_var += sign * p * (1.0 - p);
+        if e.clear > 0.0 {
+            let c = e.clear as f64;
+            self.trusted += sign * c;
+            self.trusted_var += sign * c * (1.0 - c);
+            self.steady = if sign > 0.0 { self.steady + 1 } else { self.steady.saturating_sub(1) };
+        }
         let (w, v, b) = (e.w as f64 * sign, e.v as f64 * sign, e.b as f64 * sign);
         let u = [e.u[0] as f64, e.u[1] as f64, e.u[2] as f64];
         let uu = [u[0] * u[0], u[0] * u[1], u[0] * u[2], u[1] * u[1], u[1] * u[2], u[2] * u[2]];
@@ -414,6 +514,10 @@ impl Acc {
         }
         if e.p >= 0.5 {
             self.n = if sign > 0.0 { self.n + 1 } else { self.n.saturating_sub(1) };
+            let (x, z) = (e.at[0] as f64, e.at[1] as f64);
+            for (slot, value) in self.layout.iter_mut().zip([x, z, x * x, x * z, z * z]) {
+                *slot += sign * value;
+            }
         }
         self.miss += sign * (1.0 - e.p.min(0.9999) as f64).ln();
     }
@@ -428,6 +532,45 @@ impl Acc {
     /// Chance at least one device reads here.
     pub fn p_any(&self) -> f32 {
         1.0 - self.miss.exp() as f32
+    }
+
+    /// Chance at least `need` devices measure at the same moment, each on its own draw: what a
+    /// fix takes. Five links that each work 60 % of the time look fine one by one, and leave a
+    /// tag with no position a third of the time.
+    pub fn available(&self, need: usize) -> f32 {
+        at_least(self.heard, self.heard_var, need)
+    }
+
+    /// Chance those moments have enough measurements the solver can trust. A person in a link
+    /// gets it flagged and all but ignored, so with too few left the position has only poor
+    /// links to go on: about a metre out, where the average of good and bad moments would look
+    /// fine. Where too few can ever be trusted there's no such moment to fall out of, and `err`
+    /// has already counted the weak links for what they are.
+    pub fn dependable(&self, need: usize) -> f32 {
+        if self.on_one_line() {
+            return 0.0;
+        }
+        let any = self.available(need);
+        if (self.steady as usize) < need { any } else { any.min(at_least(self.trusted, self.trusted_var, need)) }
+    }
+
+    /// How far the devices heard here stray from their best straight line (RMS, m).
+    pub fn off_line(&self) -> f32 {
+        let n = self.n as f64;
+        if n < 2.0 {
+            return 0.0;
+        }
+        let [x, z, xx, xz, zz] = self.layout;
+        let (cxx, cxz, czz) = (xx / n - (x / n).powi(2), xz / n - x / n * (z / n), zz / n - (z / n).powi(2));
+        let half = (cxx + czz) * 0.5;
+        (half - (((cxx - czz) * 0.5).powi(2) + cxz * cxz).sqrt()).max(0.0).sqrt() as f32
+    }
+
+    /// Everything heard here hangs along one line, typically one wall of a room. The accuracy
+    /// figure can't see the trouble: the mirror image of the tag fits just as tightly, and a
+    /// parked tag that lands on it stays there, metres out. Only a position, not a read.
+    pub fn on_one_line(&self) -> bool {
+        self.n >= 2 && self.off_line() < MIRROR_SPREAD_M
     }
 
     /// RMS position error the solver gets here (m), infinite without a fix: x̂ − x =
@@ -490,11 +633,45 @@ impl Acc {
 /// A circular normal error of RMS 1 holds 95 % of its readings within √(ln 20).
 pub const R95_PER_RMS: f32 = 1.7308;
 
+/// Judged where tags are, a spot with a good position this share of the time counts as covered.
+pub const USABLE_SHARE: f32 = 0.9;
+
+/// How a plan does in one condition of the site, by point weight.
+#[derive(Clone, Copy, Debug)]
+pub struct ConditionMetrics {
+    pub coverage: f32,
+    /// By counting points: the share of the floor, however little of it tags use.
+    pub floor_coverage: f32,
+    pub p95: f32,
+    pub p95_located: f32,
+    pub p95_k1: f32,
+}
+
+/// The value 95 % of the weight lies under; infinite with no weight at all.
+pub fn weighted_p95(v: &mut [(f32, f32)]) -> f32 {
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f64 = v.iter().map(|x| x.1 as f64).sum();
+    if total <= 0.0 {
+        return f32::INFINITY;
+    }
+    let mut seen = 0.0;
+    for (value, weight) in v.iter() {
+        seen += *weight as f64;
+        if seen >= 0.95 * total {
+            return *value;
+        }
+    }
+    f32::INFINITY
+}
+
 /// What a plan achieves.
 #[derive(Clone, Debug, Default)]
 pub struct Metrics {
-    /// Share of the floor (or of the zones, reads inside zones only) covered.
+    /// Share of the floor (or of the zones, reads inside zones only) covered. With `weighted`,
+    /// of the point weight; with conditions, in the worst of them. So are the p95s below.
     pub coverage: f32,
+    /// One entry per condition when judged by weight or by condition, else none.
+    pub by_condition: Vec<ConditionMetrics>,
     /// How far 95 % of readings land, at the 95th percentile of the floor: a point with no
     /// fix counts as infinitely far, so this is infinite past 5 % without a position.
     pub p95: f32,
@@ -667,8 +844,10 @@ impl<'a> Planner<'a> {
         }
         let err = err.min(c.err_cap * 4.0);
         let q = fix_share(err, c.target_m) as f64;
+        // Judged where tags are, a good position half the time is half a position.
+        let there = if c.weighted { a.dependable(c.need) as f64 } else { 1.0 };
         // The second term keeps a gradient once a point is far better than the target.
-        w * (0.4 + 0.6 * q + 0.1 / (1.0 + (err / c.target_m.max(1e-3)) as f64))
+        w * ((0.4 + 0.6 * q) * there + 0.1 / (1.0 + (err / c.target_m.max(1e-3)) as f64))
     }
 
     fn with(&self, a: &Acc, col: u32, e: &Entry) -> Acc {
@@ -795,6 +974,13 @@ impl<'a> Planner<'a> {
         let mut judged_errs: Vec<f32> = Vec::new();
         let mut errs_k1: Vec<f32> = Vec::new();
         let (mut stray, mut stray_n) = (0.0f32, 0usize);
+        let by_weight = c.weighted || !c.condition_of.is_empty();
+        let groups = c.condition_of.iter().map(|x| *x as usize + 1).max().unwrap_or(1);
+        // Per condition: covered points, every point, and (radius, weight) for each p95.
+        let mut hit_in = vec![(0.0f64, 0.0f64, 0usize, 0usize); if by_weight { groups } else { 0 }];
+        let mut radii: Vec<Vec<(f32, f32)>> = vec![Vec::new(); hit_in.len()];
+        let mut located_in: Vec<Vec<(f32, f32)>> = vec![Vec::new(); hit_in.len()];
+        let mut k1_in: Vec<Vec<(f32, f32)>> = vec![Vec::new(); hit_in.len()];
         for (k, pt) in self.pts.iter().enumerate() {
             for &z in &pt.zones {
                 zone_all[z as usize] += 1;
@@ -811,11 +997,16 @@ impl<'a> Planner<'a> {
                 &rebuilt
             };
             let in_scope = if c.zones_only { !pt.zones.is_empty() } else { pt.floor };
+            let group = c.condition_of.get(k).map_or(0, |x| *x as usize);
+            let weight = if c.weighted { pt.weight } else { 1.0 };
             let hit = if c.method == Method::Read {
                 a.p_any() >= c.read_p
             } else if (a.n as usize) < c.need {
                 if in_scope {
                     judged_errs.push(f32::INFINITY);
+                    if by_weight {
+                        radii[group].push((f32::INFINITY, weight));
+                    }
                 }
                 false
             } else {
@@ -823,6 +1014,18 @@ impl<'a> Planner<'a> {
                 located.push((err * R95_PER_RMS).min(c.err_cap * 4.0));
                 if in_scope {
                     judged_errs.push(err * R95_PER_RMS);
+                }
+                if by_weight {
+                    located_in[group].push(((err * R95_PER_RMS).min(c.err_cap * 4.0), weight));
+                    if in_scope {
+                        // Part of the time too few devices are heard, and that's a miss, as in
+                        // the simulated test. Part of the time they're heard but too few can be
+                        // trusted, and the position is poor but there.
+                        let (there, good) = (a.available(c.need), a.dependable(c.need));
+                        radii[group].push((err * R95_PER_RMS, weight * good));
+                        radii[group].push(((err * R95_PER_RMS * 3.0).max(c.err_cap), weight * (there - good).max(0.0)));
+                        radii[group].push((f32::INFINITY, weight * (1.0 - there)));
+                    }
                 }
                 let mut worst = err;
                 if exact && c.redundancy {
@@ -833,12 +1036,24 @@ impl<'a> Planner<'a> {
                         worst = worst.max(less.err(c.method, c.dim3));
                     }
                     errs_k1.push((worst * R95_PER_RMS).min(c.err_cap * 4.0));
+                    if by_weight {
+                        k1_in[group].push(((worst * R95_PER_RMS).min(c.err_cap * 4.0), weight));
+                    }
                 }
-                worst * R95_PER_RMS <= c.err_cap
+                worst * R95_PER_RMS <= c.err_cap && (!c.weighted || a.dependable(c.need) >= USABLE_SHARE)
             };
             if in_scope {
                 judged += 1;
                 covered += hit as usize;
+                if by_weight {
+                    let h = &mut hit_in[group];
+                    h.1 += weight as f64;
+                    h.3 += 1;
+                    if hit {
+                        h.0 += weight as f64;
+                        h.2 += 1;
+                    }
+                }
             }
             if c.zones_only && pt.zones.is_empty() {
                 stray += a.p_any();
@@ -863,11 +1078,26 @@ impl<'a> Planner<'a> {
         } else {
             0
         };
+        // Across conditions the worst one is the answer: a good day can't make up for a bad one.
+        let by_condition: Vec<ConditionMetrics> = hit_in
+            .iter()
+            .enumerate()
+            .map(|(g, h)| ConditionMetrics {
+                coverage: (h.0 / h.1.max(1e-9)) as f32,
+                floor_coverage: h.2 as f32 / h.3.max(1) as f32,
+                p95: weighted_p95(&mut radii[g]),
+                p95_located: weighted_p95(&mut located_in[g]),
+                p95_k1: weighted_p95(&mut k1_in[g]),
+            })
+            .collect();
+        let worst = |f: fn(&ConditionMetrics) -> f32| by_condition.iter().map(f).fold(f32::MIN, f32::max);
+        let weakest = by_condition.iter().map(|m| m.coverage).fold(f32::MAX, f32::min);
         Metrics {
-            coverage: covered as f32 / judged.max(1) as f32,
-            p95: pct(&mut judged_errs),
-            p95_located: pct(&mut located),
-            p95_k1: pct(&mut errs_k1),
+            coverage: if by_weight { weakest } else { covered as f32 / judged.max(1) as f32 },
+            p95: if by_weight { worst(|m| m.p95) } else { pct(&mut judged_errs) },
+            p95_located: if by_weight { worst(|m| m.p95_located) } else { pct(&mut located) },
+            p95_k1: if by_weight { worst(|m| m.p95_k1) } else { pct(&mut errs_k1) },
+            by_condition,
             zones: zone_hit.iter().zip(&zone_all).map(|(&h, &n)| if n == 0 { f32::NAN } else { h as f32 / n as f32 }).collect(),
             stray: if stray_n > 0 { stray / stray_n as f32 } else { 0.0 },
             conflicts,
@@ -980,7 +1210,10 @@ impl<'a> Planner<'a> {
             }
             self.add(c);
             let after = self.metrics();
-            if self.worth(&now, &after) {
+            // Judged across conditions the headline figures are the worst day's alone, and a
+            // device can earn its place on the others.
+            let helps_overall = self.cfg.weighted && g > 0.003 * self.total_w;
+            if self.worth(&now, &after) || helps_overall {
                 unpaid.clear();
                 now = after;
                 continue;
@@ -1055,7 +1288,11 @@ impl<'a> Planner<'a> {
 
     /// Greedy picks bunch up: try replacing each with its best alternative.
     fn swap(&mut self) {
-        for _ in 0..3 {
+        self.swap_rounds(3);
+    }
+
+    fn swap_rounds(&mut self, rounds: usize) {
+        for _ in 0..rounds {
             let mut improved = false;
             for k in self.chosen.clone() {
                 if !self.chosen.contains(&k) {
@@ -1092,14 +1329,17 @@ impl<'a> Planner<'a> {
             let was_met = self.met(&now);
             let zones = |m: &Metrics| m.zones.iter().filter(|z| !z.is_nan()).sum::<f32>();
             let mut best: Option<(usize, f64)> = None;
+            let score_before = self.sum;
             for c in self.chosen.clone() {
                 self.remove(c);
                 let m = self.metrics();
-                // Short of the target (budget, racks): drop only dead weight.
+                // Short of the target (budget, racks): drop only dead weight. Dead on every
+                // day, when there are several: the headline figures only show the worst one's.
+                let idle_overall = !self.cfg.weighted || self.sum >= score_before - 0.001 * self.total_w;
                 let ok = if was_met {
                     self.met(&m)
                 } else {
-                    m.coverage >= now.coverage - 1e-6 && zones(&m) >= zones(&now) - 1e-6 && m.p95_located <= now.p95_located + 0.005 && (!self.cfg.redundancy || m.p95_k1 <= now.p95_k1 + 0.005)
+                    idle_overall && m.coverage >= now.coverage - 1e-6 && zones(&m) >= zones(&now) - 1e-6 && m.p95_located <= now.p95_located + 0.005 && (!self.cfg.redundancy || m.p95_k1 <= now.p95_k1 + 0.005)
                 };
                 if ok && best.is_none_or(|(_, s)| self.sum > s) {
                     best = Some((c, self.sum));
@@ -1181,6 +1421,108 @@ impl<'a> Planner<'a> {
             self.refine(m);
         }
     }
+
+    /// The best set the search finds at each size in `sizes` (ascending), whatever the targets:
+    /// what each extra device buys. Goes `beyond` more sizes past the first that is `enough`,
+    /// to show what a margin costs, and stops where nothing more earns its place.
+    pub fn curve(&mut self, sizes: &[usize], mover: Option<&dyn Mover>, enough: &dyn Fn(&Metrics) -> bool, beyond: usize) -> Vec<CurveStep> {
+        let saved = (self.target_cov.take(), std::mem::take(&mut self.zone_target));
+        let mut out: Vec<CurveStep> = Vec::new();
+        let mut past = None;
+        for &n in sizes {
+            self.reset();
+            self.run(n, mover);
+            let step = CurveStep { chosen: self.chosen.clone(), metrics: self.metrics() };
+            let size = step.chosen.len();
+            let good = enough(&step.metrics);
+            if !out.last().is_some_and(|l: &CurveStep| l.chosen.len() == size) {
+                out.push(step);
+            }
+            if size < n {
+                break;
+            }
+            past = match past {
+                None if good => Some(0),
+                Some(k) => Some(k + 1),
+                other => other,
+            };
+            if past.is_some_and(|k| k >= beyond) {
+                break;
+            }
+        }
+        (self.target_cov, self.zone_target) = saved;
+        self.reset();
+        out
+    }
+
+    /// A set of `n` grown from a smaller one rather than searched for afresh: much quicker, and
+    /// a plan that can be built in stages, since each size mostly keeps the last one's spots.
+    pub fn grow(&mut self, from: &[usize], n: usize, mover: Option<&dyn Mover>) -> CurveStep {
+        self.rebuild(from);
+        self.greedy(n.saturating_sub(self.chosen.len()));
+        // A walled-off room only gets a position once a fix's worth of devices reach it, so
+        // one more shows no gain. Give the search room to pay for them together.
+        if self.chosen.len() <= from.len() {
+            self.rebuild(from);
+            self.greedy(self.cfg.need);
+        }
+        self.swap_rounds(1);
+        self.prune();
+        if let Some(m) = mover {
+            self.refine(m);
+        }
+        CurveStep { chosen: self.chosen.clone(), metrics: self.metrics() }
+    }
+
+    /// Ranks what it finds whatever the targets, as `curve` does.
+    pub fn without_targets(&mut self) {
+        self.target_cov = None;
+        self.zone_target.clear();
+    }
+
+    /// The mounting points and what each gives, for the next search over the same site. Fine-
+    /// tuned spots are among them, so a set's indices stay good.
+    pub fn into_parts(self) -> (Vec<Candidate>, Vec<Column>) {
+        (self.cands, self.cols)
+    }
+
+    /// Back to exactly this set.
+    pub fn set(&mut self, chosen: &[usize]) {
+        self.rebuild(chosen);
+    }
+
+    /// Everything a device gives each point it reaches.
+    pub fn column_of(&self, c: usize) -> &Column {
+        &self.cols[c]
+    }
+
+    /// Which points have a usable fix with the current set.
+    pub fn covered(&self) -> Vec<bool> {
+        let c = &self.cfg;
+        self.accs.iter().map(|a| a.n as usize >= c.need && a.err(c.method, c.dim3) * R95_PER_RMS <= c.err_cap && (!c.weighted || a.dependable(c.need) >= USABLE_SHARE)).collect()
+    }
+
+    /// RMS position error at a point with the current set, infinite without a fix.
+    pub fn err_at(&self, k: usize) -> f32 {
+        let c = &self.cfg;
+        let a = &self.accs[k];
+        if (a.n as usize) < c.need { f32::INFINITY } else { a.err(c.method, c.dim3) }
+    }
+
+    /// The plan and each point's coverage with device `c` gone. It comes back afterwards.
+    pub fn without(&mut self, c: usize) -> (Metrics, Vec<bool>) {
+        self.remove(c);
+        let out = (self.metrics(), self.covered());
+        self.add(c);
+        out
+    }
+}
+
+/// The best set found at one size, and what it achieves.
+#[derive(Clone, Debug)]
+pub struct CurveStep {
+    pub chosen: Vec<usize>,
+    pub metrics: Metrics,
 }
 
 /// A gap in the walls, or a door or dock: where goods cross the zone boundary.
@@ -2208,5 +2550,403 @@ mod tests {
             worst = worst.max((f.pos - truth).length());
         }
         assert!(worst < 2.0, "{worst}");
+    }
+
+    #[test]
+    fn weighted_p95_is_a_share_of_the_weight_not_of_the_points() {
+        // The far-off spot is one point of three, and hardly anyone's there.
+        let mut v = vec![(1.0, 1.0), (10.0, 0.01), (2.0, 1.0)];
+        assert_eq!(weighted_p95(&mut v), 2.0);
+        // Evenly weighted it's the ordinary 95th.
+        let mut even: Vec<(f32, f32)> = (1..=100).map(|i| (i as f32, 1.0)).collect();
+        assert_eq!(weighted_p95(&mut even), 95.0);
+        // A point with no fix, where a lot of the weight is, can't be averaged away.
+        let mut lost = vec![(0.1, 1.0), (f32::INFINITY, 1.0)];
+        assert!(weighted_p95(&mut lost).is_infinite());
+        assert!(weighted_p95(&mut []).is_infinite());
+    }
+
+    #[test]
+    fn the_search_puts_devices_where_the_weight_is() {
+        let (d, t) = (anchor(), uwb_tag());
+        let (lo, hi) = (Vec2::ZERO, Vec2::new(40.0, 16.0));
+        let mut pts = floor(lo, hi, 2.0, 1.2);
+        for p in &mut pts {
+            p.weight = if p.pos.x < 14.0 { 10.0 } else { 0.1 };
+        }
+        let cands = grid_cands(lo, hi, 3.0, 4.0);
+        let cols = columns(&Boxes::default(), &pts, Method::Twr, &d, &t, &cands);
+        let cfg = Config { weighted: true, ..Default::default() };
+        let mut p = Planner::new(cfg, &pts, cands, cols, Vec::new(), None);
+        let steps = p.curve(&[4], None, &|_: &Metrics| false, 0);
+        let mean_x = steps[0].chosen.iter().map(|&c| p.cands[c].pos.x).sum::<f32>() / steps[0].chosen.len() as f32;
+        assert!(mean_x < 16.0, "the busy end is x < 14: {mean_x}");
+    }
+
+    #[test]
+    fn across_conditions_the_worst_is_the_answer() {
+        let (d, t) = (anchor(), uwb_tag());
+        let (lo, hi) = (Vec2::ZERO, Vec2::new(20.0, 10.0));
+        let one = floor(lo, hi, 2.0, 1.2);
+        let n = one.len();
+        let pts: Vec<Point> = one.iter().chain(one.iter()).cloned().collect();
+        let condition_of: Vec<u8> = (0..2 * n).map(|k| (k >= n) as u8).collect();
+        let cands = grid_cands(lo, hi, 3.0, 4.0);
+        // The second day a concrete wall splits the floor.
+        let walled = Boxes(vec![(Vec3::new(10.0, 0.0, -1.0), Vec3::new(10.2, 4.0, 11.0), Material::Concrete)]);
+        let cols: Vec<Column> = cands
+            .iter()
+            .map(|c| {
+                let mut col = column(&Boxes::default(), &pts[..n], Method::Twr, &d, &t, c.pos, c.facing, &no_gain);
+                let more = column(&walled, &pts[n..], Method::Twr, &d, &t, c.pos, c.facing, &no_gain);
+                col.extend(more.into_iter().map(|mut e| {
+                    e.pt += n as u32;
+                    e
+                }));
+                col
+            })
+            .collect();
+        let cfg = Config { weighted: true, condition_of, ..Default::default() };
+        let mut p = Planner::new(cfg, &pts, cands, cols, Vec::new(), None);
+        let set: Vec<usize> = p.curve(&[4], None, &|_: &Metrics| false, 0).remove(0).chosen;
+        p.set(&set);
+        let m = p.metrics();
+        assert_eq!(m.by_condition.len(), 2);
+        assert!(m.by_condition[1].p95 >= m.by_condition[0].p95, "{:?}", m.by_condition);
+        assert_eq!(m.p95, m.by_condition[1].p95, "the headline is the bad day's");
+        assert_eq!(m.coverage, m.by_condition[0].coverage.min(m.by_condition[1].coverage));
+    }
+
+    #[test]
+    fn anchors_in_a_line_cant_say_which_side_a_tag_is_on() {
+        let (d, t) = (anchor(), uwb_tag());
+        let line = vec![Vec3::new(0.0, 3.0, 0.0), Vec3::new(6.0, 3.0, 0.0), Vec3::new(12.0, 3.0, 0.0)];
+        // What the solver makes of perfect ranges, starting as a new tag does, with no idea.
+        let solve = |at: &[Vec3], p: Vec3| -> f32 {
+            let a: Vec<DVec3> = at.iter().map(|q| q.as_dvec3()).collect();
+            let r: Vec<f64> = at.iter().map(|q| q.distance(p) as f64).collect();
+            let s = vec![0.1; at.len()];
+            solver::twr_solve(Dim::Plane(p.y as f64), &a, &r, &s, None, true).map_or(f32::INFINITY, |f| (f.pos - p.as_dvec3()).length() as f32)
+        };
+        let (front, back) = (Vec3::new(5.0, 1.2, 5.0), Vec3::new(5.0, 1.2, -5.0));
+        let on_line = solve(&line, front).max(solve(&line, back));
+        println!("anchors in a line: worst error {on_line:.2} m");
+        assert!(on_line > 5.0, "on one side or the other it's the mirror image, or nothing: {on_line}");
+        // The accuracy figure looks fine, which is why this needs its own check.
+        let pts = [Point { pos: front, weight: 1.0, floor: true, zones: Vec::new() }];
+        let acc_of = |at: &[Vec3]| {
+            let mut a = Acc::default();
+            for (i, q) in at.iter().enumerate() {
+                for e in column(&Boxes::default(), &pts, Method::Twr, &d, &t, *q, front - *q, &no_gain) {
+                    a.add(i as u32, &e);
+                }
+            }
+            a
+        };
+        let a = acc_of(&line);
+        assert!(a.err(Method::Twr, false) < 0.3, "{}", a.err(Method::Twr, false));
+        assert!(a.on_one_line());
+        assert_eq!(a.dependable(3), 0.0);
+        // One anchor off the line and both sides come right.
+        let mut spread = line.clone();
+        spread.push(Vec3::new(6.0, 3.0, 8.0));
+        assert!(solve(&spread, front) < 0.05, "{}", solve(&spread, front));
+        assert!(solve(&spread, back) < 0.05, "{}", solve(&spread, back));
+        let b = acc_of(&spread);
+        assert!(!b.on_one_line(), "{}", b.off_line());
+        assert!(b.dependable(3) > 0.5, "{}", b.dependable(3));
+        // Taking a device out again leaves the same answer as never having it.
+        let mut c = b;
+        for e in column(&Boxes::default(), &pts, Method::Twr, &d, &t, spread[3], front - spread[3], &no_gain) {
+            c.apply(&e, -1.0);
+        }
+        assert!(c.on_one_line(), "{}", c.off_line());
+    }
+
+    // A room behind metal walls: nothing outside reaches it, and it takes three inside for a
+    // fix. Growing one device at a time, each of the three alone showed no gain and was dropped.
+    #[test]
+    fn growing_a_plan_can_fill_a_walled_off_room() {
+        let (d, t) = (Profile { dropout: 0.0, ..anchor() }, uwb_tag());
+        let room_lo = Vec3::new(20.0, 0.0, 0.0);
+        let scene = Boxes(vec![(Vec3::new(19.8, 0.0, -1.0), Vec3::new(20.0, 4.0, 11.0), Material::Metal)]);
+        let (lo, hi) = (Vec2::ZERO, Vec2::new(30.0, 10.0));
+        let pts = floor(lo, hi, 2.0, 1.2);
+        let cands = grid_cands(lo, hi, 3.0, 4.0);
+        let cols = columns(&scene, &pts, Method::Twr, &d, &t, &cands);
+        let cfg = Config { weighted: true, ..Default::default() };
+        let mut p = Planner::new(cfg, &pts, cands, cols, Vec::new(), None);
+        p.without_targets();
+        // Start with everything on the bigger side, then grow as the search does.
+        let on_hall: Vec<usize> = (0..p.cands.len()).filter(|&c| p.cands[c].pos.x < room_lo.x).collect();
+        let mut set: Vec<usize> = on_hall.iter().step_by(on_hall.len() / 5).copied().take(5).collect();
+        assert!(set.iter().all(|&c| p.cands[c].pos.x < room_lo.x));
+        for n in set.len() + 1..=16 {
+            let step = p.grow(&set, n, None);
+            if step.chosen.len() <= set.len() {
+                break;
+            }
+            set = step.chosen;
+        }
+        let inside = set.iter().filter(|&&c| p.cands[c].pos.x > room_lo.x).count();
+        assert!(inside >= 3, "the room needs its own fix: {inside} of {}", set.len());
+        p.set(&set);
+        let room_points: Vec<usize> = (0..pts.len()).filter(|&k| pts[k].pos.x > room_lo.x + 1.0).collect();
+        let covered = p.covered();
+        assert!(room_points.iter().any(|&k| covered[k]), "and it has to work");
+    }
+
+    #[test]
+    fn a_plan_without_weights_reads_as_it_always_did() {
+        let (d, t) = (Profile { dropout: 0.0, ..anchor() }, uwb_tag());
+        let (lo, hi) = (Vec2::ZERO, Vec2::new(20.0, 10.0));
+        let pts = floor(lo, hi, 2.0, 1.2);
+        let cands = grid_cands(lo, hi, 3.0, 4.0);
+        let cols = columns(&Boxes::default(), &pts, Method::Twr, &d, &t, &cands);
+        let mut p = Planner::new(Config::default(), &pts, cands, cols, Vec::new(), None);
+        p.run(4, None);
+        assert!(p.metrics().by_condition.is_empty());
+        // With weights all equal the two ways of counting agree.
+        let plain = p.metrics();
+        p.cfg.weighted = true;
+        let weighted = p.metrics();
+        assert!((plain.coverage - weighted.coverage).abs() < 1e-6, "{} {}", plain.coverage, weighted.coverage);
+        assert!((plain.p95 - weighted.p95).abs() < 0.03 || (plain.p95.is_infinite() && weighted.p95.is_infinite()), "{} {}", plain.p95, weighted.p95);
+    }
+
+    #[test]
+    fn taking_a_device_out_to_look_leaves_the_plan_as_it_was() {
+        let (d, t) = (anchor(), uwb_tag());
+        let (lo, hi) = (Vec2::ZERO, Vec2::new(20.0, 10.0));
+        let pts = floor(lo, hi, 2.0, 1.2);
+        let cands = grid_cands(lo, hi, 3.0, 4.0);
+        let cols = columns(&Boxes::default(), &pts, Method::Twr, &d, &t, &cands);
+        let mut p = Planner::new(Config::default(), &pts, cands, cols, Vec::new(), None);
+        p.run(4, None);
+        let (before, covered) = (p.score(), p.covered());
+        let c = p.chosen[1];
+        let (without, lost) = p.without(c);
+        assert!(without.coverage <= p.metrics().coverage);
+        assert!(lost.iter().zip(&covered).all(|(after, was)| !after || *was), "losing a device covers nothing new");
+        assert!((p.score() - before).abs() < 1e-6, "{} {before}", p.score());
+        assert_eq!(p.covered(), covered);
+    }
+
+    #[test]
+    fn the_curve_shows_what_more_devices_buy_and_knows_when_to_stop() {
+        let (d, t) = (anchor(), uwb_tag());
+        let (lo, hi) = (Vec2::ZERO, Vec2::new(20.0, 10.0));
+        let pts = floor(lo, hi, 2.0, 1.2);
+        let cands = grid_cands(lo, hi, 3.0, 4.0);
+        let cols = columns(&Boxes::default(), &pts, Method::Twr, &d, &t, &cands);
+        let cfg = Config { target_coverage: Some(0.95), target_p95: Some(0.3), ..Default::default() };
+        let mut p = Planner::new(cfg, &pts, cands, cols, Vec::new(), None);
+        let all = p.curve(&[3, 4, 5, 6, 7, 8], None, &|_: &Metrics| false, 0);
+        assert!(all.len() >= 2, "{}", all.len());
+        for w in all.windows(2) {
+            assert!(w[0].chosen.len() < w[1].chosen.len());
+            assert!(w[1].metrics.p95_located <= w[0].metrics.p95_located + 0.02, "{} then {}", w[0].metrics.p95_located, w[1].metrics.p95_located);
+        }
+        // Enough at the first size, nothing past it asked for: that's where it stops.
+        let first = p.curve(&[3, 4, 5, 6], None, &|_: &Metrics| true, 0);
+        assert_eq!(first.len(), 1);
+        // The targets survive the curve, which ignores them only while it runs.
+        assert!(p.chosen.is_empty());
+        p.run(8, None);
+        assert!(p.chosen.len() <= 8);
+        assert!(p.targets_met(&p.metrics()), "{:?}", p.metrics().p95);
+    }
+
+    #[test]
+    fn a_link_somebody_stands_in_counts_for_what_its_worth() {
+        let clear = LinkInfo { p: 0.9, w: 100.0, v: 4.0, b: 0.0, clear: 0.9, bearing: false };
+        let busy = LinkInfo { p: 0.5, w: 10.0, v: 1.0, b: 2.0, clear: 0.0, bearing: false };
+        // A person takes a trustworthy link out of trust for as long as they stand in it...
+        assert!((mix(Some(clear), Some(busy), 0.5).unwrap().clear - 0.45).abs() < 1e-6);
+        // ...and a link nobody trusted anyway has nothing to lose.
+        assert_eq!(mix(Some(LinkInfo { clear: 0.0, ..clear }), Some(busy), 0.5).unwrap().clear, 0.0);
+        let same = mix(Some(clear), Some(busy), 0.0).unwrap();
+        assert_eq!((same.p, same.w, same.b), (clear.p, clear.w, clear.b));
+        assert!((same.v - clear.v).abs() < 1e-5);
+        let half = mix(Some(clear), Some(busy), 0.5).unwrap();
+        assert!((half.p - 0.7).abs() < 1e-6 && (half.w - 55.0).abs() < 1e-4 && (half.b - 1.0).abs() < 1e-6);
+        // A mean that differs between the two states is noise as well.
+        assert!(half.v > (clear.v + busy.v) / 2.0, "{}", half.v);
+        // Blocked outright by a person half the time, it's heard half as often.
+        let gone = mix(Some(clear), None, 0.5).unwrap();
+        assert!((gone.p - 0.45).abs() < 1e-6 && (gone.w - 50.0).abs() < 1e-4);
+        assert!(mix(None, None, 0.5).is_none());
+        assert!(mix(Some(LinkInfo { p: 0.03, ..clear }), None, 0.9).is_none(), "too faint to count");
+    }
+
+    #[test]
+    fn how_often_enough_devices_answer_matches_the_simulation() {
+        let (d, t) = (anchor(), uwb_tag());
+        // Far enough apart that a person is often in a link.
+        let at = vec![Vec3::new(0.0, 3.0, 0.0), Vec3::new(30.0, 3.0, 0.0), Vec3::new(30.0, 3.0, 20.0), Vec3::new(0.0, 3.0, 20.0), Vec3::new(15.0, 3.0, 0.0)];
+        let p = Vec3::new(14.0, 1.2, 9.0);
+        let pts = [Point { pos: p, weight: 1.0, floor: true, zones: Vec::new() }];
+        let scene = Boxes(vec![(Vec3::new(7.0, 0.0, 2.0), Vec3::new(7.5, 3.5, 7.0), Material::Wood), (Vec3::new(20.0, 0.0, 12.0), Vec3::new(20.5, 3.5, 18.0), Material::Wood)]);
+        let mut seen = Vec::new();
+        for crowd in [2.0, 5.0, 10.0, 20.0] {
+            let site = radio::SiteConditions { people_per_100m2: crowd, rack_fill: 1.0 };
+            let mut a = Acc::default();
+            for (i, q) in at.iter().enumerate() {
+                for e in column_in(site, &scene, &pts, Method::Twr, &d, &t, *q, p - *q, &no_gain, &|_, _| 0.0) {
+                    a.add(i as u32, &e);
+                }
+            }
+            let predicted = a.available(3);
+            let mut rng = Rng::new(21);
+            let draws = 20_000;
+            let mut enough = 0;
+            for _ in 0..draws {
+                let mut heard = 0;
+                for q in &at {
+                    let mut path = scene.path(p, *q).in_band(d.freq_mhz);
+                    if rng.chance(site.person_in_path(path.distance)) {
+                        path.cross_weighted(Material::Generic, 1.5);
+                    }
+                    heard += radio::uwb_range(&d, &t, path, &mut rng).is_some() as usize;
+                }
+                enough += (heard >= 3) as usize;
+            }
+            let simulated = enough as f32 / draws as f32;
+            println!("enough devices answer with {crowd} people per 100 m2: predicted {predicted:.3}, simulated {simulated:.3}");
+            seen.push((predicted, simulated));
+        }
+        for (predicted, simulated) in &seen {
+            assert!((predicted - simulated).abs() < 0.05, "{seen:?}");
+        }
+        assert!(seen.iter().any(|s| s.1 > 0.2 && s.1 < 0.9), "the case has to test something: {seen:?}");
+        // Out of a crowd it's nearly always, and with too few there it's never.
+        let mut sure = Acc::default();
+        for k in 0..4 {
+            sure.add(k, &Entry { p: 1.0, w: 1.0, ..Default::default() });
+        }
+        assert_eq!(sure.available(3), 1.0);
+        assert_eq!(sure.available(5), 0.0);
+    }
+
+    #[test]
+    fn a_position_only_there_part_of_the_time_misses_the_rest() {
+        let (d, t) = (anchor(), uwb_tag());
+        let pts = [Point { pos: Vec3::new(5.0, 1.2, 5.0), weight: 1.0, floor: true, zones: Vec::new() }];
+        let cands: Vec<Candidate> = square(3.0).into_iter().map(|pos| Candidate { pos, facing: Vec3::NEG_Y, mount: Mount::Free, cost: 1.0 }).collect();
+        let cols: Vec<Column> = cands
+            .iter()
+            .map(|c| {
+                let mut col = column(&Boxes::default(), &pts, Method::Twr, &d, &t, c.pos, c.facing, &no_gain);
+                // Each link answers 70 % of the time, with four links for a fix of three.
+                col.iter_mut().for_each(|e| e.p = 0.7);
+                col
+            })
+            .collect();
+        let cfg = Config { weighted: true, ..Default::default() };
+        let mut p = Planner::new(cfg, &pts, cands, cols, Vec::new(), None);
+        p.set(&[0, 1, 2, 3]);
+        let m = p.metrics();
+        assert!(m.p95.is_infinite(), "a third of updates have no position: {}", m.p95);
+        assert!(m.p95_located.is_finite(), "those that do are fine: {}", m.p95_located);
+    }
+
+    #[test]
+    fn a_crowd_makes_moments_with_too_few_trusted_links_as_the_simulation_does() {
+        let (d, t) = (anchor(), uwb_tag());
+        let at = square(3.0);
+        let p = Vec3::new(5.0, 1.2, 5.0);
+        let scene = Boxes::default();
+        let pts = [Point { pos: p, weight: 1.0, floor: true, zones: Vec::new() }];
+        let quiet = err_of(&scene, Method::Twr, &d, &t, &at, p);
+        let trusted_sigma = radio::twr_solver_sigma(&d, false) as f64;
+        let mut rows = Vec::new();
+        for crowd in [5.0, 10.0, 20.0] {
+            let site = radio::SiteConditions { people_per_100m2: crowd, rack_fill: 1.0 };
+            let mut acc = Acc::default();
+            for (i, q) in at.iter().enumerate() {
+                for e in column_in(site, &scene, &pts, Method::Twr, &d, &t, *q, p - *q, &no_gain, &|_, _| 0.0) {
+                    acc.add(i as u32, &e);
+                }
+            }
+            let predicted_share = acc.dependable(3);
+            let crowded = acc.err(Method::Twr, false);
+            // The same crowd in the simulator's own measurement, moment by moment.
+            let mut rng = Rng::new(11);
+            let draws = 8000;
+            let (mut good, mut poor) = (Vec::new(), Vec::new());
+            for _ in 0..draws {
+                let (mut a, mut r, mut s) = (Vec::new(), Vec::new(), Vec::new());
+                for q in &at {
+                    let mut path = scene.path(p, *q).in_band(d.freq_mhz);
+                    if rng.chance(site.person_in_path(path.distance)) {
+                        path.cross_weighted(Material::Generic, 1.5);
+                    }
+                    if let Some(m) = radio::twr_measure(&d, &t, path, radio::LinkDraw::new(&mut rng), true, &mut rng) {
+                        a.push(q.as_dvec3());
+                        r.push(m.range as f64);
+                        s.push(m.sigma);
+                    }
+                }
+                let trusted = s.iter().filter(|x| (**x - trusted_sigma).abs() < 1e-6).count();
+                if let Some(f) = solver::twr_solve(Dim::Plane(p.y as f64), &a, &r, &s, Some(p.as_dvec3()), true) {
+                    let e = (f.pos - p.as_dvec3()).length() as f32;
+                    if trusted >= 3 { good.push(e) } else { poor.push(e) }
+                }
+            }
+            let rms = |v: &[f32]| (v.iter().map(|e| e * e).sum::<f32>() / v.len().max(1) as f32).sqrt();
+            let share = good.len() as f32 / draws as f32;
+            println!("{crowd} people per 100 m2: trusted moments predicted {predicted_share:.3}, simulated {share:.3}; error predicted {crowded:.3}, simulated in those {:.3}, in the others {:.3} (quiet {quiet:.3})", rms(&good), rms(&poor));
+            rows.push((predicted_share, share, crowded, rms(&good), rms(&poor)));
+        }
+        for (predicted_share, share, crowded, good_rms, poor_rms) in &rows {
+            assert!((predicted_share - share).abs() < 0.08, "how often: {rows:?}");
+            // The good moments are about what the figure says, and the rest are where the error is.
+            assert!((0.4..=2.0).contains(&(good_rms / crowded)), "{rows:?}");
+            assert!(*poor_rms > 2.0 * good_rms, "the poor moments have to be the bad ones: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn the_plan_sees_an_antennas_range_shift_as_the_simulation_does() {
+        let (d, t) = (anchor(), uwb_tag());
+        let at = square(3.0);
+        let p = Vec3::new(3.0, 1.2, 4.0);
+        let pts = [Point { pos: p, weight: 1.0, floor: true, zones: Vec::new() }];
+        let scene = Boxes::default();
+        // A range reading long when the antenna looks towards +x, as a real pattern might.
+        let shift = |dir: Vec3| if dir.x > 0.0 { 0.25 } else { 0.0 };
+        let predict = |with_shift: bool| {
+            let mut a = Acc::default();
+            for (i, q) in at.iter().enumerate() {
+                for e in column_shaped(&scene, &pts, Method::Twr, &d, &t, *q, p - *q, &no_gain, &|_, dir| if with_shift { shift(dir) } else { 0.0 }) {
+                    a.add(i as u32, &e);
+                }
+            }
+            a.err(Method::Twr, false)
+        };
+        let (flat, shaped) = (predict(false), predict(true));
+        assert!(shaped > flat * 1.3, "a shift has to show in the prediction: {flat} then {shaped}");
+        // The simulator's arithmetic, with the same shift on each path.
+        let mut rng = Rng::new(5);
+        let mut errs = Vec::new();
+        for _ in 0..4000 {
+            let (mut a, mut r, mut s) = (Vec::new(), Vec::new(), Vec::new());
+            for q in &at {
+                let dir = (p - *q).normalize();
+                let path = Path { antenna_bias_m: shift(dir), ..scene.path(p, *q).in_band(d.freq_mhz) };
+                if let Some(m) = radio::twr_measure(&d, &t, path, radio::LinkDraw::new(&mut rng), true, &mut rng) {
+                    a.push(q.as_dvec3());
+                    r.push(m.range as f64);
+                    s.push(m.sigma);
+                }
+            }
+            if let Some(f) = solver::twr_solve(Dim::Plane(p.y as f64), &a, &r, &s, Some(p.as_dvec3()), true) {
+                errs.push((f.pos - p.as_dvec3()).length() as f32);
+            }
+        }
+        let rms = (errs.iter().map(|e| e * e).sum::<f32>() / errs.len() as f32).sqrt();
+        let ratio = rms / shaped;
+        println!("flat {flat:.3}, predicted with the shift {shaped:.3}, simulated {rms:.3}, ratio {ratio:.2}");
+        assert!((0.7..=1.43).contains(&ratio), "predicted {shaped}, simulated {rms}");
     }
 }

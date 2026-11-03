@@ -8,45 +8,7 @@ use sim_core::results::{ResultSet, StepKind};
 use sim_core::study::{BcKind, Condition, Study};
 
 use super::{SimState, dialog, view};
-use crate::design::{Slot, Workspace, bridge};
 use crate::theme::{self, ACCENT, icon};
-
-/// Applies the faces chosen in the design, once the user says Done.
-pub fn finish_pick(state: &mut SimState, slot: &mut Slot) {
-    if !std::mem::take(&mut slot.prompt_done) {
-        return;
-    }
-    slot.prompt = None;
-    let Some((study, condition)) = state.picking.take() else { return };
-    let Some(host) = &slot.host else { return };
-    let picked = bridge::selected_faces(&host.app.highlighted());
-    let Some(s) = state.studies.get_mut(study) else { return };
-    if picked.is_empty() {
-        state.message = Some("No faces were selected. Click a face in the view, then Done.".into());
-        return;
-    }
-    // A study is on one body, and maybe a second it touches: the picks decide the first if it wasn't
-    // chosen yet.
-    let body = s.body.clone().unwrap_or_else(|| picked[0].0.clone());
-    let mut faces = Vec::new();
-    let mut others = 0;
-    for (on, f) in &picked {
-        if *on == body {
-            faces.push(f.clone());
-        } else if s.second_body.as_deref() == Some(on.as_str()) {
-            faces.push(sim_core::study::FaceRef { second: true, ..f.clone() });
-        } else {
-            others += 1;
-        }
-    }
-    if others > 0 {
-        state.message = Some(format!("{others} selected faces were on another body than {body}, and were left out."));
-    }
-    s.body = Some(body);
-    if let Some(c) = s.conditions.get_mut(condition) {
-        c.faces = faces;
-    }
-}
 
 fn number(ui: &mut egui::Ui, label: &str, value: &mut f64, unit: &str) {
     ui.horizontal(|ui| {
@@ -163,13 +125,7 @@ fn settings_ui(ui: &mut egui::Ui, s: &mut Study) {
             number(ui, "Air temperature", &mut t.initial_temperature, "°C");
         }
         A::Electromagnetics => {
-            number(ui, "Coil current", &mut t.coil_ampere_turns, "ampere-turns");
-            if t.coil_ampere_turns != 0.0 {
-                axis_ui(ui, &mut t.axis);
-                ui.label(RichText::new("The body carries this current round the axis, in air. Conditions aren't used.").color(theme::WEAK).size(11.5));
-            } else {
-                ui.label(RichText::new("At zero: the electric field between faces with potentials.").color(theme::WEAK).size(11.5));
-            }
+            ui.label(RichText::new("The electric field between faces with potentials.").color(theme::WEAK).size(11.5));
         }
         A::IncompressibleLbm | A::ConjugateHeatTransferVoxel | A::PedestrianWindComfort => {
             number(ui, "Wind speed", &mut t.free_stream, "m/s");
@@ -203,49 +159,36 @@ fn settings_ui(ui: &mut egui::Ui, s: &mut Study) {
 
 /// Starts a study's run on a thread of its own, and says if it can't, in the user's words. The geometry
 /// is taken now, as it is.
-pub fn start_run(state: &mut SimState, slot: &mut Slot, index: usize) -> Result<u64, String> {
+pub fn start_run(state: &mut SimState, index: usize) -> Result<u64, String> {
     let study = state.studies.get(index).cloned().ok_or("That study no longer exists.")?;
     let needs = catalog::analysis(study.analysis).needs;
-    let body = study.body.clone().unwrap_or_default();
     let label = study.name.clone();
     let name = study.name.clone();
     let meshed = matches!(needs, Needs::NativeFea | Needs::Elmer);
-    // What the solvers get: a surface with its faces, and for a design body, STEP as well.
-    if study.second_body.is_some() && study.scene_object().is_some() {
-        return Err("Contact needs both bodies from the design: a mesh from the scene has no CAD faces to touch cleanly.".into());
+    if study.second_body.is_some() {
+        return Err(super::tools::NO_CONTACT.into());
     }
-    let second = match &study.second_body {
-        Some(b) if meshed => {
-            let host = crate::design::ensure_host(slot)?;
-            Some(Box::new(bridge::fea_geometry(&host.app.session, b).map_err(|e| format!("{b}: {e:#}"))?))
-        }
-        _ => None,
+    if study.settings.coil_ampere_turns != 0.0 {
+        return Err(super::tools::NO_COIL.into());
+    }
+    let Some(object) = study.scene_object() else {
+        return Err(super::tools::NOT_ON_SCENE.into());
     };
-    let (part, step) = if let Some(object) = study.scene_object() {
-        let Some(scene) = state.scene.bodies.get(object) else {
-            return Err(state.scene.errors.get(object).cloned().unwrap_or_else(|| format!("{object} is still being read from the scene: try again in a moment.")));
-        };
-        if meshed && let Some(problem) = scene.regions.solid_problem() {
-            return Err(problem);
-        }
-        (scene.regions.partition.clone(), Vec::new())
-    } else {
-        let host = crate::design::ensure_host(slot)?;
-        let session = &host.app.session;
-        if meshed {
-            let g = bridge::fea_geometry(session, &body).map_err(|e| format!("{e:#}"))?;
-            (g.partition, g.step)
-        } else {
-            (bridge::partition(session, &body, solidcraft_engine::io::MeshQuality::Fine).map_err(|e| format!("{e:#}"))?, Vec::new())
-        }
+    let Some(scene) = state.scene.bodies.get(object) else {
+        return Err(state.scene.errors.get(object).cloned().unwrap_or_else(|| format!("{object} is still being read from the scene: try again in a moment.")));
     };
+    if meshed && let Some(problem) = scene.regions.solid_problem() {
+        return Err(problem);
+    }
+    // What the solvers get: a surface with its faces.
+    let part = scene.regions.partition.clone();
     let id = match needs {
         Needs::NativeFea => {
-            let geometry = sim_core::ccx::study::FeaGeometry { partition: part, step, second };
+            let geometry = sim_core::ccx::study::FeaGeometry { partition: part, step: Vec::new(), second: None };
             state.jobs.submit(&label, &name, Kind::Cpu, move |ctx| sim_core::ccx::study::run_study(&study, &geometry, ctx))
         }
         Needs::Elmer => {
-            let geometry = sim_core::ccx::study::FeaGeometry { partition: part, step, second: None };
+            let geometry = sim_core::ccx::study::FeaGeometry { partition: part, step: Vec::new(), second: None };
             state.jobs.submit(&label, &name, Kind::Cpu, move |ctx| sim_core::elmer_study::run_study(&study, &geometry, ctx))
         }
         Needs::Foam => state.jobs.submit(&label, &name, Kind::Cpu, move |ctx| sim_core::foam::study::run_study(&study, &part, ctx)),
@@ -257,15 +200,11 @@ pub fn start_run(state: &mut SimState, slot: &mut Slot, index: usize) -> Result<
 
 /// Colours a study's body by condition in the 3D view, and says what each one covers, so that a wrong
 /// face can be seen before anything is solved. Refuses a pick that has gone stale.
-pub fn preview_faces(state: &mut SimState, slot: &mut Slot, index: usize) -> Result<Vec<sim_core::check::Coverage>, String> {
+pub fn preview_faces(state: &mut SimState, index: usize) -> Result<Vec<sim_core::check::Coverage>, String> {
     let study = state.studies.get(index).cloned().ok_or("That study no longer exists.")?;
     let body = study.body.clone().ok_or("Choose a body first.")?;
-    let part = super::tools::partition_of(state, slot, &body)?;
-    let second = match &study.second_body {
-        Some(b) => Some(super::tools::partition_of(state, slot, b)?),
-        None => None,
-    };
-    let (set, rows) = sim_core::check::preview(&study, &part, second.as_ref()).map_err(|e| format!("{e:#}"))?;
+    let part = super::tools::partition_of(state, &body)?;
+    let (set, rows) = sim_core::check::preview(&study, &part, None).map_err(|e| format!("{e:#}"))?;
     let mut v = view::View::new(0, std::sync::Arc::new(set));
     v.hides = study.scene_object().map(str::to_string);
     v.legend = Some(rows.clone());
@@ -286,8 +225,8 @@ fn area_text(a: f64) -> String {
 }
 
 /// [`start_run`], with any refusal shown in the panel.
-pub fn run(state: &mut SimState, slot: &mut Slot, index: usize) {
-    if let Err(e) = start_run(state, slot, index) {
+pub fn run(state: &mut SimState, index: usize) {
+    if let Err(e) = start_run(state, index) {
         state.message = Some(e);
     }
 }
@@ -340,7 +279,7 @@ fn install_ui(ui: &mut egui::Ui, state: &mut SimState, needs: Needs) -> bool {
     }
 }
 
-fn study_ui(ui: &mut egui::Ui, state: &mut SimState, slot: &mut Slot, workspace: &mut Workspace, index: usize) {
+fn study_ui(ui: &mut egui::Ui, state: &mut SimState, index: usize) {
     let analysis = catalog::analysis(state.studies[index].analysis);
     ui.horizontal(|ui| {
         ui.label(RichText::new(analysis.label).color(ACCENT));
@@ -351,24 +290,14 @@ fn study_ui(ui: &mut egui::Ui, state: &mut SimState, slot: &mut Slot, workspace:
 
     // Geometry.
     theme::section(ui, "Geometry", true, |ui| {
-        let bodies = slot.host.as_ref().map_or_else(Vec::new, |h| bridge::bodies(&h.app.session));
         let objects = state.scene.names.clone();
-        if bodies.is_empty() && objects.is_empty() {
-            ui.label(RichText::new("Model a part in the design workspace, or place an object in the scene.").color(theme::WEAK));
+        if objects.is_empty() {
+            ui.label(RichText::new("Place an object in the scene to simulate it.").color(theme::WEAK));
         } else {
             let s = &mut state.studies[index];
             let before = s.body.clone();
             let shown = s.body.as_deref().map_or_else(|| "Choose a body".to_string(), |b| b.strip_prefix(sim_core::study::SCENE_PREFIX).map_or_else(|| b.to_string(), |o| format!("{o} (scene)")));
             egui::ComboBox::from_id_salt("body").selected_text(shown).show_ui(ui, |ui| {
-                for b in &bodies {
-                    if ui.selectable_label(s.body.as_deref() == Some(b), b).clicked() {
-                        s.body = Some(b.clone());
-                    }
-                }
-                if !objects.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new("In the scene").color(theme::WEAK).size(11.0));
-                }
                 for o in &objects {
                     let id = format!("{}{o}", sim_core::study::SCENE_PREFIX);
                     if ui.selectable_label(s.body.as_deref() == Some(&id), o).clicked() {
@@ -380,33 +309,6 @@ fn study_ui(ui: &mut egui::Ui, state: &mut SimState, slot: &mut Slot, workspace:
             if s.body != before {
                 for c in &mut s.conditions {
                     c.faces.clear();
-                }
-            }
-        }
-        if ui.button(theme::label(icon::CUBE, "Open design")).clicked() {
-            *workspace = Workspace::Design;
-        }
-        // Nonlinear can take a second body, to press on.
-        if state.studies[index].analysis == catalog::AnalysisId::NonlinearMechanical && !bodies.is_empty() {
-            let s = &mut state.studies[index];
-            let before = s.second_body.clone();
-            ui.horizontal(|ui| {
-                ui.label("Touching");
-                egui::ComboBox::from_id_salt("second_body").selected_text(s.second_body.clone().unwrap_or_else(|| "Nothing".into())).show_ui(ui, |ui| {
-                    if ui.selectable_label(s.second_body.is_none(), "Nothing").clicked() {
-                        s.second_body = None;
-                    }
-                    for b in bodies.iter().filter(|b| s.body.as_deref() != Some(b.as_str())) {
-                        if ui.selectable_label(s.second_body.as_deref() == Some(b), b).clicked() {
-                            s.second_body = Some(b.clone());
-                        }
-                    }
-                });
-            });
-            // Faces picked on the second body mean nothing on a different one.
-            if s.second_body != before {
-                for c in &mut s.conditions {
-                    c.faces.retain(|f| !f.second);
                 }
             }
         }
@@ -456,7 +358,7 @@ fn study_ui(ui: &mut egui::Ui, state: &mut SimState, slot: &mut Slot, workspace:
             });
         }
         if !s.uses_solid() && !s.uses_fluid() {
-            ui.label(RichText::new("The part stands in air. Only its shape and its potentials or coil count.").color(theme::WEAK).size(11.5));
+            ui.label(RichText::new("The part stands in air. Only its shape and its potentials count.").color(theme::WEAK).size(11.5));
         }
     });
 
@@ -498,9 +400,7 @@ fn study_ui(ui: &mut egui::Ui, state: &mut SimState, slot: &mut Slot, workspace:
                     if on_scene {
                         state.scene_pick = Some((index, c));
                     } else {
-                        state.picking = Some((index, c));
-                        slot.prompt = Some(format!("Click the faces for {} (Ctrl for several).", state.studies[index].conditions[c].kind.label().to_lowercase()));
-                        *workspace = Workspace::Design;
+                        state.message = Some("Choose an object from the scene as the body first.".into());
                     }
                 }
             });
@@ -512,9 +412,8 @@ fn study_ui(ui: &mut egui::Ui, state: &mut SimState, slot: &mut Slot, workspace:
         let can_check = state.studies[index].body.is_some() && state.studies[index].conditions.iter().any(|c| !c.faces.is_empty());
         ui.add_space(3.0);
         if ui.add_enabled(can_check, egui::Button::new(theme::label(icon::MAGNIFYING_GLASS, "Check faces"))).on_hover_text("Colour the body by condition and show each one's area, before running").clicked() {
-            match preview_faces(state, slot, index) {
-                Ok(_) => *workspace = Workspace::Scene,
-                Err(e) => state.message = Some(e),
+            if let Err(e) = preview_faces(state, index) {
+                state.message = Some(e);
             }
         }
     });
@@ -529,7 +428,7 @@ fn study_ui(ui: &mut egui::Ui, state: &mut SimState, slot: &mut Slot, workspace:
             ui.label(RichText::new(p).color(theme::WEAK).size(11.5));
         }
         if ui.add_enabled(problems.is_empty(), egui::Button::new(theme::label(icon::PLAY, "Run")).min_size(vec2(90.0, 28.0))).clicked() {
-            run(state, slot, index);
+            run(state, index);
         }
     }
 }
@@ -807,7 +706,7 @@ fn results_ui(ui: &mut egui::Ui, state: &mut SimState) {
     }
 }
 
-pub fn show(ctx: &egui::Context, state: &mut SimState, slot: &mut Slot, workspace: &mut Workspace) {
+pub fn show(ctx: &egui::Context, state: &mut SimState) {
     let mut open = true;
     egui::Window::new("Simulations").open(&mut open).default_pos([ctx.content_rect().right() - 640.0, 176.0]).default_width(340.0).resizable(true).show(ctx, |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(ctx.content_rect().height() - 140.0).show(ui, |ui| {
@@ -836,7 +735,7 @@ pub fn show(ctx: &egui::Context, state: &mut SimState, slot: &mut Slot, workspac
             }
             if let Some(i) = state.active.filter(|i| *i < state.studies.len()) {
                 ui.separator();
-                study_ui(ui, state, slot, workspace, i);
+                study_ui(ui, state, i);
             }
             jobs_ui(ui, state);
             if !checking_faces {

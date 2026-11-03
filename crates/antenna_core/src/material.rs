@@ -60,6 +60,11 @@ impl Material {
         }
     }
 
+    /// `ε′ - jε″` over ε₀ at `f`, with the same loss FDTD uses. 1 for conductors.
+    pub fn complex_eps(&self, f: f64) -> C64 {
+        C64::new(self.eps_r(), -self.dielectric_kappa(f) / (2.0 * std::f64::consts::PI * f * EPS0))
+    }
+
     /// Skin depth at `f` (m); infinite for PEC or dielectrics.
     pub fn skin_depth(&self, f: f64) -> f64 {
         match self.kind {
@@ -112,6 +117,16 @@ pub fn library() -> Vec<Material> {
         d("Polycarbonate", 2.9, 0.01),
         d("Glass", 6.0, 0.01),
         d("Cardboard", 2.0, 0.05),
+        // What an RFID label is made of. Stock varies a lot, so these are starting points.
+        // Paper: Tentzeris group, 3.2 / 0.053 at 1 GHz for photo paper, and 3.4 / 0.08 used for
+        // an inkjet UHF tag.
+        d("Paper", 3.3, 0.06),
+        // A patent's flexible antenna gives 2.99 / 0.0058 for PET, at no stated frequency.
+        d("PET film", 3.0, 0.006),
+        // Assumed: no RF measurement of an acrylic label adhesive was found. Thin enough to matter little.
+        d("Adhesive (acrylic)", 2.5, 0.02),
+        // Assumed: mostly air, so between foam and solid board.
+        d("Corrugated board", 1.4, 0.03),
         // Tap water and muscle tissue around 1–6 GHz: lossy, so close to a body or a
         // bottle most of the near field ends up as heat. Water's tan δ here is the value
         // near 1 GHz; `dielectric_kappa` follows its Debye curve.

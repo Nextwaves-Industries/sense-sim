@@ -115,7 +115,7 @@ pub fn run_study(study: &Study, part: &Partition, ctx: &JobCtx) -> Result<Result
         AnalysisId::IncompressibleLbm => {}
         AnalysisId::PedestrianWindComfort => return comfort(study, part, ctx),
         AnalysisId::ConjugateHeatTransferVoxel => return conjugate(study, part, ctx),
-        other => bail!("{} isn't run on a design body yet in this build.", crate::catalog::analysis(other).label),
+        other => bail!("{} isn't run on the GPU in this build.", crate::catalog::analysis(other).label),
     }
     let (lo, hi) = bounds(part);
     let grid = tunnel(lo, hi, study.settings.resolution, false);

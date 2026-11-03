@@ -44,6 +44,8 @@ const MIN_TRIANGLES: usize = 300;
 const LEVELS: [f32; 4] = [192.0, 64.0, 20.0, 6.0];
 /// A version must have at most this share of the previous one's triangles.
 const MIN_REDUCTION: f32 = 0.6;
+/// Texture cells across a part's whole UV range: only vertices in the same one merge.
+const UV_CELLS: f32 = 16.0;
 /// Range distances are rounded to this many steps per doubling, so that scenes
 /// share a limited number of distinct ranges on the GPU.
 const STEPS_PER_OCTAVE: f32 = 8.0;
@@ -121,18 +123,40 @@ fn normal_bucket(n: [f32; 3]) -> u8 {
     bin(u) * BINS as u8 + bin(v)
 }
 
+/// Which cell of the texture a vertex's UV falls in, for a cell `uv_cell` wide.
+fn uv_bucket(uv: [f32; 2], uv_cell: f32) -> (i32, i32) {
+    ((uv[0] / uv_cell).floor() as i32, (uv[1] / uv_cell).floor() as i32)
+}
+
+/// The width of a cell of the texture, `UV_CELLS` to a part's UV range.
+fn uv_cell_size(uvs: &[[f32; 2]]) -> f32 {
+    let (mut low, mut high) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for uv in uvs {
+        for k in 0..2 {
+            low[k] = low[k].min(uv[k]);
+            high[k] = high[k].max(uv[k]);
+        }
+    }
+    ((high[0] - low[0]).max(high[1] - low[1]) / UV_CELLS).max(1e-6)
+}
+
 /// Keeps the vertex nearest each grid cell's center and rewires the triangles to
 /// them, dropping the ones that collapse or repeat. Returns the kept vertices (as
 /// indices into the input) and the new triangle list. Kept vertices are real ones,
 /// so their normals and UVs stay valid and the result stays inside the bounds.
-fn cluster(positions: &[[f32; 3]], normals: Option<&[[f32; 3]]>, indices: &[u32], origin: Vec3, cell: f32) -> (Vec<u32>, Vec<u32>) {
-    let mut cells: HashMap<(i32, i32, i32, u8), (u32, f32)> = HashMap::new();
+///
+/// Vertices only merge within a cell of the texture (`uvs`, with the cell's width).
+/// Neighbors on the surface are often far apart on a texture atlas: merging them makes
+/// a tiny triangle stretched across the atlas, which draws the wrong color.
+fn cluster(positions: &[[f32; 3]], normals: Option<&[[f32; 3]]>, uvs: Option<(&[[f32; 2]], f32)>, indices: &[u32], origin: Vec3, cell: f32) -> (Vec<u32>, Vec<u32>) {
+    let mut cells: HashMap<(i32, i32, i32, u8, (i32, i32)), (u32, f32)> = HashMap::new();
     let mut key_of = Vec::with_capacity(positions.len());
     for (i, p) in positions.iter().enumerate() {
         let g = (Vec3::from_array(*p) - origin) / cell;
         let bucket = normals.and_then(|n| n.get(i)).map_or(0, |n| normal_bucket(*n));
+        let uv = uvs.and_then(|(u, uv_cell)| u.get(i).map(|uv| uv_bucket(*uv, uv_cell))).unwrap_or((0, 0));
         let c = g.floor();
-        let key = (c.x as i32, c.y as i32, c.z as i32, bucket);
+        let key = (c.x as i32, c.y as i32, c.z as i32, bucket, uv);
         let d = (g - (c + Vec3::splat(0.5))).length_squared();
         let entry = cells.entry(key).or_insert((i as u32, d));
         if d < entry.1 {
@@ -207,11 +231,15 @@ pub fn build_levels(mesh: &Mesh) -> Vec<LodLevel> {
         Some(VertexAttributeValues::Float32x3(n)) => Some(n.as_slice()),
         _ => None,
     };
+    let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+        Some(VertexAttributeValues::Float32x2(u)) => Some((u.as_slice(), uv_cell_size(u))),
+        _ => None,
+    };
     let mut levels = Vec::new();
     let mut previous = indices.len() / 3;
     for cells in LEVELS {
         let cell = diagonal / cells;
-        let (kept, simplified) = cluster(positions, normals, indices, mn, cell);
+        let (kept, simplified) = cluster(positions, normals, uvs, indices, mn, cell);
         let triangles = simplified.len() / 3;
         if triangles == 0 {
             break;
@@ -537,9 +565,64 @@ mod tests {
         let square = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
         let positions: Vec<[f32; 3]> = square(0.0).into_iter().chain(square(0.0001)).collect();
         let normals = [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]];
-        let (kept, triangles) = cluster(&positions, Some(&normals), &[0, 1, 2, 3, 4, 5], Vec3::ZERO, 0.25);
+        let (kept, triangles) = cluster(&positions, Some(&normals), None, &[0, 1, 2, 3, 4, 5], Vec3::ZERO, 0.25);
         assert_eq!(kept.len(), 6);
         assert_eq!(triangles.len(), 6);
+    }
+
+    /// Two neighboring patches of a surface, far apart on the texture: an atlas seam.
+    fn two_islands(n: u32) -> Mesh {
+        let side = n + 1;
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        for island in 0..2u32 {
+            let first = positions.len() as u32;
+            for j in 0..side {
+                for i in 0..side {
+                    positions.push([(island as f32 + i as f32 / n as f32) * 0.5, j as f32 / n as f32 * 0.5, 0.0]);
+                    uvs.push([island as f32 * 0.5 + i as f32 / n as f32 * 0.1, j as f32 / n as f32 * 0.1]);
+                }
+            }
+            for j in 0..n {
+                for i in 0..n {
+                    let a = first + j * side + i;
+                    indices.extend([a, a + 1, a + side, a + 1, a + side + 1, a + side]);
+                }
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_indices(Indices::U32(indices));
+        mesh
+    }
+
+    #[test]
+    fn coarser_versions_never_stretch_a_triangle_across_the_texture() {
+        let levels = build_levels(&two_islands(120));
+        assert!(!levels.is_empty());
+        for l in &levels {
+            let Some(VertexAttributeValues::Float32x2(uv)) = l.mesh.attribute(Mesh::ATTRIBUTE_UV_0) else { panic!("no UVs") };
+            let Some(Indices::U32(i)) = l.mesh.indices() else { panic!("no indices") };
+            for t in i.chunks_exact(3) {
+                let u = t.iter().map(|&v| uv[v as usize][0]);
+                let (low, high) = u.fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)));
+                // The islands are 0.4 apart on the texture and touch on the surface.
+                assert!(high - low < 0.2, "a triangle spans {} of the texture", high - low);
+            }
+        }
+    }
+
+    #[test]
+    fn separate_uv_islands_still_reduce() {
+        let mesh = two_islands(120);
+        let full = mesh.indices().map_or(0, |i| i.len() / 3);
+        let levels = build_levels(&mesh);
+        let coarsest = levels.last().expect("coarser versions").triangles as usize;
+        assert!(coarsest < full / 10, "{coarsest} of {full}");
     }
 
     #[test]

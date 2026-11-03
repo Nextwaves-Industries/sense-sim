@@ -1,7 +1,7 @@
 //! A body's surface, divided into its faces. Every path to a solver starts here: this is what ties
 //! a face the user picked to the triangles and elements it covers.
 //!
-//! From SolidCraft it comes as a 3MF with face tags (`docs/formats/3mf-face-tags.md`): a welded,
+//! From a CAD program it can come as a 3MF with face tags: a welded,
 //! watertight mesh in which every triangle names its B-rep face. STEP face order can't be used for
 //! this, because export merges and rewrites faces.
 

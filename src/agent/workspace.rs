@@ -38,7 +38,7 @@ pub fn defs() -> Vec<ToolDef> {
         def("write_file", "Write a text file in your working folder for this chat. Nowhere else: save_layout and export_usda write project files.", json!({ "type": "object", "properties": { "path": { "type": "string", "description": "Relative to your working folder" }, "content": { "type": "string" } }, "required": ["path", "content"] })),
         def(
             "open_file",
-            "Open a file in this app, by its type: a .sesim project or an older layout opens in a new tab and never replaces the scene; DXF and Gerber go to Antenna Studio as a new antenna; STEP goes to 3D Design; IFC imports the building; an image is attached so you can see it; text, CSV and JSON are read. Anything else: say so, or use open_external.",
+            "Open a file in this app, by its type: a .sesim project or an older layout opens in a new tab and never replaces the scene; DXF and Gerber go to Antenna Studio as a new antenna; IFC imports the building; an image is attached so you can see it; text, CSV and JSON are read. Anything else: say so, or use open_external.",
             json!({ "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }),
         ),
         def(
@@ -146,7 +146,6 @@ fn write_file(path: &str, input: &Value, files: &Path) -> ToolOutput {
 enum OpenAs {
     Layout,
     Antenna,
-    Design,
     Building,
     Image,
     Text,
@@ -164,7 +163,6 @@ fn open_as(path: &str) -> OpenAs {
         }
         "sesim" => OpenAs::Layout,
         "dxf" | "gbr" | "ger" | "gtl" | "gbl" | "gto" | "gbo" | "gts" | "gbs" | "gko" | "gm1" => OpenAs::Antenna,
-        "step" | "stp" => OpenAs::Design,
         "ifc" => OpenAs::Building,
         "png" | "jpg" | "jpeg" | "webp" | "bmp" => OpenAs::Image,
         "txt" | "csv" | "tsv" | "md" | "log" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "s1p" | "s2p" | "s3p" | "s4p" => OpenAs::Text,
@@ -184,7 +182,6 @@ fn open_file(path: &str, input: &Value, tx: &Sender<ToolJob>, ctx: &CallCtx) -> 
     match open_as(path) {
         OpenAs::Layout => bridge("open_layout_tab", json!({ "path": path })),
         OpenAs::Antenna => bridge("antenna_import_cad", json!({ "path": path })),
-        OpenAs::Design => bridge("open_in_design", json!({ "path": path })),
         OpenAs::Building => bridge("site_import_bim", json!({ "path": path })),
         OpenAs::Image => match images::load_file(Path::new(path)) {
             Ok((id, data, mime)) => ToolOutput { content: vec![Block::Text(format!("image_id: {id}")), Block::Image { data, mime }], is_error: false },
@@ -403,7 +400,7 @@ mod tests {
         assert_eq!(open_as("x.sesim"), OpenAs::Layout, "a project file");
         assert_eq!(open_as("x.DXF"), OpenAs::Antenna, "case doesn't matter");
         assert_eq!(open_as("x.gtl"), OpenAs::Antenna);
-        assert_eq!(open_as("x.step"), OpenAs::Design);
+        assert_eq!(open_as("x.step"), OpenAs::Unknown);
         assert_eq!(open_as("x.ifc"), OpenAs::Building);
         assert_eq!(open_as("x.png"), OpenAs::Image);
         assert_eq!(open_as("x.csv"), OpenAs::Text);

@@ -5,7 +5,8 @@
 use antenna_core::cad::P2;
 use antenna_core::geometry::{P3, plane_point};
 use antenna_core::material;
-use antenna_core::project::{ExtraPrim, ExtraSolid, Project};
+use antenna_core::expr::{self, Vars};
+use antenna_core::project::{ExtraPrim, ExtraSolid, Form, Project};
 use antenna_core::sketch::{self, Sheet};
 use bevy_egui::egui::{self, Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, Response, RichText, Stroke, pos2, vec2};
 
@@ -62,6 +63,10 @@ pub struct DrawUi {
     editing_corner: bool,
     /// The next feed drawn is this switch or varactor instead.
     pub next_part: Option<antenna_core::reconfig::Device>,
+    /// What a dimension's new variable is being called.
+    naming: String,
+    /// A new variable being typed: its name and value.
+    new_var: [String; 2],
 }
 
 impl Default for DrawUi {
@@ -87,6 +92,8 @@ impl Default for DrawUi {
             typed: [0.0; 2],
             editing_corner: false,
             next_part: None,
+            naming: String::new(),
+            new_var: [String::new(), String::new()],
         }
     }
 }
@@ -237,18 +244,43 @@ fn sheet_of(st: &Studio) -> Sheet {
     Sheet { axis: d.axis, at: d.at.clone(), material, thick }
 }
 
-/// Adds a finished shape, or cuts it from the metal under it.
-fn finish_shape(st: &mut Studio, base: &str, pts: Vec<P2>) {
+/// A shape as it comes off the canvas, by what it is rather than by its corners.
+enum Finished {
+    Rect(P2, P2),
+    Circle(P2, f64),
+    Poly(Vec<P2>),
+    Strip(Vec<P2>, f64),
+}
+
+/// Adds a finished shape, keeping its dimensions, or cuts it from the metal under it. What's
+/// added is selected, so its dimensions are there to type straight away.
+fn finish_shape(st: &mut Studio, base: &str, shape: Finished) {
     remember(st);
     let sheet = sheet_of(st);
     let h = sketch::height_of(&st.project, &sheet.at);
-    let done = if st.ui.draw.cut {
+    let cut = st.ui.draw.cut && !matches!(shape, Finished::Strip(..));
+    let done = if cut {
+        let pts = match &shape {
+            Finished::Rect(a, b) => sketch::rectangle(*a, *b),
+            Finished::Circle(c, r) => sketch::circle(*c, *r, 50e-6),
+            Finished::Poly(pts) | Finished::Strip(pts, _) => pts.clone(),
+        };
         h.and_then(|h| sketch::cut_in(&mut st.project, sheet.axis, h, &pts))
     } else {
-        sketch::add_shape(&mut st.project, base, &sheet, pts)
+        match &shape {
+            Finished::Rect(a, b) => sketch::add_rect(&mut st.project, base, &sheet, *a, *b),
+            Finished::Circle(c, r) => sketch::add_circle(&mut st.project, base, &sheet, *c, *r),
+            Finished::Poly(pts) => sketch::add_poly(&mut st.project, base, &sheet, pts),
+            Finished::Strip(path, w) => sketch::add_strip(&mut st.project, base, &sheet, path, *w),
+        }
     };
     match done {
-        Ok(_) => st.ui.draw.note = None,
+        Ok(_) => {
+            st.ui.draw.note = None;
+            if !cut {
+                st.ui.draw.selected = st.project.extra.len().checked_sub(1);
+            }
+        }
         Err(e) => {
             st.ui.draw.undo.pop();
             st.ui.draw.note = Some(format!("{e:#}"));
@@ -270,6 +302,7 @@ fn finish_wire(st: &mut Studio) {
     let mm = |v: f64| format!("{}mm", (v * 1e6).round() / 1e3);
     let prim = ExtraPrim::Wire { pts: pts.iter().map(|p| p.map(mm)).collect(), r: mm(st.ui.draw.strip_mm * 0.5e-3) };
     st.project.extra.push(ExtraSolid { name, material, prim });
+    st.ui.draw.selected = st.project.extra.len().checked_sub(1);
     st.ui.draw.note = None;
 }
 
@@ -280,13 +313,10 @@ fn finish_path(st: &mut Studio) {
     }
     let pts = std::mem::take(&mut st.ui.draw.points);
     match st.ui.draw.tool {
-        Tool::Polygon if pts.len() >= 3 => finish_shape(st, "Polygon", pts),
+        Tool::Polygon if pts.len() >= 3 => finish_shape(st, "Polygon", Finished::Poly(pts)),
         Tool::Strip if pts.len() >= 2 => {
             let w = st.ui.draw.strip_mm * 1e-3;
-            match sketch::strip(&pts, w) {
-                Ok(ring) => finish_shape(st, "Strip", ring),
-                Err(e) => st.ui.draw.note = Some(format!("{e:#}")),
-            }
+            finish_shape(st, "Strip", Finished::Strip(pts, w));
         }
         _ => {}
     }
@@ -307,13 +337,13 @@ fn add_point(st: &mut Studio, q: P2) {
             st.ui.draw.points.clear();
             if tool == Tool::Rect {
                 if first[0] != q[0] && first[1] != q[1] {
-                    finish_shape(st, "Rectangle", sketch::rectangle(first, q));
+                    finish_shape(st, "Rectangle", Finished::Rect(first, q));
                 } else {
                     st.ui.draw.note = Some("A rectangle needs two corners that differ both ways.".into());
                 }
             } else {
                 let r = (q[0] - first[0]).hypot(q[1] - first[1]);
-                finish_shape(st, "Circle", sketch::circle(first, r, 50e-6));
+                finish_shape(st, "Circle", Finished::Circle(first, r));
             }
         }
         Tool::Polygon | Tool::Strip => {
@@ -379,23 +409,32 @@ fn add_point(st: &mut Studio, q: P2) {
     }
 }
 
-/// The selected part's plane and corners, if it's still there.
+/// The selected part's plane and outline, if it's flat and still there.
 fn selected(st: &Studio) -> Option<(usize, usize, f64, Vec<P2>)> {
     let i = st.ui.draw.selected?;
-    match &st.project.extra.get(i)?.prim {
-        ExtraPrim::Outline { axis, at, pts, .. } => Some((i, *axis, sketch::height_of(&st.project, at).ok()?, pts.clone())),
+    let vars = st.project.vars().ok()?;
+    sketch::flat_parts(&st.project, &vars).into_iter().find(|f| f.index == i).map(|f| (i, f.axis, f.at, f.outline.into_owned()))
+}
+
+/// The plane a flat part is on.
+fn plane_of(prim: &ExtraPrim) -> Option<(usize, &String)> {
+    match prim {
+        ExtraPrim::Outline { axis, at, .. } | ExtraPrim::Drawn { axis, at, .. } | ExtraPrim::Polygon { axis, at, .. } | ExtraPrim::Plate { axis, at, .. } | ExtraPrim::Strip { axis, at, .. } | ExtraPrim::Disc { axis, at, .. } | ExtraPrim::Arc { axis, at, .. } | ExtraPrim::Meander { axis, at, .. } => Some((*axis, at)),
         _ => None,
     }
 }
 
 fn select_part(st: &mut Studio, part: Option<usize>) {
     st.ui.draw.selected = part;
-    if let Some(ExtraPrim::Outline { axis, at, .. }) = part.and_then(|i| st.project.extra.get(i)).map(|e| &e.prim) {
+    if let Some((axis, at)) = part.and_then(|i| st.project.extra.get(i)).and_then(|e| plane_of(&e.prim)) {
         // The plane follows, so edits and the grid are on the part you're looking at.
-        st.ui.draw.axis = *axis;
+        st.ui.draw.axis = axis;
         st.ui.draw.at = at.clone();
     }
 }
+
+/// Says why the mouse stopped short: the coordinate belongs to a variable.
+const TIED: &str = "Part of this is tied to a variable, so the mouse leaves it there. Change the variable, or type a number in its place.";
 
 fn edges(pts: &[P2]) -> impl Iterator<Item = (usize, P2, P2)> + '_ {
     let n = pts.len();
@@ -482,16 +521,17 @@ pub fn canvas(ui: &mut egui::Ui, st: &mut Studio, area: Rect, view: Rect, resp: 
 
     // ------- What the tool shows
     let outline = Stroke::new(1.0, Color32::from_black_alpha(110));
-    for (i, a, at, pts) in sketch::outlines(&st.project) {
-        let Ok(part_h) = sketch::height_of(&st.project, at) else { continue };
-        let sel = st.ui.draw.selected == Some(i);
+    let vars = st.project.vars().unwrap_or_default();
+    for f in sketch::flat_parts(&st.project, &vars) {
+        let (a, part_h) = (f.axis, f.at);
+        let sel = st.ui.draw.selected == Some(f.index);
         let stroke = if sel { Stroke::new(2.0, theme::ACCENT) } else { outline };
-        for (_, p, q) in edges(pts) {
+        for (_, p, q) in edges(&f.outline) {
             painter.line_segment([pj.screen(plane_point(a, part_h, p)), pj.screen(plane_point(a, part_h, q))], stroke);
         }
     }
-    if let Some((_, a, part_h, pts)) = selected(st).filter(|_| tool == Tool::Select) {
-        for p in &pts {
+    if let Some((i, a, part_h, _)) = selected(st).filter(|_| tool == Tool::Select) {
+        for p in &sketch::handles(&st.project, i) {
             let c = pj.screen(plane_point(a, part_h, *p));
             let near = pointer.is_some_and(|m| m.distance(c) < SNAP_PX);
             let r = Rect::from_center_size(c, vec2(7.0, 7.0));
@@ -599,7 +639,7 @@ fn hint_for(st: &Studio, plane_visible: bool) -> String {
     let begun = !d.points.is_empty();
     let what = if d.cut { "the hole" } else { "the shape" };
     match d.tool {
-        Tool::Select => "Click a shape. Drag it or its corners; double-click an edge for a new corner; right-click a corner to remove it.".to_string(),
+        Tool::Select => "Click a shape, then type its dimensions in the panel or drag it and its corners. Double-click an edge for a new corner; right-click a corner to remove it.".to_string(),
         Tool::Rect if begun => format!("Click the opposite corner of {what}. Esc cancels."),
         Tool::Rect => "Click one corner, or drag from corner to corner.".to_string(),
         Tool::Circle if begun => "Click the edge. Esc cancels.".to_string(),
@@ -619,12 +659,14 @@ fn hint_for(st: &Studio, plane_visible: bool) -> String {
 fn select_tool(st: &mut Studio, resp: &Response, pj: &Projector, q: P2, pointer: Option<Pos2>) {
     let primary = egui::PointerButton::Primary;
     let sel = selected(st);
+    let grips = sel.as_ref().map_or(Vec::new(), |s| sketch::handles(&st.project, s.0));
     let corner_near = |at: Pos2, sel: &Option<(usize, usize, f64, Vec<P2>)>| -> Option<P2> {
-        let (_, a, part_h, pts) = sel.as_ref()?;
-        pts.iter().copied().min_by(|x, y| pj.screen(plane_point(*a, *part_h, *x)).distance(at).total_cmp(&pj.screen(plane_point(*a, *part_h, *y)).distance(at))).filter(|p| pj.screen(plane_point(*a, *part_h, *p)).distance(at) < SNAP_PX)
+        let (_, a, part_h, _) = sel.as_ref()?;
+        grips.iter().copied().min_by(|x, y| pj.screen(plane_point(*a, *part_h, *x)).distance(at).total_cmp(&pj.screen(plane_point(*a, *part_h, *y)).distance(at))).filter(|p| pj.screen(plane_point(*a, *part_h, *p)).distance(at) < SNAP_PX)
     };
     if resp.drag_started_by(primary) {
         let origin = resp.ctx.input(|i| i.pointer.press_origin());
+        st.ui.draw.note = None;
         if let Some(from) = origin.and_then(|o| corner_near(o, &sel)) {
             remember(st);
             st.ui.draw.drag = Some(Drag::Corner { from });
@@ -643,14 +685,20 @@ fn select_tool(st: &mut Studio, resp: &Response, pj: &Projector, q: P2, pointer:
         let i = *i;
         match drag {
             Drag::Corner { from } => {
-                sketch::move_corner(&mut st.project, i, from, q);
-                st.ui.draw.drag = Some(Drag::Corner { from: q });
+                let reached = sketch::move_corner(&mut st.project, i, from, q);
+                st.ui.draw.drag = Some(Drag::Corner { from: reached });
+                if (reached[0] - q[0]).abs() + (reached[1] - q[1]).abs() > 1e-9 && sketch::is_tied(&st.project, i) {
+                    st.ui.draw.note = Some(TIED.into());
+                }
             }
             Drag::Body { last } => {
                 let by = [q[0] - last[0], q[1] - last[1]];
                 if by != [0.0, 0.0] {
-                    sketch::move_part(&mut st.project, i, by);
+                    let went = sketch::move_part(&mut st.project, i, by);
                     st.ui.draw.drag = Some(Drag::Body { last: q });
+                    if went != by {
+                        st.ui.draw.note = Some(TIED.into());
+                    }
                 }
             }
         }
@@ -694,10 +742,211 @@ fn select_tool(st: &mut Studio, resp: &Response, pj: &Projector, q: P2, pointer:
     }
 }
 
+/// How wide a dimension's expression field is.
+const DIM_W: f32 = 104.0;
+
+/// One dimension: its name, its expression with variables offered as you type, what that comes
+/// to if it uses a variable, and a way to turn it into a variable of its own.
+fn dim(ui: &mut egui::Ui, st: &mut Studio, salt: &str, label: &str, text: &mut String, table: &super::expr_field::VarTable, vars: &Vars) {
+    ui.label(label);
+    ui.horizontal(|ui| {
+        super::expr_field::expr_line(ui, ("draw_dim", salt), text, table, DIM_W);
+        name_it(ui, st, salt, label, text);
+        if !sketch::is_free(text) {
+            let read = expr::eval(text, vars).map(|v| format!("= {} mm", (v * 1e6).round() / 1e3));
+            match read {
+                Ok(r) => ui.label(RichText::new(r).size(12.0).color(theme::WEAK)),
+                Err(_) => ui.label(RichText::new("doesn't work out").size(12.0).color(theme::DANGER)),
+            };
+        }
+    });
+    ui.end_row();
+}
+
+/// A small menu that makes a new variable from what's in a field, and puts its name there.
+fn name_it(ui: &mut egui::Ui, st: &mut Studio, salt: &str, note: &str, text: &mut String) {
+    ui.push_id(("name_it", salt), |ui| {
+        // A menu shuts on any click by default, even in its own text field.
+        let stay_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        let (button, _) = egui::containers::menu::MenuButton::new("x=").config(stay_open).ui(ui, |ui| {
+            ui.label(RichText::new("Make this a variable").size(12.5));
+            let field = ui.add(egui::TextEdit::singleline(&mut st.ui.draw.naming).hint_text("Name, like L").desired_width(120.0));
+            if ui.ctx().memory(|m| m.focused().is_none()) {
+                field.request_focus();
+            }
+            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if ui.button("Create").clicked() || entered {
+                let name = st.ui.draw.naming.trim().to_string();
+                let copy = st.project.clone();
+                match sketch::add_variable(&mut st.project, &name, text, note) {
+                    Ok(()) => {
+                        let now = std::mem::replace(&mut st.project, copy);
+                        remember(st);
+                        st.project = now;
+                        *text = name;
+                        st.ui.draw.naming.clear();
+                        st.ui.draw.note = None;
+                        ui.close();
+                    }
+                    Err(e) => st.ui.draw.note = Some(format!("{e:#}")),
+                }
+            }
+        });
+        button.on_hover_text("Make this a variable, to tune it by name");
+    });
+}
+
+/// A list of points, each coordinate an expression.
+fn point_rows(ui: &mut egui::Ui, salt: &str, heads: (&str, &str), pts: &mut [[String; 2]], table: &super::expr_field::VarTable) {
+    theme::caption(ui, &format!("{salt}, {} and {}", heads.0, heads.1));
+    egui::ScrollArea::vertical().id_salt(("draw_pts", salt)).max_height(170.0).show(ui, |ui| {
+        egui::Grid::new(("draw_pt_grid", salt)).num_columns(3).spacing(vec2(8.0, 3.0)).show(ui, |ui| {
+            for (k, q) in pts.iter_mut().enumerate() {
+                ui.label(RichText::new(format!("{}", k + 1)).size(11.5).color(theme::WEAK));
+                super::expr_field::expr_line(ui, (salt, k, 0), &mut q[0], table, DIM_W);
+                super::expr_field::expr_line(ui, (salt, k, 1), &mut q[1], table, DIM_W);
+                ui.end_row();
+            }
+        });
+    });
+}
+
+/// The dimensions of a part, by kind, in a copy that's put back if any of them changed.
+fn dimensions(ui: &mut egui::Ui, st: &mut Studio, i: usize, table: &super::expr_field::VarTable, vars: &Vars) {
+    let Some(mut prim) = st.project.extra.get(i).map(|e| e.prim.clone()) else { return };
+    let before = prim.clone();
+    let metal = st.project.extra[i].material.clone();
+    let solid = material::by_name(&metal).is_some_and(|m| !m.is_conductor());
+    let axis = plane_of(&prim).map(|p| p.0);
+    let (un, vn) = axis.map_or(("x", "y"), |a| (AXIS[(a + 1) % 3], AXIS[(a + 2) % 3]));
+    let along = |what: &str, n: &str| format!("{what} {n}");
+    let mut lists: Vec<(String, &mut Vec<[String; 2]>)> = Vec::new();
+    egui::Grid::new(("draw_dims", i)).num_columns(2).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
+        match &mut prim {
+            ExtraPrim::Drawn { at, thick, form, holes, .. } => {
+                dim(ui, st, "height", "Height", at, table, vars);
+                if solid {
+                    dim(ui, st, "thick", "Thickness", thick, table, vars);
+                }
+                match form {
+                    Form::Rect { c, size } => {
+                        let [cu, cv] = c;
+                        let [su, sv] = size;
+                        dim(ui, st, "cu", &along("Centre", un), cu, table, vars);
+                        dim(ui, st, "cv", &along("Centre", vn), cv, table, vars);
+                        dim(ui, st, "su", &along("Length along", un), su, table, vars);
+                        dim(ui, st, "sv", &along("Length along", vn), sv, table, vars);
+                    }
+                    Form::Circle { c, r } => {
+                        let [cu, cv] = c;
+                        dim(ui, st, "cu", &along("Centre", un), cu, table, vars);
+                        dim(ui, st, "cv", &along("Centre", vn), cv, table, vars);
+                        dim(ui, st, "r", "Radius", r, table, vars);
+                    }
+                    Form::Poly { pts } => lists.push(("Corners".into(), pts)),
+                }
+                for (k, h) in holes.iter_mut().enumerate() {
+                    lists.push((format!("Hole {}", k + 1), h));
+                }
+            }
+            ExtraPrim::Polygon { at, pts, thick, .. } => {
+                dim(ui, st, "height", "Height", at, table, vars);
+                if solid {
+                    dim(ui, st, "thick", "Thickness", thick, table, vars);
+                }
+                lists.push(("Corners".into(), pts));
+            }
+            ExtraPrim::Plate { at, outline, holes, .. } => {
+                dim(ui, st, "height", "Height", at, table, vars);
+                lists.push(("Corners".into(), outline));
+                for (k, h) in holes.iter_mut().enumerate() {
+                    lists.push((format!("Hole {}", k + 1), h));
+                }
+            }
+            ExtraPrim::Strip { at, path, w, .. } => {
+                dim(ui, st, "height", "Height", at, table, vars);
+                dim(ui, st, "w", "Width", w, table, vars);
+                lists.push(("Path".into(), path));
+            }
+            ExtraPrim::Disc { at, c, r, .. } => {
+                let [cu, cv] = c;
+                dim(ui, st, "height", "Height", at, table, vars);
+                dim(ui, st, "cu", &along("Centre", un), cu, table, vars);
+                dim(ui, st, "cv", &along("Centre", vn), cv, table, vars);
+                dim(ui, st, "r", "Radius", r, table, vars);
+            }
+            ExtraPrim::Arc { at, c, r, from_deg, to_deg, w, .. } => {
+                let [cu, cv] = c;
+                dim(ui, st, "height", "Height", at, table, vars);
+                dim(ui, st, "cu", &along("Centre", un), cu, table, vars);
+                dim(ui, st, "cv", &along("Centre", vn), cv, table, vars);
+                dim(ui, st, "r", "Radius", r, table, vars);
+                dim(ui, st, "from", "From, degrees", from_deg, table, vars);
+                dim(ui, st, "to", "To, degrees", to_deg, table, vars);
+                dim(ui, st, "w", "Width", w, table, vars);
+            }
+            ExtraPrim::Meander { at, start, step, height, n, w, .. } => {
+                let [su, sv] = start;
+                dim(ui, st, "height", "Height", at, table, vars);
+                dim(ui, st, "su", &along("Start", un), su, table, vars);
+                dim(ui, st, "sv", &along("Start", vn), sv, table, vars);
+                dim(ui, st, "step", "Step", step, table, vars);
+                dim(ui, st, "fold", "Fold height", height, table, vars);
+                dim(ui, st, "n", "Periods", n, table, vars);
+                dim(ui, st, "w", "Width", w, table, vars);
+            }
+            ExtraPrim::Wire { pts, r } => {
+                dim(ui, st, "r", "Radius", r, table, vars);
+                for (k, q) in pts.iter_mut().enumerate() {
+                    let [x, y, z] = q;
+                    dim(ui, st, &format!("p{k}x"), &format!("Point {} x", k + 1), x, table, vars);
+                    dim(ui, st, &format!("p{k}y"), &format!("Point {} y", k + 1), y, table, vars);
+                    dim(ui, st, &format!("p{k}z"), &format!("Point {} z", k + 1), z, table, vars);
+                }
+            }
+            ExtraPrim::Box { min, max } => {
+                for (k, (lo, hi)) in min.iter_mut().zip(max.iter_mut()).enumerate() {
+                    dim(ui, st, &format!("lo{k}"), &format!("From {}", AXIS[k]), lo, table, vars);
+                    dim(ui, st, &format!("hi{k}"), &format!("To {}", AXIS[k]), hi, table, vars);
+                }
+            }
+            ExtraPrim::Cylinder { a, b, r } => {
+                dim(ui, st, "r", "Radius", r, table, vars);
+                for (k, (p, q)) in a.iter_mut().zip(b.iter_mut()).enumerate() {
+                    dim(ui, st, &format!("a{k}"), &format!("From {}", AXIS[k]), p, table, vars);
+                    dim(ui, st, &format!("b{k}"), &format!("To {}", AXIS[k]), q, table, vars);
+                }
+            }
+            ExtraPrim::Sphere { c, r } => {
+                dim(ui, st, "r", "Radius", r, table, vars);
+                for (k, p) in c.iter_mut().enumerate() {
+                    dim(ui, st, &format!("c{k}"), &format!("Centre {}", AXIS[k]), p, table, vars);
+                }
+            }
+            ExtraPrim::Outline { at, thick, .. } => {
+                dim(ui, st, "height", "Height", at, table, vars);
+                dim(ui, st, "thick", "Thickness", thick, table, vars);
+            }
+            ExtraPrim::Imported { .. } => {}
+        }
+    });
+    for (title, pts) in lists {
+        point_rows(ui, &title, (un, vn), pts, table);
+    }
+    if prim != before {
+        if !st.ui.draw.editing_corner {
+            remember(st);
+            st.ui.draw.editing_corner = true;
+        }
+        st.project.extra[i].prim = prim;
+    }
+}
+
 fn properties(ui: &mut egui::Ui, st: &mut Studio) {
     let Some(i) = st.ui.draw.selected.filter(|i| *i < st.project.extra.len()) else { return };
     let names: Vec<String> = material::library().into_iter().map(|m| m.name).collect();
     let table = super::expr_field::VarTable::of(&st.project);
+    let vars = st.project.vars().unwrap_or_default();
     group(ui, |ui| {
         theme::caption(ui, "Selected shape");
         let e = &mut st.project.extra[i];
@@ -712,15 +961,20 @@ fn properties(ui: &mut egui::Ui, st: &mut Studio) {
                 }
             });
             ui.end_row();
-            if let ExtraPrim::Outline { at, thick, .. } = &mut e.prim {
-                ui.label("Height");
-                super::expr_field::expr_line(ui, "part height", at, &table, 100.0);
-                ui.end_row();
-                ui.label("Thickness");
-                super::expr_field::expr_line(ui, "part thickness", thick, &table, 100.0);
-                ui.end_row();
-            }
         });
+        dimensions(ui, st, i, &table, &vars);
+        // An outline from a file or a template stays in numbers until it's asked for.
+        if !matches!(st.project.extra.get(i).map(|e| &e.prim), Some(ExtraPrim::Outline { .. })) {
+            return;
+        }
+        if ui.button(theme::label(icon::NOTE_PENCIL, "Give it dimensions")).on_hover_text("Lets its corners, or a rectangle's centre and sides, use expressions and variables").clicked() {
+            remember(st);
+            if let Err(e) = sketch::make_drawn(&mut st.project, i) {
+                st.ui.draw.undo.pop();
+                st.ui.draw.note = Some(format!("{e:#}"));
+            }
+            return;
+        }
         let Some((_, axis, _, pts)) = selected(st) else { return };
         let mut corners: Vec<P2> = Vec::with_capacity(pts.len());
         for p in &pts {
@@ -777,7 +1031,7 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
     weak(ui, "Draw your own antenna on the canvas: metal first, then a feed. Right-drag pans, the wheel zooms, middle-drag or Alt-drag orbits. Wire draws in 3D.");
     if st.project.template != "custom" {
         group(ui, |ui| {
-            weak(ui, "This model's own parts come from its template, which ties them to the variable table. Make them editable to change their shapes. What you draw here is added either way.");
+            weak(ui, "This model's own parts come from its template, which ties them to the variable table. Make them editable to change their shapes: they then take their own dimensions, which you can name again. What you draw here is added either way.");
             if ui.button(theme::label(icon::NOTE_PENCIL, "Make every part editable")).clicked() {
                 let copy = st.project.editable_copy();
                 match copy {
@@ -892,6 +1146,32 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
     }
     properties(ui, st);
 
+    egui::CollapsingHeader::new(RichText::new("Variables").color(theme::TEXT)).id_salt("draw_vars").default_open(true).show(ui, |ui| {
+        weak(ui, "Write a shape's dimensions in these, and one change moves everything that uses it. Sweeps and the optimiser work on them by name.");
+        let table = super::expr_field::VarTable::of(&st.project);
+        super::design::variable_rows(ui, st, &table);
+        ui.horizontal(|ui| {
+            let [name, value] = &mut st.ui.draw.new_var;
+            ui.add(egui::TextEdit::singleline(name).hint_text("Name").desired_width(70.0));
+            super::expr_field::expr_line(ui, "draw new var", value, &table, DIM_W);
+            if ui.button(theme::label(icon::PLUS, "Add")).clicked() {
+                let [name, value] = st.ui.draw.new_var.clone();
+                let value = if value.trim().is_empty() { "0".to_string() } else { value };
+                remember(st);
+                match sketch::add_variable(&mut st.project, &name, &value, "Your own variable") {
+                    Ok(()) => {
+                        st.ui.draw.new_var = [String::new(), String::new()];
+                        st.ui.draw.note = None;
+                    }
+                    Err(e) => {
+                        st.ui.draw.undo.pop();
+                        st.ui.draw.note = Some(format!("{e:#}"));
+                    }
+                }
+            }
+        });
+    });
+
     theme::caption(ui, "Shapes");
     let shapes: Vec<(usize, String, String)> = st.project.extra.iter().enumerate().map(|(i, e)| (i, e.name.clone(), e.material.clone())).collect();
     if shapes.is_empty() {
@@ -931,13 +1211,43 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
         weak(ui, format!("{template_ports} from the template."));
     }
     let mut drop_port = None;
-    for (i, name) in ports.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(name).size(12.5));
-            if theme::icon_button(ui, icon::TRASH, "Remove this feed").clicked() {
+    let table = super::expr_field::VarTable::of(&st.project);
+    let vars = st.project.vars().unwrap_or_default();
+    let mut edited = st.project.extra_ports.clone();
+    for (i, port) in edited.iter_mut().enumerate() {
+        egui::CollapsingHeader::new(RichText::new(port.name.clone()).size(12.5)).id_salt(("draw_feed", i)).show(ui, |ui| {
+            egui::Grid::new(("draw_feed_grid", i)).num_columns(2).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut port.name).desired_width(120.0));
+                ui.end_row();
+                let [ax, ay, az] = &mut port.a;
+                dim(ui, st, &format!("f{i}ax"), "From x", ax, &table, &vars);
+                dim(ui, st, &format!("f{i}ay"), "From y", ay, &table, &vars);
+                dim(ui, st, &format!("f{i}az"), "From z", az, &table, &vars);
+                let [bx, by, bz] = &mut port.b;
+                dim(ui, st, &format!("f{i}bx"), "To x", bx, &table, &vars);
+                dim(ui, st, &format!("f{i}by"), "To y", by, &table, &vars);
+                dim(ui, st, &format!("f{i}bz"), "To z", bz, &table, &vars);
+                dim(ui, st, &format!("f{i}w"), "Width", &mut port.width, &table, &vars);
+                ui.label("Impedance");
+                super::expr_field::expr_line(ui, ("draw_feed_z0", i), &mut port.z0, &table, DIM_W);
+                ui.end_row();
+            });
+            if ui.button(theme::label(icon::TRASH, "Remove this feed")).clicked() {
                 drop_port = Some(i);
             }
         });
+    }
+    if edited != st.project.extra_ports {
+        if !st.ui.draw.editing_corner {
+            remember(st);
+            st.ui.draw.editing_corner = true;
+        }
+        st.project.extra_ports = edited;
+    }
+    // One undo step per field: the next edit after leaving it is a new one.
+    if !ui.ctx().egui_wants_keyboard_input() {
+        st.ui.draw.editing_corner = false;
     }
     if let Some(i) = drop_port {
         remember(st);
@@ -1007,6 +1317,59 @@ mod tests {
         add_point(&mut st, [0.01, 0.0]);
         add_point(&mut st, [0.01, 0.0]);
         assert_eq!(st.project.extra.len(), parts + 1);
+    }
+
+    /// What the tools draw keeps its dimensions, and is selected ready to type them.
+    #[test]
+    fn a_drawn_shape_keeps_its_dimensions_and_is_selected() {
+        let mut st = Studio::default();
+        st.project = Project::from_template("custom", Some("1GHz")).unwrap();
+        st.ui.draw.axis = 2;
+        st.ui.draw.tool = Tool::Rect;
+        add_point(&mut st, [0.0, 0.0]);
+        add_point(&mut st, [0.04, 0.02]);
+        assert_eq!(st.ui.draw.selected, Some(0));
+        let ExtraPrim::Drawn { form: Form::Rect { c, size }, .. } = &st.project.extra[0].prim else { panic!("{:?}", st.project.extra[0].prim) };
+        assert_eq!((c[0].as_str(), c[1].as_str(), size[0].as_str(), size[1].as_str()), ("20mm", "10mm", "40mm", "20mm"));
+
+        st.ui.draw.tool = Tool::Circle;
+        add_point(&mut st, [0.1, 0.0]);
+        add_point(&mut st, [0.11, 0.0]);
+        let ExtraPrim::Drawn { form: Form::Circle { r, .. }, .. } = &st.project.extra[1].prim else { panic!() };
+        assert_eq!(r, "10mm");
+
+        st.ui.draw.tool = Tool::Strip;
+        st.ui.draw.strip_mm = 1.5;
+        add_point(&mut st, [0.2, 0.0]);
+        add_point(&mut st, [0.22, 0.0]);
+        finish_path(&mut st);
+        let ExtraPrim::Strip { w, path, .. } = &st.project.extra[2].prim else { panic!("{:?}", st.project.extra[2].prim) };
+        assert_eq!((w.as_str(), path.len()), ("1.5mm", 2));
+
+        st.ui.draw.tool = Tool::Polygon;
+        for q in [[0.3, 0.0], [0.34, 0.0], [0.3, 0.03]] {
+            add_point(&mut st, q);
+        }
+        finish_path(&mut st);
+        assert!(matches!(&st.project.extra[3].prim, ExtraPrim::Drawn { form: Form::Poly { .. }, .. }));
+        assert_eq!(st.ui.draw.selected, Some(3));
+
+        // A cut goes in the shape under it, as a hole, and doesn't select anything new.
+        st.ui.draw.tool = Tool::Rect;
+        st.ui.draw.cut = true;
+        add_point(&mut st, [0.01, 0.005]);
+        add_point(&mut st, [0.03, 0.015]);
+        assert_eq!(st.ui.draw.note, None);
+        let ExtraPrim::Drawn { holes, .. } = &st.project.extra[0].prim else { panic!() };
+        assert_eq!(holes.len(), 1);
+        assert_eq!(st.ui.draw.selected, Some(3));
+
+        // Every one of them can be picked out of the canvas again.
+        let (o, down) = ([0.02, 0.002, 1.0], [0.0, 0.0, -1.0]);
+        assert_eq!(sketch::pick(&st.project, o, down).map(|x| x.0), Some(0));
+        select_part(&mut st, Some(1));
+        assert_eq!(st.ui.draw.at, "0");
+        assert!(selected(&st).is_some_and(|s| s.0 == 1));
     }
 
     /// A sheet can be a dielectric, but a wire has to conduct.

@@ -74,7 +74,7 @@ fn coil_sif(density: f64, axis: usize, centre: [f64; 3]) -> String {
 fn run_coil(study: &Study, geometry: &FeaGeometry, ctx: &JobCtx) -> Result<ResultSet> {
     let part = &geometry.partition;
     if geometry.step.is_empty() {
-        bail!("A coil needs a body from the design: its region is cut out of the air around it, which takes CAD geometry, not a mesh.");
+        bail!("A coil needs a CAD body: its region is cut out of the air around it, which takes CAD geometry, not a mesh.");
     }
     if !part.is_closed() {
         bail!("A coil's body must be a closed solid.");
@@ -199,7 +199,7 @@ pub fn run_study(study: &Study, geometry: &FeaGeometry, ctx: &JobCtx) -> Result<
     let a = classify(&mesh, part, diagonal * 2e-3, Limits::default());
     if !a.issues.is_empty() {
         let list: Vec<String> = a.issues.iter().take(5).map(|i| i.to_string()).collect();
-        bail!("The mesh doesn't match the design's faces, so potentials can't be placed reliably:\n{}", list.join("\n"));
+        bail!("The mesh doesn't match the body's faces, so potentials can't be placed reliably:\n{}", list.join("\n"));
     }
     // Physical groups: one volume, and one surface per condition. All other faces stay insulating.
     let mut physical = String::from("Physical Volume(1) = {1};\n");

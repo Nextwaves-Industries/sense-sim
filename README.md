@@ -31,7 +31,7 @@ on the *Library* section or in Settings → Library; the choice is remembered.
   The top bar has the scene name (click to rename), Save, Settings, the File / Edit / View menus,
   Downloads, the AI assistant and Help (all keyboard and mouse shortcuts). The grips beside the
   cards resize them, and each section folds with its chevron.
-- **Start:** the dialog at launch and from File → New asks what to work on: an antenna or a 3D part, which need
+- **Start:** the dialog at launch and from File → New asks what to work on: an antenna, which needs
   no scene, or a scene. Press Esc to skip it and start with a blank scene.
 - **Workbenches (the ribbon's tabs):** each job has its own tools and project tree, over the one scene.
   *Layout* builds the site (assets, walls, arranging). *Placement* places positioning devices and plans
@@ -54,6 +54,10 @@ on the *Library* section or in Settings → Library; the choice is remembered.
   the house goes back to the opening view with everything in frame. The bar at the bottom shows the scale.
 - **Placing:** Q/E rotate the preview (Shift: 90 deg). Shift or *Multi-place* keeps placing.
   Esc or right-click cancels. Objects drop onto whatever is under the cursor.
+- **Glass doors:** *Glass door* in the Layout ribbon places a closed door, 1.8 x 2.1 m. Stand it in a
+  gap between walls: inside a solid wall, radio still pays for the wall. Radio predictions read it as
+  glass, and RFID deployment puts portal antennas on it. *Radio* under Properties says what any object
+  is made of, metal-coated (low-E) glass included.
 - **Select and move:** click an object, drag it across the floor or onto other objects
   (Alt keeps height, Ctrl snaps).
   - **Orange ring:** rotate.
@@ -144,10 +148,10 @@ OpenEMS), or records a real measurement (`outcomes_check`, `site_survey_fit`, `s
 `site_acceptance_score`, drift tools, `design_fit_measured`), asks in every mode. MCP clients can't
 be asked, so those calls are refused for them.
 
-**Project files.** A project saves as one `.sesim` file, a compressed container like a `.docx`, holding the scene, devices, plant, simulation studies and factory view. The installer makes double-clicking one open the app. Layouts saved as `.json` by earlier versions still open, and saving one writes a `.sesim` beside it. A 3D design still sits next to it as a `.sc` file of the same name.
+**Project files.** A project saves as one `.sesim` file, a compressed container like a `.docx`, holding the scene, devices, plant, simulation studies and factory view. The installer makes double-clicking one open the app. Layouts saved as `.json` by earlier versions still open, and saving one writes a `.sesim` beside it.
 
 **Files.** Each chat has a working folder under `%LOCALAPPDATA%/SenseSim/agent`. `open_file` opens
-a file by type: a layout in a new tab, DXF or Gerber in Antenna Studio, STEP in 3D Design, IFC as a
+a file by type: a layout in a new tab, DXF or Gerber in Antenna Studio, IFC as a
 building, an image for the assistant to see. `open_external` shows a document, folder or web page in
 its own app; it can't run programs, and it asks first. Settings shows how much saved chats take up,
 and can clear them.
@@ -295,7 +299,7 @@ A workspace for designing one antenna, in the workflow of HFSS, CST Microwave St
 Design** workbench in the ribbon, or **Antenna** in the start dialog; it needs no scene. While it is in front, the
 top bar's name and Save, Ctrl+S and the File menu act on the antenna project. A `--no-default-features` build leaves it out.
 
-**Flow.** Pick one of 28 templates, draw your own on the canvas, or import a DXF or Gerber drawing. Set the design
+**Flow.** Pick one of 44 templates, draw your own on the canvas, or import a DXF or Gerber drawing. Set the design
 frequency and edit the variable table; everything is an expression (`0.47*lambda0`, `12mm`, `er`). Run. The results
 pages, array, matching and exports all work from that run.
 
@@ -306,6 +310,13 @@ typed exactly. Feed clicks across a gap and lands on the metal along an axis; Pr
 template's parts can be turned into editable shapes. A drawn dipole, patch and slot solve to the same impedance as their
 templates to the digits shown.
 
+What's drawn keeps its dimensions: a rectangle has a centre and two sides, a circle a centre and a radius, a strip a width
+and a path, a hole its corners, and a feed its two ends, width and impedance. Each is an expression, with variables
+offered as you type, and `x=` beside a field makes a new variable from what's in it. Sweeps and the optimiser then work
+on those variables by name, as they do for a template's. The mouse leaves alone any coordinate written in a variable, and
+the page says so. An imported outline stays in numbers until *Give it dimensions*. The *Drawn* samples open on the
+drawing with their dimensions already named.
+
 **Importing.** DXF: `LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE`, `POLYLINE`, `SPLINE`, `HATCH`, `SOLID`, `TRACE`,
 flat `3DFACE`, blocks with `INSERT`; loose pieces chain into closed outlines, nesting makes holes, and paper space and
 frozen layers stay out. Gerber: RS-274X flashes, draws, arcs and regions, one file per layer; aperture macros are
@@ -314,6 +325,20 @@ DWG, binary DXF, STEP and other 3D solids can't be read; 3D comes in as STL. So 
 against hand-written files in the R2000 layout, not files from other CAD programs.
 
 **Reconfigurable antennas.** PIN diodes, RF switches, varactors and fixed parts go across gaps in the metal, and states say how each is set. Each gap is a port of the model, so one solve of all the ports answers for every state: closing a port with a part's impedance is algebra on the S-matrix and on the per-port far fields, exact for linear parts. So changing a part, a bias or a state re-judges at once, and a search can try every combination for the best one per target (band, match, gain, beam direction, polarisation). An ordinary run, sweep, optimisation or yield solves the active state, and any state can go to the result pages like any other antenna. For each state: match, band, realized gain, beam, polarisation, loss in the parts, and the RF volts and current on each part with the power at which it reaches a limit, including a varactor's RF swing passing its bias. There are varactor tuning curves, a coverage map across states, part-spread yield, a tuner that moves the metal with the settings re-searched at every step, and exports: a CSV bias truth table, Touchstone per state, and an HTML report. Mounts can add a DC block, a bias choke with its self-resonance, and pad capacitance. Templates: switched-length dipole (frequency), varactor-tuned PIFA (frequency), switched-beam parasitic array (pattern), and corner-switched patch (polarisation). Closing a port matches the same model solved with that resistance as its port, in the method of moments and against a real lumped element in a separate openEMS run (S11 within 0.002, complex far field within 0.4 %). A closed switch matches an unbroken wire, an open one a wire cut there, and power in equals power radiated plus power lost in the parts. Each state is judged at its own frequency, on a pattern interpolated between the 17 solved across the sweep (9 for FDTD, which pays run time for each): against patterns solved directly, the worst case in the templates was 0.5 % of the field and 0.04 dB of gain. If the power stops adding up, the page says so. Parts are linear: harmonics, intermodulation and an RF swing moving a varactor aren't modelled. Bias lines aren't in the model unless drawn. Library part values are typical datasheet figures, some assumed, and each says which. No reconfigurable design here has been measured.
+
+**Phased arrays.** The *Phased array* page takes any layout: a line, a rectangular or triangular lattice, rings, a cylinder, multi-face panels, or a sparse line. Each element keeps its own orientation and the fields add as vectors, so panels facing different ways combine with the right polarisation, and on an array that sees all round the beam picks which elements light up. It takes several beams at once, digital or from one network, nulls, tapers, phase shifters and attenuators of finite bits, true time delay per element or subarray, hybrid arrays with analog aim and digital beams, random errors, and failed elements (click one to fail it). It reads realized gain, EIRP, beam widths, side lobes, grating lobes, pointing error, and instantaneous bandwidth. There's a beam table to load into a controller, a codebook of beams, a line's Butler beams, and a fit of weights to a shaped-beam mask. That's an array factor, with power conserved: coupling isn't in it. For coupling, solve a model with a port per element, such as the *Array* templates: one solve gives every port's far field and the S-matrix, so scanning is then superposition with no new solve, and it reads each port's active impedance and reflection, total active reflection, scan loss in two planes, blind spots, and the most any weights could realize in a direction. Checks: a uniform line gives its textbook 12.04 dB, −13.1 dB and 6.4°; squint follows sin θ · f₀/f; the band matches 0.886·λ/(L·sin θ₀) within 8 %; Butler beams are orthogonal and cross at −3.9 dB; Capon reaches its theoretical output SINR. On solved dipole arrays: radiated power matches accepted power within 4 % for random weights, nothing beats the conjugate-matched weights, and the middle element of a 9 × 9 has its cell's 4 π·dx·dy/λ² gain (Hannan's element-gain result) to within 0.15 dB once its own mismatch is counted. A 7 × 7's embedded element predicts a full 11 × 11 to 0.4 dB in the H plane and 1.1 dB scanned in the E plane, where the collinear dipoles nearly touch.
+
+**Direction finding.** The *Direction finding* page generates what each channel receives from sources you place, then reads it with MUSIC, Root-MUSIC, ESPRIT, Capon, beamscan (a correlative interferometer, when the table is from a solve), MUSIC on a sparse line's coarray (more sources than sensors), monopulse, a phase interferometer, Watson-Watt or pseudo-Doppler. Each is offered only where the array suits it. Source counting is by MDL and AIC, and spatial smoothing with forward-backward averaging separates coherent sources such as multipath. Channel errors and converters as coarse as one bit can be added. With a solved array it uses the real coupling, and can compare a calibrated table against textbook phases on the same array. It flags directions the array can't tell apart, and an accuracy study runs Monte Carlo against the Cramér-Rao bound. It can also show what a frequency offset costs one receiver switched round the array, as a BLE locator has, and where bearings from several stations cross, with the error radius their geometry gives. The bound matches its closed form for one source, and MUSIC and Root-MUSIC come within 25 % of it at 10 dB SNR with ESPRIT within 50 %. Six sensors find seven sources on a nested line. It assumes narrowband signals across the array and far-field sources; with a solved array, each wave arrives in the polarisation the array mostly receives from there.
+
+**Signal chain.** The *Signal chain* page takes a cascade of stages and a converter, by formula at once (Friis noise figure, cascaded intercept, noise floor, clip level, dynamic range, spur-free range, and whether the converter or the front end sets the noise), then sample by sample on demand: compression from each stage's intercept, oscillator phase noise, shared or per channel, I/Q imbalance, channel mismatch and calibration, clock jitter, quantisation and clipping, a decimating filter, and a steered or adaptive digital beamformer, against a QPSK, 16-QAM, OFDM, chirp, tone or noise signal and an optional jammer. It reads signal over noise at each point, array gain, EVM, spectra and the constellation, then runs the same signal through an amplifier across back-off, with and without predistortion. Checks: 6 dB per bit, the two-tone IM3 and 1 dB compression points, image rejection, jitter's ceiling and phase noise's level all match their formulas; the measured noise figure matches the budget's; eight channels gain 9 dB; a shared oscillator's phase noise survives the beam while separate ones average down by the channel count. The amplifier is memoryless with nothing to limit predistortion, so those curves stop at 0.01 % EVM and −90 dB: real memory effects and feedback noise would stop it well before that.
+
+**Radar.** The *Radar* page simulates an FMCW MIMO radar from the raw beat signal through range and Doppler FFTs, CFAR, peak fitting, the time-division Doppler correction, and angle from the virtual array, sized by the radar equation. Targets come back where they were placed. A speed past the FFT's limit is read back from the transmitters' phases, up to their count times that limit, and folds beyond it. CFAR's threshold is worked out for all the channels added together, and its false-alarm rate reads within a factor of 4 of the design at rates high enough to count. The detected SNR agrees with the radar equation within 3 dB. Point targets in free space: no clutter, multipath or interference from other radars.
+
+None of the array, direction-finding, chain or radar work has been measured on hardware. Solved arrays are labelled Simulated, and everything else Estimate.
+
+**Designing an RFID tag.** The *Design an RFID tag* page, and the assistant's `antenna_tag_design`, search different structures rather than adjust a reference: T-match meander, a loop coupled to a separate radiator, a loop with two radiators, dogbone, bow-tie with a hairpin, slotted plate, square spiral, fractal arms and bent arms, plus any shape drawn for the job, against a chip, a band, a footprint and what the tag is really in. They're judged by forward-link read range across the band, and several options come back with what each stands out for and what it does if its surroundings change. A retune says what new surroundings do to an existing design, such as putting it under paper, and what small changes get back. *Evolve* lays out metal cell by cell with no assumed shape. The assistant can also draw any shape from a description with `antenna_draw`, every coordinate an expression over the variable table, so it can be swept, optimised or searched by name.
+
+**Layers around flat metal.** Paper, PET, glue, a carton, glass, a bottle of water or a metal surface behind a spacer can lie over and under flat metal in one plane. The method of moments carries them in its Green's function (MPIE in layered media, Michalski and Zheng 1990), so a 20 µm film adds no unknowns and solves in under a second. Layers are as wide as the world there, and a surface wave along them counts as loss. FDTD builds the same layers to size, at a cost. Air layers land on the free-space solve, and metal behind air lands on the image solve to the digits shown; a strip on a thick slab shifts by the average permittivity's root (1.250 against 1.245). Against openEMS building the same layers, strip dipoles under 1 mm of paper and on 1.6 mm of FR-4 resonate within 0.23 % and 0.57 %. On a small loop the two disagree: openEMS reads reactance 15 to 20 % low near 915 MHz, moving towards the method of moments as its mesh refines, while the method of moments agrees with the thin-wire solver and the textbook inductance at low frequency. A tag's chip match depends on that reactance, so measure a built tag and retune before relying on a range figure. Paper, PET, adhesive and corrugated board values are typical or assumed, and no tag from here has been measured.
 
 **RFID gate test.** The aisle of a gate sits inside the near field of its own antennas (a 1.5 m panel at 915 MHz has its
 far field beyond about 14 m), so patterns and the array page can't say what reads there. This page takes any model with
@@ -330,7 +355,7 @@ UHF: E-field coupling to dipole tags. HF (13.56 MHz) loop gates are not covered.
 | Parametric model, variable table with expressions and units | yes | yes |
 | Antenna catalogue with synthesis formulas (Antenna Magus, Antenna Toolkit) | hundreds | 32: four reconfigurable, RFID gate, dipole, monopole, folded dipole, loop, Yagi, LPDA, axial and normal helix, turnstile, discone, meander, strip dipole, bow-tie, patch in air, PIFA, slot, corner reflector, horn, waveguide, probe, inset and circular patch, PCB IFA, UWB disc, Vivaldi, two-port patches, DRA |
 | Add parts (box, cylinder, sphere, wire), import STL | full CAD with booleans | parts with expression coordinates and STL import; no booleans, no STEP |
-| Draw shapes in 2D, edit corners, cut holes | yes | yes, on any axis plane; no curves after drawing, circles become polygons |
+| Draw shapes in 2D, edit corners, cut holes | yes | yes, on any axis plane, each dimension an expression; no sketch constraints, and circles are solved as polygons |
 | Import DXF, Gerber | yes, and ODB++, STEP | DXF and Gerber; no ODB++ or STEP |
 | Near-field read-zone test under several excitation states | scripted by hand | RFID gate test: read rate, stray reads, EIRP, phase search |
 | Switches and varactors, every state from one solve | circuit co-simulation, set up by hand | Reconfigurable page: parts with bias and mounts, states, search per target, RF stress on each part, tuning curves |
@@ -395,7 +420,7 @@ between them, because a lumped port across a gap and an ideal delta gap are diff
 conditioning, so nothing warns about them yet.
 
 **Scripted screenshots.** `--open antenna-<page>` opens a page (`gallery`, `variables`, `parts`, `materials`, `setup`,
-`sparams`, `smith`, `farfield`, `fields`, `array`, `matching`, `mimo`, `link`, `rcs`, `sweep`, `optimize`, `converge`,
+`sparams`, `smith`, `farfield`, `fields`, `array`, `phased`, `df`, `chain`, `radar`, `matching`, `mimo`, `link`, `rcs`, `sweep`, `optimize`, `converge`,
 `yield`, `export`, `draw`, `gate`); `--open antenna-run-<template>` starts a run, `--open antenna-new-<template>` only
 loads it, `--open antenna-import-<path>` opens a drawing, `--open antenna-gate-run` solves the gate test. Run test copies
 with `tools\hidden_run.ps1`: on the normal desktop they catch whatever the person at the computer is clicking.

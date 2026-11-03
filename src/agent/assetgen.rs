@@ -31,6 +31,20 @@ pub fn custom_dir() -> PathBuf {
     data_dir().join("custom_assets")
 }
 
+/// Ends the folder of a variant you can see through. Radio reads it: a ray can't open a file for
+/// every object it crosses, and in the path the answer stays with the object in saved layouts.
+const SEE_THROUGH: &str = "_glass";
+
+/// What the folder of a variant in this material ends with.
+pub fn variant_suffix(mat: &Mat) -> &'static str {
+    if mat.opacity < 0.9 { SEE_THROUGH } else { "" }
+}
+
+/// Was this asset made see-through by `reskin` or `structures::usd_with_material`?
+pub fn see_through_asset(asset: &Path) -> bool {
+    asset.parent().and_then(Path::file_name).is_some_and(|d| d.to_string_lossy().ends_with(SEE_THROUGH))
+}
+
 fn hash_of(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
@@ -123,7 +137,8 @@ impl Mat {
             "black_metal" => m([34, 35, 37], 0.45, 0.6),
             "plastic_white" => m([240, 240, 238], 0.35, 0.0),
             "plastic_black" => m([24, 24, 26], 0.35, 0.0),
-            "glass" => Self { opacity: 0.22, ..m([225, 238, 240], 0.05, 0.0) },
+            // Dark and faint: what's blended is still lit, so a pale colour goes frosted white in the sun.
+            "glass" => Self { opacity: 0.12, ..m([32, 48, 47], 0.05, 0.0) },
             "led_panel" => Self { emissive: [6.0, 6.0, 5.8], ..m([255, 255, 252], 0.4, 0.0) },
             _ => return None,
         })
@@ -657,6 +672,56 @@ pub fn create(input: &Value) -> Result<Created> {
     Ok(Created { slug: name, path, size: mx - mn, parts: parts.len(), replaced: existed && changed })
 }
 
+/// A double door, 1.8 m wide and 2.1 m tall: what an entrance usually has.
+pub const GLASS_DOOR_M: (f32, f32) = (1.8, 2.1);
+
+/// `create_asset`'s input for a closed glass door in an aluminium frame: one leaf up to 1.4 m
+/// wide, two above that. Its name is how the rest of the app knows it: "glass" makes radio treat
+/// it as glass, and "door" makes RFID deployment see a doorway.
+fn glass_door_spec(width: f32, height: f32) -> Result<Value> {
+    if !(0.5..=12.0).contains(&width) || !(1.5..=6.0).contains(&height) {
+        bail!("a glass door is 0.5 to 12 m wide and 1.5 to 6 m tall, not {width} x {height} m");
+    }
+    const FRAME: f32 = 0.06;
+    let mut parts = vec![
+        json!({ "size": [width, FRAME, FRAME], "at": [0.0, height - FRAME / 2.0, 0.0], "material": "aluminium" }),
+        json!({ "size": [FRAME, height, FRAME], "at": [-(width - FRAME) / 2.0, height / 2.0, 0.0], "material": "aluminium" }),
+        json!({ "size": [FRAME, height, FRAME], "at": [(width - FRAME) / 2.0, height / 2.0, 0.0], "material": "aluminium" }),
+    ];
+    let clear = width - 2.0 * FRAME;
+    let leaves = if width > 1.4 { 2 } else { 1 };
+    let leaf = clear / leaves as f32;
+    if leaves == 2 {
+        // Where the leaves meet. Without it, a device on the door's centre line sees past the door.
+        parts.push(json!({ "size": [0.04, height - FRAME, 0.03], "at": [0.0, (height - FRAME) / 2.0, 0.0], "material": "aluminium" }));
+    }
+    for k in 0..leaves {
+        let x = -clear / 2.0 + (k as f32 + 0.5) * leaf;
+        // A solid pane, not a one-sided panel: rays and pointers hit it from either side. It fills
+        // the frame, leaving the gap under a real door.
+        parts.push(json!({ "size": [leaf, height - FRAME - 0.01, 0.012], "at": [x, (height - FRAME + 0.01) / 2.0, 0.0], "material": "glass" }));
+        // A pull on each face, by the edge that opens.
+        let edge = if k == 0 { 1.0 } else { -1.0 };
+        for face in [-1.0, 1.0] {
+            parts.push(json!({ "size": [0.025, 0.9, 0.025], "at": [x + edge * (leaf / 2.0 - 0.08), 1.05, face * 0.03], "material": "steel" }));
+        }
+    }
+    Ok(json!({
+        "name": format!("glass_door_{:.0}x{:.0}", width * 1000.0, height * 1000.0),
+        "description": "glass door entrance exit shopfront storefront",
+        "parts": parts,
+    }))
+}
+
+/// Writes (once) a glass door of this size, in the library with the other generated assets.
+pub fn glass_door(width: f32, height: f32) -> Result<Created> {
+    create(&glass_door_spec(width, height)?)
+}
+
+pub fn is_glass_door(asset: &Path) -> bool {
+    asset.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("glass_door_"))
+}
+
 /// Assets made with `create_asset`: (name, USD path).
 pub fn list_custom() -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
@@ -762,9 +827,10 @@ pub fn reskin(asset: &Path, spec: &Value) -> Result<PathBuf> {
     // Generated assets are told apart by their folder (structures/<kind>/…), so
     // their variants stay beside them. Library assets get a folder of their own.
     let data = data_dir();
+    let variant = variant_suffix(&mat);
     let dir = match source.parent().filter(|p| p.starts_with(&data)) {
-        Some(p) => PathBuf::from(format!("{}_{tag}", p.display())),
-        None => data.join("reskins").join(format!("{stem}_{tag}")),
+        Some(p) => PathBuf::from(format!("{}_{tag}{variant}", p.display())),
+        None => data.join("reskins").join(format!("{stem}_{tag}{variant}")),
     };
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(Path::new(&file).with_extension("usda"));
@@ -788,6 +854,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_glass_door_has_panes_you_see_through_in_a_solid_frame() {
+        let parts_of = |w: f32, h: f32| -> Vec<Part> { glass_door_spec(w, h).unwrap()["parts"].as_array().unwrap().iter().enumerate().map(|(i, p)| parse_part(p, i).unwrap()).collect() };
+        let panes = |parts: &[Part]| parts.iter().filter(|p| p.mat.opacity < 1.0).count();
+        let double = parts_of(GLASS_DOOR_M.0, GLASS_DOOR_M.1);
+        assert_eq!(panes(&double), 2);
+        let (mn, mx) = bounds(&double).unwrap();
+        assert!((mx.x - mn.x - 1.8).abs() < 1e-4 && (mx.y - mn.y - 2.1).abs() < 1e-4, "{mn} {mx}");
+        assert_eq!(panes(&parts_of(0.9, 2.1)), 1);
+        // Mostly glass, with nowhere for a ray to pass at hand height, the centre line included.
+        let glass: f32 = double.iter().filter(|p| p.mat.opacity < 1.0).map(|p| p.size.x * p.size.y).sum();
+        assert!(glass > 0.85 * 1.8 * 2.1, "{glass} m²");
+        for parts in [&double, &parts_of(0.9, 2.1)] {
+            let (mn, mx) = bounds(parts).unwrap();
+            // From just inside its outer edges: rounding can put the edge itself on either side.
+            let steps = ((mx.x - mn.x - 0.002) / 0.002) as usize;
+            for x in (0..=steps).map(|i| mn.x + 0.001 + i as f32 * 0.002) {
+                assert!(parts.iter().any(|p| (p.at.x - x).abs() <= p.size.x / 2.0 && (p.at.y - 1.2).abs() <= p.size.y / 2.0), "a gap at x = {x}");
+            }
+        }
+        assert!(glass_door_spec(0.1, 2.1).is_err() && glass_door_spec(1.8, f32::NAN).is_err());
+        // Named so that radio and RFID deployment both know what it is.
+        let name = glass_door_spec(1.8, 2.1).unwrap()["name"].as_str().unwrap().to_string();
+        assert_eq!(name, "glass_door_1800x2100");
+        assert!(is_glass_door(Path::new(&format!("x/{name}/usd/{name}.usda"))));
+        assert!(!is_glass_door(Path::new("x/rack/usd/rack.usda")));
+    }
+
+    #[test]
+    fn a_see_through_look_marks_the_variant_and_an_opaque_one_does_not() {
+        let dir = temp("see_through");
+        let src = dir.join("thing.usda");
+        write_usd(&src, "thing", &[Part { shape: Shape::Box, size: Vec3::ONE, at: Vec3::ZERO, rot: Quat::IDENTITY, mat: Mat::default() }], Vec3::ZERO).unwrap();
+        assert!(!see_through_asset(&src));
+        let glass = reskin(&src, &json!({ "preset": "glass" })).unwrap();
+        let faint = reskin(&src, &json!({ "opacity": 0.3 })).unwrap();
+        let paint = reskin(&src, &json!({ "preset": "white_paint" })).unwrap();
+        let nearly = reskin(&src, &json!({ "opacity": 0.95 })).unwrap();
+        assert!(see_through_asset(&glass) && see_through_asset(&faint));
+        assert!(!see_through_asset(&paint) && !see_through_asset(&nearly));
+        for v in [&dir, glass.parent().unwrap(), faint.parent().unwrap(), paint.parent().unwrap(), nearly.parent().unwrap()] {
+            let _ = std::fs::remove_dir_all(v);
+        }
     }
 
     #[test]

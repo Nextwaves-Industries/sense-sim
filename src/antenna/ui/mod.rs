@@ -8,10 +8,13 @@ pub mod draw;
 pub mod expr_field;
 pub mod gate;
 pub mod import;
+pub mod phased;
 pub mod reconfig;
 mod results;
 pub mod samples;
 pub(crate) mod solve;
+pub mod tagdesign;
+pub mod tagtune;
 mod view3d;
 
 use std::collections::HashMap;
@@ -36,6 +39,7 @@ use view3d::{Camera, ViewMode};
 pub enum Page {
     Samples,
     Gallery,
+    TagDesign,
     Draw,
     #[default]
     Variables,
@@ -48,6 +52,10 @@ pub enum Page {
     FarField,
     Fields,
     Array,
+    Phased,
+    DirectionFinding,
+    SignalChain,
+    Radar,
     Matching,
     Mimo,
     Link,
@@ -66,6 +74,7 @@ impl Page {
         Some(match s {
             "samples" => Page::Samples,
             "gallery" => Page::Gallery,
+            "tag" => Page::TagDesign,
             "draw" => Page::Draw,
             "variables" => Page::Variables,
             "parts" => Page::Parts,
@@ -77,6 +86,10 @@ impl Page {
             "farfield" => Page::FarField,
             "fields" => Page::Fields,
             "array" => Page::Array,
+            "phased" => Page::Phased,
+            "direction_finding" | "df" => Page::DirectionFinding,
+            "signal_chain" | "chain" => Page::SignalChain,
+            "radar" => Page::Radar,
             "matching" => Page::Matching,
             "mimo" => Page::Mimo,
             "link" => Page::Link,
@@ -147,6 +160,7 @@ pub struct StudioUi {
     // Array.
     pub array: ArrayConfig,
     pub array_spacing_lambda: (f64, f64),
+    pub phased: phased::PhasedUi,
     // Matching.
     pub match_f: f64,
     pub match_series: matching::Series,
@@ -198,6 +212,7 @@ pub struct StudioUi {
     pub reconfig: reconfig::ReconfigUi,
     pub import: import::ImportUi,
     pub draw: draw::DrawUi,
+    pub tag: tagdesign::TagUi,
 }
 
 impl Default for StudioUi {
@@ -243,6 +258,7 @@ impl Default for StudioUi {
             thumbs: HashMap::new(),
             array: ArrayConfig::default(),
             array_spacing_lambda: (0.5, 0.5),
+            phased: Default::default(),
             match_f: 0.0,
             match_series: matching::Series::E24,
             match_q: (0.0, 0.0),
@@ -284,6 +300,7 @@ impl Default for StudioUi {
             reconfig: reconfig::ReconfigUi::default(),
             import: import::ImportUi::default(),
             draw: draw::DrawUi::default(),
+            tag: tagdesign::TagUi::default(),
         }
     }
 }
@@ -399,12 +416,13 @@ struct NavRow {
     always: bool,
 }
 
-const NAV: [(&str, &[NavRow]); 5] = [
+const NAV: [(&str, &[NavRow]); 6] = [
     (
         "Design",
         &[
             NavRow { page: Page::Samples, text: "Sample projects", glyph: icon::PACKAGE, always: true },
             NavRow { page: Page::Gallery, text: "Antenna templates", glyph: icon::SQUARES_FOUR, always: true },
+            NavRow { page: Page::TagDesign, text: "Design an RFID tag", glyph: icon::SPARKLE, always: true },
             NavRow { page: Page::Draw, text: "Draw", glyph: icon::NOTE_PENCIL, always: true },
             NavRow { page: Page::Variables, text: "Variables", glyph: icon::SLIDERS_HORIZONTAL, always: true },
             NavRow { page: Page::Parts, text: "Parts and ports", glyph: icon::CUBE, always: true },
@@ -431,6 +449,15 @@ const NAV: [(&str, &[NavRow]); 5] = [
             NavRow { page: Page::Link, text: "Link budget", glyph: icon::PULSE, always: false },
             NavRow { page: Page::Rcs, text: "Radar cross section", glyph: icon::CROSSHAIR, always: true },
             NavRow { page: Page::Gate, text: "RFID gate test", glyph: icon::DOOR_OPEN, always: true },
+        ],
+    ),
+    (
+        "Arrays and signals",
+        &[
+            NavRow { page: Page::Phased, text: "Phased array", glyph: icon::GRID_FOUR, always: true },
+            NavRow { page: Page::DirectionFinding, text: "Direction finding", glyph: icon::CROSSHAIR, always: true },
+            NavRow { page: Page::SignalChain, text: "Signal chain", glyph: icon::CPU, always: true },
+            NavRow { page: Page::Radar, text: "Radar", glyph: icon::BROADCAST, always: true },
         ],
     ),
     (
@@ -485,12 +512,12 @@ fn canvas_for_page(st: &mut Studio) {
     st.ui.message = None;
     match st.ui.page {
         Page::Draw => draw::entered(st),
-        Page::FarField | Page::Array | Page::Link => st.ui.view = ViewMode::Pattern,
+        Page::FarField | Page::Array | Page::Phased | Page::Link => st.ui.view = ViewMode::Pattern,
         Page::Fields => {
             let has_field = st.latest().is_some_and(|r| !r.planes.is_empty());
             st.ui.view = if has_field { ViewMode::Field } else { ViewMode::Currents };
         }
-        Page::Variables | Page::Parts | Page::Reconfig | Page::Materials | Page::Samples | Page::Gallery | Page::Gate if !matches!(st.ui.view, ViewMode::Model | ViewMode::Mesh) => st.ui.view = ViewMode::Model,
+        Page::Variables | Page::Parts | Page::Reconfig | Page::Materials | Page::Samples | Page::Gallery | Page::Gate | Page::TagDesign if !matches!(st.ui.view, ViewMode::Model | ViewMode::Mesh) => st.ui.view = ViewMode::Model,
         _ => {}
     }
 }
@@ -546,6 +573,7 @@ fn page_ui(ui: &mut egui::Ui, st: &mut Studio, lib: (&mut AntennaLibrary, &mut A
     match st.ui.page {
         Page::Samples => samples::page(ui, st),
         Page::Gallery => design::gallery(ui, st),
+        Page::TagDesign => tagdesign::page(ui, st),
         Page::Draw => draw::page(ui, st),
         Page::Variables => design::variables(ui, st),
         Page::Parts => design::parts(ui, st),
@@ -557,6 +585,10 @@ fn page_ui(ui: &mut egui::Ui, st: &mut Studio, lib: (&mut AntennaLibrary, &mut A
         Page::FarField => results::far_field(ui, st),
         Page::Fields => results::fields(ui, st),
         Page::Array => analysis::array(ui, st),
+        Page::Phased => phased::phased_page(ui, st),
+        Page::DirectionFinding => phased::df_page(ui, st),
+        Page::SignalChain => phased::chain_page(ui, st),
+        Page::Radar => phased::radar_page(ui, st),
         Page::Matching => analysis::matching_page(ui, st),
         Page::Mimo => analysis::mimo(ui, st),
         Page::Link => results::link(ui, st),
@@ -746,6 +778,15 @@ pub fn studio_ui(
         } else if name == "reconfig-run" {
             studio.ui.page = Page::Reconfig;
             studio.run_reconfig();
+        } else if name == "chain-run" {
+            studio.ui.page = Page::SignalChain;
+            studio.run_chain();
+        } else if name == "radar-run" {
+            studio.ui.page = Page::Radar;
+            studio.run_radar();
+        } else if name == "df-study" {
+            studio.ui.page = Page::DirectionFinding;
+            studio.run_df_study();
         } else if name == "gate-run" {
             if let Ok(g) = studio.project.geometry() {
                 let spec = antenna_core::recipes::gate::GateSpec::for_project(&studio.project, &g);
@@ -770,7 +811,9 @@ pub fn studio_ui(
         crate::rtls::fdtd::Status::Failed(e) => Some(e),
         crate::rtls::fdtd::Status::Idle => None,
     };
-    let project = st.project.clone();
+    let mut project = st.project.clone();
+    // Array settings don't change the model, so they mustn't re-mesh it at each step of a drag.
+    project.phased = Default::default();
     if st.ui.draw.dragging() {
         st.ui.refresh_shapes(&project);
     } else {
@@ -796,10 +839,11 @@ pub fn studio_ui(
     egui::Area::new(egui::Id::new("studio_canvas")).order(egui::Order::Background).constrain(false).fixed_pos(canvas.min).show(&ctx, |ui| {
         ui.set_min_size(canvas.size());
         ui.set_max_size(canvas.size());
-        let geom = st.ui.model.clone();
+        let markers = phased::canvas_model(st);
+        let geom = markers.as_ref().map_or_else(|| st.ui.model.clone(), |m| Some(m.0.clone()));
         let tess = std::mem::take(&mut st.ui.tess);
         // The far field and plane the canvas needs.
-        let far = latest.as_ref().and_then(|r| canvas_far(st, r));
+        let far = phased::canvas_far(st).or_else(|| latest.as_ref().and_then(|r| canvas_far(st, r)));
         let plane = latest.as_ref().and_then(|r| r.planes.get(st.ui.plane_k.min(r.planes.len().saturating_sub(1)))).cloned();
         let frame = if st.ui.animate {
             let n = plane.as_ref().map_or(0, |p| p.frames.len());
@@ -833,7 +877,7 @@ pub fn studio_ui(
             frame: if drawing { st.ui.draw.frame } else { None },
             grid: if drawing { draw::canvas_grid(st) } else { None },
             geometry: geom.as_ref(),
-            tess: &tess,
+            tess: markers.as_ref().map_or(&tess[..], |m| &m.1[..]),
             mom_mesh: st.ui.mom_mesh.as_ref(),
             mode: st.ui.view,
             plan: st.ui.plan.as_ref(),

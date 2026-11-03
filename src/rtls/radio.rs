@@ -69,6 +69,10 @@ impl Material {
     /// generated structures). A material word in the name wins over what the
     /// object usually is (`barrier_wall_plastic` is plastic, not a wall).
     pub fn of_asset(asset: &std::path::Path) -> Self {
+        // Given a see-through look: that says more than what it's called or what it was.
+        if crate::agent::assetgen::see_through_asset(asset) {
+            return Self::Glass;
+        }
         if let Some(k) = Kind::of_asset(asset) {
             return if k == Kind::Beam { Self::Metal } else { Self::Concrete };
         }
@@ -79,8 +83,9 @@ impl Material {
     fn of_tokens(toks: &[String]) -> Self {
         const MATERIALS: &[(Material, &[&str])] = &[
             (Material::Liquid, &["water", "oil", "coolant", "lubricant", "lube", "fluid", "antifreeze", "solvent", "fuel", "diesel", "bleach", "disinfectant", "blood", "liquid", "beverage", "wine"]),
-            (Material::Metal, &["metal", "steel", "aluminium", "aluminum", "iron", "tin", "chrome", "silver", "gold"]),
+            // Ahead of metal: an aluminium-framed glass door is mostly glass, as in `material_for_element`.
             (Material::Glass, &["glass", "window", "windscreen", "windshield", "mirror"]),
+            (Material::Metal, &["metal", "steel", "aluminium", "aluminum", "iron", "tin", "chrome", "silver", "gold"]),
             (Material::Wood, &["wood", "wooden", "plywood", "timber", "pallet"]),
             (Material::Thin, &["cardboard", "corrugated", "paper", "plastic", "fabric", "cloth", "foam", "microfiber", "towel", "bedding", "drape", "blinds", "sponge", "bag", "carton"]),
         ];
@@ -424,6 +429,11 @@ pub fn is_rack(asset: &std::path::Path) -> bool {
     let stem = asset.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
     tokens(&stem).iter().any(|t| matches!(t.to_ascii_lowercase().as_str(), "rack" | "rackable" | "shelf" | "shelving"))
 }
+
+/// Metal-coated (low-E) glazing, in typical walls: about 24 dB at 6 dB a wall. From 3GPP TR 38.901's
+/// 23 + 0.3 f dB for coated glass, against about 3 dB for plain glass. A typical figure, not a
+/// product's: the coating is what decides it.
+pub const COATED_GLASS_WEIGHT: f32 = 4.0;
 
 /// What a body does to a worn tag's link. `angle` is between the way the wearer
 /// faces (the tag on their chest) and the way to the other device. Past 90° the
@@ -1266,6 +1276,26 @@ mod tests {
         assert!((r - uwb_link_range_m(&full) / 4.0).abs() < 1.0, "{r}");
         let at = |d: f32| Path { distance: d, ..Default::default() };
         assert!(at(r - 0.5).uwb_passes(&low) && !at(r + 0.5).uwb_passes(&low));
+    }
+
+    #[test]
+    fn a_glass_door_is_glass_however_it_got_there() {
+        let m = |s: &str| Material::of_asset(std::path::Path::new(s));
+        assert_eq!(m("C:/SenseSim/custom_assets/glass_door_1800x2100/usd/glass_door_1800x2100.usda"), Material::Glass);
+        // Its frame doesn't make it a metal door.
+        assert_eq!(m("x/sm_door_aluminium_glass_a01_01.usd"), Material::Glass);
+        assert_eq!(m("x/sm_container_jar_glass_silver_a01_01.usd"), Material::Glass);
+        // Made see-through, whatever it was: a wall, or a rack from the library.
+        assert_eq!(m("C:/SenseSim/structures/wall/4.00x3.00x0.02_1a2b3c4d_glass/wall.usda"), Material::Glass);
+        assert_eq!(m("C:/SenseSim/reskins/sm_rack_storage_a01_01_1a2b3c4d_glass/sm_rack_storage_a01_01.usda"), Material::Glass);
+        // A glass look on a thick structure doesn't charge it for concrete's thickness.
+        let glass_wall = std::path::Path::new("C:/SenseSim/structures/wall/4.00x3.00x0.30_1a2b3c4d_glass/wall.usda");
+        assert_eq!(obstruction_of_asset(glass_wall), (Material::Glass, Material::Glass.weight()));
+        // Paint isn't glass.
+        assert_eq!(m("C:/SenseSim/structures/wall/4.00x3.00x0.20_1a2b3c4d/wall.usda"), Material::Concrete);
+        // Plain and coated glass, as the knowledge base has them: about 3 and 24 dB at 6 dB a wall.
+        assert!((Material::Glass.weight() * 6.0 - 3.0).abs() < 1e-6);
+        assert!((COATED_GLASS_WEIGHT * 6.0 - 24.0).abs() < 1e-6);
     }
 
     #[test]

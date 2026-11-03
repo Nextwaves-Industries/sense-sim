@@ -145,6 +145,34 @@ pub fn gain_change_db(a: &SimResult, b: &SimResult) -> f64 {
     worst
 }
 
+/// [`gain_change_db`] without the mismatch to the port's reference. A tag's port is a number nobody
+/// uses, and 230 ohm of reactance against 50 ohm makes its realized gain swing on any small move.
+pub fn plain_gain_change_db(a: &SimResult, b: &SimResult) -> f64 {
+    let mut worst: f64 = 0.0;
+    for (pa, pb) in a.far.iter().zip(&b.far) {
+        for (fa, fb) in pa.iter().zip(pb) {
+            let d = (fa.metrics().peak_gain_dbi - fb.metrics().peak_gain_dbi).abs();
+            if d.is_nan() {
+                return f64::INFINITY;
+            }
+            worst = worst.max(d);
+        }
+    }
+    worst
+}
+
+/// How far the share of power reaching a chip moved between two runs, at most, across a band. What
+/// a mesh study of a tag has to watch: S against 50 ohm stays near one whatever the antenna does, so
+/// it can't see the tag move, and it can't say the tag has stopped moving either.
+pub fn power_change(a: &Network, b: &Network, chip: (f64, f64), f_lo: f64, f_hi: f64) -> f64 {
+    let fs = crate::linspace(f_lo, f_hi, 21);
+    let (za, zb) = (a.interpolate(&fs).zin(0), b.interpolate(&fs).zin(0));
+    fs.iter().zip(za.iter().zip(&zb)).map(|(f, (x, y))| {
+        let c = crate::tag::chip_at(chip, *f);
+        (crate::tag::power_transfer(*x, c) - crate::tag::power_transfer(*y, c)).abs()
+    }).fold(0.0, f64::max)
+}
+
 /// How much of a first-order error is left after a pass that moved by `delta` with
 /// density ratio `ratio`: the rest of the geometric series, `delta / (ratio − 1)`. At a
 /// ratio of 1.35 that is 2.9 times what the pass moved.
@@ -173,6 +201,20 @@ pub fn study_densities(start: f64, ratio: f64, passes: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why a tag's mesh study can't watch S: 10 ohm of reactance costs a tenth of the chip's power
+    /// and hardly moves S against 50 ohm.
+    #[test]
+    fn a_tag_moving_shows_in_the_power_and_hardly_in_s() {
+        let fs = crate::linspace(900e6, 930e6, 7);
+        let with = |x: f64| Network::from_z(fs.clone(), &vec![vec![vec![C64::new(15.0, x)]]; fs.len()], vec![50.0]);
+        let (a, b) = (with(231.0), with(241.0));
+        let chip = (15.0, -231.0);
+        assert!(power_change(&a, &a, chip, 902e6, 928e6) < 1e-9);
+        let moved = power_change(&a, &b, chip, 902e6, 928e6);
+        assert!(moved > 0.05, "{moved}");
+        assert!(delta_s(&a, &b) < moved, "S {} vs power {moved}", delta_s(&a, &b));
+    }
 
     fn net(s: Vec<C64>) -> Network {
         Network { f: vec![1e9; s.len()].iter().enumerate().map(|(k, f)| f + k as f64 * 1e6).collect(), z0: vec![50.0], s: s.into_iter().map(|v| vec![vec![v]]).collect() }

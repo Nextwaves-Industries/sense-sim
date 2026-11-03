@@ -4,9 +4,9 @@
 
 use anyhow::{Context, Result};
 
-use crate::project::{Drive, Project, SimResult};
+use crate::project::{Drive, ExtraPort, ExtraPrim, ExtraSolid, Form, Project, SimResult};
 use crate::reconfig::PolGoal;
-use crate::{C64, db20, linspace};
+use crate::{C64, db20, linspace, sketch};
 
 /// What a sample is used for, as the list groups them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,10 +19,12 @@ pub enum Group {
     Radio,
     Microwave,
     Reconfigurable,
+    Arrays,
+    Drawn,
 }
 
 impl Group {
-    pub const ALL: [Group; 8] = [Group::Rfid, Group::Iot, Group::Wifi, Group::Gnss, Group::Uwb, Group::Radio, Group::Microwave, Group::Reconfigurable];
+    pub const ALL: [Group; 10] = [Group::Drawn, Group::Rfid, Group::Iot, Group::Wifi, Group::Gnss, Group::Uwb, Group::Radio, Group::Microwave, Group::Reconfigurable, Group::Arrays];
     pub fn label(self) -> &'static str {
         match self {
             Group::Rfid => "UHF RFID",
@@ -33,6 +35,8 @@ impl Group {
             Group::Radio => "Broadcast and radio",
             Group::Microwave => "Microwave",
             Group::Reconfigurable => "Reconfigurable",
+            Group::Arrays => "Phased arrays and direction finding",
+            Group::Drawn => "Drawn, with its dimensions named",
         }
     }
 }
@@ -46,6 +50,19 @@ pub enum Opens {
     Reconfig,
     /// The field through the aisle.
     Gate,
+    /// An ordinary run, on the Draw page: what it shows is how the model was drawn.
+    Drawing,
+    /// An ordinary run of every port, then the beam it can steer, coupling and all.
+    Phased,
+    /// An ordinary run of every port, then what it reads of sources around it.
+    DirectionFinding,
+}
+
+impl Opens {
+    /// A run with patterns in the band, as opposed to a job of its own.
+    pub fn solves_far_field(self) -> bool {
+        matches!(self, Opens::FarField | Opens::Drawing)
+    }
 }
 
 pub struct Sample {
@@ -78,13 +95,90 @@ pub struct Sample {
     pub chip: Option<&'static str>,
     /// The least power transfer into the chip it's held to across the band, 0 to 1.
     pub min_transfer: f64,
+    /// Draws the model on a blank project, for a sample that shows drawing.
+    pub draw: Option<fn(&mut Project) -> Result<()>>,
+}
+
+fn pair(a: &str, b: &str) -> [String; 2] {
+    [a.to_string(), b.to_string()]
+}
+
+fn drawn(p: &mut Project, name: &str, axis: usize, at: &str, form: Form, holes: Vec<Vec<[String; 2]>>) {
+    let material = p.metal.clone();
+    p.extra.push(ExtraSolid { name: name.into(), material, prim: ExtraPrim::Drawn { axis, at: at.into(), thick: "0".into(), form, holes } });
+}
+
+fn feed(p: &mut Project, a: [&str; 3], b: [&str; 3], width: &str) {
+    p.extra_ports.push(ExtraPort { name: "feed".into(), a: a.map(String::from), b: b.map(String::from), width: width.into(), z0: "Z0".into() });
+}
+
+fn vars(p: &mut Project, rows: &[(&str, &str, &str)]) -> Result<()> {
+    rows.iter().try_for_each(|(n, e, note)| sketch::add_variable(p, n, e, note))
+}
+
+/// Two rectangles and a gap, each dimension a variable.
+fn draw_dipole(p: &mut Project) -> Result<()> {
+    vars(p, &[("L", "0.47*lambda0", "Tip to tip"),("w", "lambda0/50", "Arm width"), ("g", "lambda0/60", "Feed gap")])?;
+    p.params.iter_mut().find(|r| r.name == "Z0").context("Z0")?.expr = "73".into();
+    for (name, c) in [("Right arm", "(L+g)/4"), ("Left arm", "-(L+g)/4")] {
+        drawn(p, name, 2, "0", Form::Rect { c: pair(c, "0"), size: pair("(L-g)/2", "w") }, Vec::new());
+    }
+    feed(p, ["-g/2", "0", "0"], ["g/2", "0", "0"], "w");
+    Ok(())
+}
+
+/// A plate over a plate, joined by a probe.
+fn draw_patch(p: &mut Project) -> Result<()> {
+    vars(p, &[("h", "0.04*lambda0", "Height over the ground"), ("L", "0.443*lambda0", "Patch length, sets the frequency"), ("W", "0.55*lambda0", "Patch width"), ("G", "0.9*lambda0", "Ground plate size"), ("yf", "0.25*L", "Probe offset, sets the match"), ("wp", "lambda0/40", "Probe width")])?;
+    drawn(p, "Ground", 2, "0", Form::Rect { c: pair("0", "0"), size: pair("G", "G") }, Vec::new());
+    drawn(p, "Patch", 2, "h", Form::Rect { c: pair("0", "0"), size: pair("W", "L") }, Vec::new());
+    feed(p, ["0", "yf", "0"], ["0", "yf", "h"], "wp");
+    Ok(())
+}
+
+/// A plate with a slot cut in it. The hole's corners are expressions like any other.
+fn draw_slot(p: &mut Project) -> Result<()> {
+    vars(p, &[("Ls", "0.42*lambda0", "Slot length, sets the frequency"),("ws", "lambda0/40", "Slot width"), ("Gx", "0.7*lambda0", "Plate across the slot"), ("Gy", "0.8*lambda0", "Plate along the slot"), ("wp", "lambda0/60", "Feed width")])?;
+    p.params.iter_mut().find(|r| r.name == "Z0").context("Z0")?.expr = "500".into();
+    let hole = vec![pair("-ws/2", "-Ls/2"), pair("ws/2", "-Ls/2"), pair("ws/2", "Ls/2"), pair("-ws/2", "Ls/2")];
+    drawn(p, "Plate", 2, "0", Form::Rect { c: pair("0", "0"), size: pair("Gx", "Gy") }, vec![hole]);
+    feed(p, ["-ws/2", "0", "0"], ["ws/2", "0", "0"], "wp");
+    Ok(())
+}
+
+/// A dipole folded to fit, drawn as one trace per arm so its width and every bend can be moved.
+fn draw_meander(p: &mut Project) -> Result<()> {
+    vars(p, &[("X", "0.0925*lambda0", "Straight run of each arm"), ("Y", "0.03*lambda0", "Height of a fold"), ("d", "0.025*lambda0", "Fold spacing"), ("w", "lambda0/120", "Trace width"), ("g", "lambda0/60", "Feed gap")])?;
+    p.params.iter_mut().find(|r| r.name == "Z0").context("Z0")?.expr = "40".into();
+    // A narrow trace with tight bends needs more than the usual mesh to resolve them.
+    p.setup.edges_per_lambda = 30.0;
+    for (name, s) in [("Right arm", ""), ("Left arm", "-")] {
+        let u = |e: &str| format!("{s}({e})");
+        let path = vec![
+            [u("g/2"), "0".to_string()],
+            [u("g/2+X"), "0".to_string()],
+            [u("g/2+X"), "Y".to_string()],
+            [u("g/2+X+d"), "Y".to_string()],
+            [u("g/2+X+d"), "-Y".to_string()],
+            [u("g/2+X+2*d"), "-Y".to_string()],
+            [u("g/2+X+2*d"), "Y".to_string()],
+        ];
+        let material = p.metal.clone();
+        p.extra.push(ExtraSolid { name: name.into(), material, prim: ExtraPrim::Strip { axis: 2, at: "0".into(), path, w: "w".into() } });
+    }
+    feed(p, ["-g/2", "0", "0"], ["g/2", "0", "0"], "w");
+    Ok(())
 }
 
 const fn base(id: &'static str, title: &'static str, group: Group, about: &'static str, template: &'static str, f0: &'static str, band: (f64, f64), sweep: (f64, f64)) -> Sample {
-    Sample { id, title, group, about, template, f0, band, sweep, sets: &[], metal: "PEC", substrate: None, drive: &[], opens: Opens::FarField, limit_db: -10.0, min_gain_dbi: -40.0, pol: None, chip: None, min_transfer: 0.0 }
+    Sample { id, title, group, about, template, f0, band, sweep, sets: &[], metal: "PEC", substrate: None, drive: &[], opens: Opens::FarField, limit_db: -10.0, min_gain_dbi: -40.0, pol: None, chip: None, min_transfer: 0.0, draw: None }
 }
 
-static SAMPLES: [Sample; 31] = [
+static SAMPLES: [Sample; 38] = [
+    Sample { draw: Some(draw_dipole), opens: Opens::Drawing, metal: "Copper", min_gain_dbi: 1.5, ..base("drawn_dipole", "Drawn dipole, 915 MHz", Group::Drawn, "Two rectangles and a feed, the simplest thing to draw. Select an arm: its centre and sides are written in L, w and g, so changing L in the table moves both arms.", "custom", "915MHz", (0.902, 0.928), (0.75, 1.1)) },
+    Sample { draw: Some(draw_patch), opens: Opens::Drawing, metal: "Aluminium", min_gain_dbi: 7.0, ..base("drawn_patch", "Drawn patch on two sheets, 915 MHz", Group::Drawn, "A plate over a ground, drawn on two heights and joined by a probe. The upper sheet's height is the variable h, and yf moves the probe to set the match.", "custom", "915MHz", (0.91, 0.92), (0.82, 1.01)) },
+    Sample { draw: Some(draw_slot), opens: Opens::Drawing, metal: "Copper", ..base("drawn_slot", "Drawn slot in a plate, 2.45 GHz", Group::Drawn, "A hole cut from a plate. The hole's corners are written in Ls and ws, so the slot can be swept and optimised like a template's dimensions.", "custom", "2.45GHz", (2.42, 2.48), (2.1, 2.8)) },
+    Sample { draw: Some(draw_meander), opens: Opens::Drawing, metal: "Copper", min_gain_dbi: 0.5, ..base("drawn_meander", "Drawn meander dipole, 915 MHz", Group::Drawn, "Each arm one trace with every bend an expression: X, Y, d and w are all you need to fold it to a size. Shorter than a straight dipole, and narrower in band for it.", "custom", "915MHz", (0.91, 0.92), (0.75, 1.1)) },
     Sample { sets: &[("Lx", "95mm"), ("w", "1mm"), ("a", "28mm"), ("b", "2.6mm"), ("g", "1mm"), ("n", "4"), ("Hm", "3.5mm"), ("s", "3.5mm"), ("x0", "16mm")], metal: "Aluminium", limit_db: 1.0, chip: Some("ucode9"), min_transfer: 0.7, ..base("rfid_tag_inlay", "RFID tag inlay, 95 x 8 mm", Group::Rfid, "A meandered dipole with a T-match, inductive to suit a capacitive chip, here UCODE 9. Judged by power reaching the chip, since S11 means nothing for a tag.", "rfid_tag", "915MHz", (0.902, 0.928), (0.82, 1.01)) },
     Sample { sets: &[("h", "0.025*lambda0"), ("L", "0.46*lambda0"), ("t", "0.075*lambda0"), ("xf", "0.14*lambda0")], metal: "Aluminium", min_gain_dbi: 8.0, pol: Some(PolGoal::Rhcp), limit_db: -9.5, ..base("rfid_reader_cp_eu", "RFID reader panel, circular, EU band", Group::Rfid, "An air-spaced patch with two corners cut and one feed: right-hand circular over 865-868 MHz with no hybrid, the low-cost way to read tags at any rotation.", "rfid_reader_cp", "866.5MHz", (0.865, 0.868), (0.8, 0.94)) },
     Sample { sets: &[("h", "0.04*lambda0"), ("L", "0.448*lambda0"), ("xf", "0.11*lambda0")], drive: &[(1.0, 0.0), (1.0, -90.0)], metal: "Aluminium", min_gain_dbi: 8.0, pol: Some(PolGoal::Rhcp), ..base("rfid_reader_dual_us", "RFID reader panel, circular, US band", Group::Rfid, "An air-spaced patch fed on two axes in quadrature: right-hand circular across all of 902-928 MHz, where one feed runs out of axial ratio. The shape of a commercial panel.", "rfid_reader_dual", "915MHz", (0.902, 0.928), (0.82, 1.01)) },
@@ -112,6 +206,9 @@ static SAMPLES: [Sample; 31] = [
     Sample { metal: "Aluminium", min_gain_dbi: 5.0, ..base("cband_waveguide", "C-band open waveguide, 5.8 GHz", Group::Microwave, "A probe in a rectangular guide, open at one end: a broad, simple feed for a dish or a near-field probe.", "oewg", "5.8GHz", (5.6, 6.0), (5.0, 6.6)) },
     Sample { metal: "Copper", min_gain_dbi: 2.0, ..base("cband_dra", "Dielectric resonator, 5 GHz", Group::Microwave, "A ceramic puck on a ground plate, probe fed: no metal resonator to lose power in, which is why it's used high in frequency.", "dra", "5GHz", (4.9, 5.1), (4.2, 6.0)) },
     Sample { sets: &[], ..base("slot_plate", "Slot in a plate, 2.45 GHz", Group::Microwave, "The dual of a dipole, cut into a sheet of metal so it sits flush: the same pattern with E and H swapped, and a high feed impedance.", "slot", "2.45GHz", (2.42, 2.48), (2.2, 2.7)) },
+    Sample { opens: Opens::Phased, limit_db: 1.0, sets: &[("nx", "8"), ("ny", "8")], ..base("phased_panel", "Beam-steering panel, 8 by 8", Group::Arrays, "Sixty-four dipoles over a ground plane, each with its own port. Steer it: the gain, the active match of every port and any blindness all come from one solve, so scanning needs no new one.", "array_dipole", "2.45GHz", (2.4, 2.5), (2.2, 2.7)) },
+    Sample { opens: Opens::DirectionFinding, limit_db: 1.0, ..base("df_ring", "DF ring, 8 monopoles", Group::Arrays, "Eight monopoles round a half-wave radius, as an angle-of-arrival locator might have them. Two transmitters at once come apart with MUSIC, read through the array's own solved coupling.", "array_ring", "2.44GHz", (2.4, 2.4835), (2.2, 2.7)) },
+    Sample { opens: Opens::DirectionFinding, limit_db: 1.0, sets: &[("n", "4"), ("R", "0.125*lambda0")], ..base("df_adcock", "Adcock DF, marine VHF", Group::Arrays, "Four monopoles a quarter wave across, as on a coast station at 156.8 MHz: Watson-Watt reads a bearing with no receiver per direction, at the cost of an error that cycles every 90°.", "array_ring", "156.8MHz", (0.156, 0.162), (0.14, 0.18)) },
     Sample { opens: Opens::Reconfig, limit_db: 1.0, ..base("switched_dipole", "Band-switching dipole", Group::Reconfigurable, "PIN diodes join sections of a dipole for three bands from one wire. Flip them in the state table: the change is instant, with no new solve.", "reconfig_dipole", "2.45GHz", (1.4, 2.5), (1.1025, 3.0625)) },
     Sample { opens: Opens::Reconfig, limit_db: 1.0, ..base("tuned_pifa", "Varactor-tuned PIFA", Group::Reconfigurable, "A varactor at the plate's open end tunes it 540–900 MHz with bias. Look at the tuning curve, and at how much the part loses and how hard it's driven at low bias.", "reconfig_pifa", "900MHz", (0.54, 0.9), (0.45, 1.17)) },
     Sample { opens: Opens::Reconfig, limit_db: 1.0, ..base("beam_array", "Switched-beam parasitic array", Group::Reconfigurable, "A monopole ringed by four parasitics: shorted ones reflect, so PIN diodes turn a 9 dBi beam in 90° steps.", "reconfig_parasitic", "2.45GHz", (2.42, 2.48), (2.0825, 2.8175)) },
@@ -131,6 +228,10 @@ impl Sample {
     pub fn project(&self) -> Result<Project> {
         let mut p = Project::from_template(self.template, Some(self.f0)).with_context(|| format!("sample '{}'", self.id))?;
         p.name = self.title.to_string();
+        if let Some(draw) = self.draw {
+            p.metal = self.metal.to_string();
+            draw(&mut p).with_context(|| format!("sample '{}'", self.id))?;
+        }
         for (name, value) in self.sets {
             let row = p.params.iter_mut().find(|r| r.name == *name).with_context(|| format!("sample '{}': no variable '{name}'", self.id))?;
             row.expr = value.to_string();
@@ -142,14 +243,53 @@ impl Sample {
         p.setup.f_lo = self.sweep.0 * 1e9;
         p.setup.f_hi = self.sweep.1 * 1e9;
         // A reconfigurable sample's states look after their own patterns.
-        if self.opens == Opens::FarField {
+        if self.opens.solves_far_field() {
             let centre = 0.5 * (self.band.0 + self.band.1) * 1e9;
             let wide = (self.band.1 - self.band.0) / (0.5 * (self.band.0 + self.band.1)) > 0.02;
             p.setup.far_freqs = if wide { vec![self.band.0 * 1e9, centre, self.band.1 * 1e9] } else { vec![centre] };
             p.setup.far_step = 5.0;
         }
         p.drive = self.drive.iter().map(|d| Drive { amp: d.0, phase: d.1 }).collect();
+        // What each opens onto, so there's something to read straight away.
+        match self.id {
+            "phased_panel" => p.phased.plan.beams = vec![crate::phased::beam::Beam { theta: 30.0, phi: 0.0, share: 1.0 }],
+            "df_ring" => {
+                use crate::phased::doa::{Method, Scan, Source};
+                p.phased.df.scan = Scan::Azimuth { theta: 80.0 };
+                p.phased.df.method = Method::Music;
+                p.phased.df.step = 1.0;
+                p.phased.df.sources = vec![Source { theta: 80.0, phi: 50.0, ..Default::default() }, Source { theta: 80.0, phi: 200.0, ..Default::default() }];
+                p.phased.df.compare = vec![Method::Music, Method::Capon, Method::Beamscan];
+            }
+            "df_adcock" => {
+                use crate::phased::doa::{Method, Scan, Source};
+                p.phased.df.scan = Scan::Azimuth { theta: 80.0 };
+                p.phased.df.method = Method::WatsonWatt;
+                p.phased.df.step = 1.0;
+                p.phased.df.sources = vec![Source { theta: 80.0, phi: 65.0, ..Default::default() }];
+                p.phased.df.compare = vec![Method::WatsonWatt, Method::PseudoDoppler, Method::Music];
+            }
+            _ => {}
+        }
         Ok(p)
+    }
+
+    /// What a test holds it to, in words, or nothing if it isn't held to anything yet.
+    pub fn held_to(&self) -> String {
+        let mut out = Vec::new();
+        if self.chip.is_some() {
+            out.push(format!("at least {:.0} % of the power into the chip", self.min_transfer * 100.0));
+        }
+        if self.limit_db < 0.0 {
+            out.push(format!("reflection under {:.1} dB across the band", self.limit_db));
+        }
+        if self.min_gain_dbi > -40.0 {
+            out.push(format!("at least {:.1} dBi", self.min_gain_dbi));
+        }
+        if let Some(p) = self.pol {
+            out.push(format!("{} with under 3 dB axial ratio", if p == PolGoal::Rhcp { "right-hand circular" } else { "left-hand circular" }));
+        }
+        out.join(", ")
     }
 
     pub fn band_text(&self) -> String {
@@ -275,6 +415,38 @@ mod tests {
         assert_eq!(by_id("scanner_discone").unwrap().band_text(), "700 MHz – 2 GHz");
     }
 
+    /// A drawn sample shows that a model made on the canvas is an ordinary project: its variables
+    /// move it, and it's drawn with the kinds of part the page can edit.
+    #[test]
+    fn drawn_samples_are_drawn_and_follow_their_variables() {
+        let list: Vec<&Sample> = all().iter().filter(|s| s.draw.is_some()).collect();
+        assert!(list.len() >= 4);
+        for s in list {
+            assert_eq!(s.group, Group::Drawn, "{}", s.id);
+            assert_eq!(s.opens, Opens::Drawing, "{}", s.id);
+            let p = s.project().unwrap();
+            assert_eq!(p.template, "custom", "{}", s.id);
+            let vars = p.vars().unwrap();
+            for part in 0..p.extra.len() {
+                assert!(!sketch::handles(&p, part).is_empty(), "{}: part {part} can't be grabbed", s.id);
+            }
+            let before = format!("{:?} {:?}", p.geometry().unwrap().solids, p.geometry().unwrap().ports);
+            for row in p.params.iter().filter(|r| !r.derived) {
+                let mut q = p.clone();
+                q.params.iter_mut().find(|r| r.name == row.name).unwrap().expr = format!("{:e}", vars[&row.name] * 1.05);
+                let after = q.geometry().map_or_else(|e| format!("{e:#}"), |g| format!("{:?} {:?}", g.solids, g.ports));
+                assert_ne!(before, after, "{}: {} changes nothing", s.id, row.name);
+            }
+        }
+    }
+
+    #[test]
+    fn samples_say_what_they_are_held_to() {
+        assert!(by_id("rfid_reader_cp_eu").unwrap().held_to().contains("right-hand"));
+        assert!(by_id("rfid_tag_inlay").unwrap().held_to().contains("chip"));
+        assert!(by_id("wifi_corner").unwrap().held_to().contains("dBi"));
+    }
+
     fn mom_opts(p: &Project) -> MomOptions {
         MomOptions { segments_per_lambda: p.setup.segments_per_lambda, edges_per_lambda: p.setup.edges_per_lambda, theta_step: 5.0, phi_step: 5.0 }
     }
@@ -302,13 +474,14 @@ mod tests {
     fn quick_samples_do_what_they_say() {
         let mut problems = Vec::new();
         let mut checked = 0;
-        for s in all().iter().filter(|s| s.opens == Opens::FarField) {
+        for s in all().iter().filter(|s| s.opens.solves_far_field()) {
             let p = s.project().unwrap();
             let g = p.geometry().unwrap();
             if p.solver_for(&g) == SolverKind::Fdtd {
                 continue;
             }
-            if MomProblem::new(&g, p.setup.f_hi, mom_opts(&p)).unwrap().unknowns() > QUICK_UNKNOWNS {
+            // A drawn sample is a promise about the drawing tools, so it's checked whatever its size.
+            if s.draw.is_none() && MomProblem::new(&g, p.setup.f_hi, mom_opts(&p)).unwrap().unknowns() > QUICK_UNKNOWNS {
                 continue;
             }
             let (r, n, secs) = solve(&p, &g);
@@ -359,7 +532,7 @@ mod tests {
                 let (k, v) = set.split_once('=').unwrap();
                 p.params.iter_mut().find(|r| r.name == k).unwrap_or_else(|| panic!("{k}")).expr = v.to_string();
             }
-            let g = p.geometry().unwrap();
+            let g = p.geometry().unwrap_or_else(|e| panic!("{case}: {e:#}"));
             let (r, n, secs) = solve(&p, &g);
             let f = s.figures(&r).unwrap();
             println!("{case:60} {n:5} unk {secs:5.1} s worst {:6.1} dB gain {:5.1} dBi AR {:4.1} res {:?} {:?}", f.worst_db, f.gain_dbi, f.axial_ratio_db, f.resonance.map(|x| (x / 1e6).round()), s.shortfalls(&f));

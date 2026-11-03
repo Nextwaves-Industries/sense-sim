@@ -15,8 +15,6 @@ pub enum Workbench {
     /// Build the site: assets, walls, arranging.
     #[default]
     Layout,
-    /// Model parts in 3D, in SolidCraft.
-    Design,
     /// Put the positioning devices in it.
     Placement,
     /// Design an antenna, in Antenna Studio.
@@ -30,12 +28,11 @@ pub enum Workbench {
 }
 
 impl Workbench {
-    pub const ALL: [Workbench; 7] = [Workbench::Layout, Workbench::Design, Workbench::Placement, Workbench::Antenna, Workbench::Simulation, Workbench::Plant, Workbench::Factory];
+    pub const ALL: [Workbench; 6] = [Workbench::Layout, Workbench::Placement, Workbench::Antenna, Workbench::Simulation, Workbench::Plant, Workbench::Factory];
 
     pub fn name(self) -> &'static str {
         match self {
             Workbench::Layout => "Layout",
-            Workbench::Design => "3D Design",
             Workbench::Placement => "Placement",
             Workbench::Antenna => "Antenna Design",
             Workbench::Simulation => "Simulation",
@@ -47,7 +44,6 @@ impl Workbench {
     pub fn glyph(self) -> &'static str {
         match self {
             Workbench::Layout => icon::CUBE,
-            Workbench::Design => icon::CUBE_TRANSPARENT,
             Workbench::Placement => icon::BROADCAST,
             Workbench::Antenna => icon::TARGET,
             Workbench::Simulation => icon::WAVE_SINE,
@@ -59,7 +55,6 @@ impl Workbench {
     pub fn tip(self) -> &'static str {
         match self {
             Workbench::Layout => "Build the site: assets, walls and arranging",
-            Workbench::Design => "Model parts in 3D: sketches, solids and assemblies",
             Workbench::Placement => "Place positioning devices and plan coverage",
             Workbench::Antenna => "Design an antenna: models, solvers, results, optimisation",
             Workbench::Simulation => "Test the system live, run RF solvers and check predictions",
@@ -81,7 +76,6 @@ impl Workbench {
     pub fn from_name(s: &str) -> Option<Workbench> {
         Some(match s {
             "layout" => Workbench::Layout,
-            "design" => Workbench::Design,
             "placement" => Workbench::Placement,
             "antenna" => Workbench::Antenna,
             "simulation" => Workbench::Simulation,
@@ -109,34 +103,6 @@ impl Workbench {
     }
 }
 
-/// What the design strip asks of the 3D Design workspace.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum DesignCommand {
-    New,
-    Save,
-    Undo,
-    Redo,
-    Settings,
-    /// Show this open design.
-    Show(usize),
-    /// Close this open design; it asks first if there are unsaved changes.
-    Close(usize),
-    /// The design's File menu, under a button at this x, in window points.
-    FileMenu(f32),
-}
-
-/// How the design workspace stands, for the design strip. Empty until it has started.
-#[derive(Clone, Default)]
-pub struct DesignInfo {
-    /// The open designs: name, and whether there are unsaved changes.
-    pub designs: Vec<(String, bool)>,
-    pub active: usize,
-    pub can_save: bool,
-    pub can_undo: bool,
-    pub can_redo: bool,
-    pub file_menu_open: bool,
-}
-
 /// What the File menu asks of the open antenna project.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StudioFile {
@@ -159,8 +125,6 @@ pub struct StudioDoc {
 /// The workbench in front and what the others had open.
 pub struct Benches {
     pub current: Workbench,
-    /// The design code is in this build; until it says so the tab stays hidden.
-    pub design_ready: bool,
     /// A workspace asked for this workbench, for `follow` to bring to the front.
     pub request: Option<Workbench>,
     /// Where leaving a full-canvas workbench goes back to.
@@ -170,7 +134,7 @@ pub struct Benches {
 
 impl Default for Benches {
     fn default() -> Self {
-        Self { current: Workbench::default(), design_ready: false, request: None, previous: Workbench::default(), cards: Workbench::ALL.map(Workbench::first_card) }
+        Self { current: Workbench::default(), request: None, previous: Workbench::default(), cards: Workbench::ALL.map(Workbench::first_card) }
     }
 }
 
@@ -179,49 +143,32 @@ impl LeftPanelSlot {
     pub fn shows(&self, bench: Workbench) -> bool {
         match bench {
             Workbench::Antenna => cfg!(feature = "antenna-studio"),
-            Workbench::Design => self.bench.design_ready,
             _ => true,
         }
     }
 
     /// A workspace fills the canvas: the scene and its cards step aside.
     pub fn canvas_taken(&self) -> bool {
-        self.studio_open || self.design_open
+        self.studio_open
     }
 }
 
 /// New, Open, Save and Close act on what is in front. A scene hidden behind a workspace
 /// must not be saved, or replaced, by a command meant for the workspace.
 pub fn route_file_commands(flags: &mut Flags, slot: &mut LeftPanelSlot) {
-    if slot.studio_open {
-        if flags.new {
-            slot.studio_goto.push("gallery".to_string());
-        }
-        if flags.open {
-            slot.studio_file.push(StudioFile::Open);
-        }
-        if flags.save_as {
-            slot.studio_file.push(StudioFile::SaveAs);
-        } else if flags.save {
-            slot.studio_file.push(StudioFile::Save);
-        }
-    } else if slot.design_open {
-        if flags.new {
-            slot.design_commands.push(DesignCommand::New);
-        }
-        if flags.save {
-            slot.design_commands.push(DesignCommand::Save);
-        }
-        // Save As and Open are in the design's own File menu.
-        if flags.open || flags.save_as {
-            let x = slot.design_file_button.map_or(0.0, |r| r.left());
-            slot.design_commands.push(DesignCommand::FileMenu(x));
-        }
-        if flags.close {
-            slot.design_commands.push(DesignCommand::Close(slot.design_info.active));
-        }
-    } else {
+    if !slot.studio_open {
         return;
+    }
+    if flags.new {
+        slot.studio_goto.push("gallery".to_string());
+    }
+    if flags.open {
+        slot.studio_file.push(StudioFile::Open);
+    }
+    if flags.save_as {
+        slot.studio_file.push(StudioFile::SaveAs);
+    } else if flags.save {
+        slot.studio_file.push(StudioFile::Save);
     }
     *flags = Flags { new: false, open: false, save: false, save_as: false, close: false };
 }
@@ -242,7 +189,6 @@ pub fn switch(slot: &mut LeftPanelSlot, rtls: &mut RtlsUiState, to: Workbench) {
     }
     slot.rtls_open = card.is_some();
     slot.studio_open = to == Workbench::Antenna;
-    slot.design_open = to == Workbench::Design;
     slot.bench.previous = from;
     slot.bench.current = to;
 }
@@ -257,9 +203,7 @@ pub fn follow(slot: &mut LeftPanelSlot, rtls: &mut RtlsUiState) {
     let current = slot.bench.current;
     if slot.studio_open && current != Workbench::Antenna {
         switch(slot, rtls, Workbench::Antenna);
-    } else if slot.design_open && current != Workbench::Design {
-        switch(slot, rtls, Workbench::Design);
-    } else if (current == Workbench::Antenna && !slot.studio_open) || (current == Workbench::Design && !slot.design_open) {
+    } else if current == Workbench::Antenna && !slot.studio_open {
         let back = slot.bench.previous;
         switch(slot, rtls, back);
     } else if slot.rtls_open && Workbench::of_page(rtls.local.page()) != current {
@@ -326,38 +270,6 @@ mod tests {
         assert!(slot.bench.current == Workbench::Simulation && slot.rtls_open);
     }
 
-    #[test]
-    fn the_design_workspace_opens_its_workbench_and_closing_it_goes_back() {
-        let (mut slot, mut rtls) = ui();
-        switch(&mut slot, &mut rtls, Workbench::Simulation);
-
-        // A simulation asks for faces to be picked.
-        slot.design_open = true;
-        follow(&mut slot, &mut rtls);
-        assert!(slot.bench.current == Workbench::Design && !slot.rtls_open);
-
-        slot.design_open = false;
-        follow(&mut slot, &mut rtls);
-        assert!(slot.bench.current == Workbench::Simulation && slot.rtls_open);
-    }
-
-    #[test]
-    fn the_full_canvas_workspaces_replace_each_other() {
-        let (mut slot, mut rtls) = ui();
-        switch(&mut slot, &mut rtls, Workbench::Design);
-        slot.studio_open = true;
-        follow(&mut slot, &mut rtls);
-        assert!(slot.bench.current == Workbench::Antenna && slot.studio_open && !slot.design_open);
-    }
-
-    #[test]
-    fn design_stays_hidden_until_its_code_is_there() {
-        let (mut slot, _) = ui();
-        assert!(!slot.shows(Workbench::Design));
-        slot.bench.design_ready = true;
-        assert!(slot.shows(Workbench::Design));
-    }
-
     fn all_flags() -> Flags {
         Flags { new: true, open: true, save: true, save_as: false, close: true }
     }
@@ -371,16 +283,6 @@ mod tests {
         assert!(!flags.new && !flags.open && !flags.save && !flags.save_as && !flags.close);
         assert_eq!(slot.studio_file, [StudioFile::Open, StudioFile::Save]);
         assert_eq!(slot.studio_goto, ["gallery"]);
-    }
-
-    #[test]
-    fn file_commands_in_the_design_workspace_go_to_the_design() {
-        let (mut slot, mut rtls) = ui();
-        switch(&mut slot, &mut rtls, Workbench::Design);
-        let mut flags = all_flags();
-        route_file_commands(&mut flags, &mut slot);
-        assert!(!flags.save && !flags.close);
-        assert!(slot.design_commands.contains(&DesignCommand::Save));
     }
 
     #[test]

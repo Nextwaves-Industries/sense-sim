@@ -15,8 +15,6 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use sim_core::jobs::JobManager;
 use sim_core::study::Study;
 
-use crate::design::{Slot, Workspace};
-
 #[derive(Resource)]
 pub struct SimState {
     pub panel_open: bool,
@@ -25,9 +23,7 @@ pub struct SimState {
     pub active: Option<usize>,
     pub jobs: JobManager,
     pub view: Option<view::View>,
-    /// A condition waiting for faces from the design workspace: (study, condition).
-    pub picking: Option<(usize, usize)>,
-    /// The same, from an object in the 3D scene.
+    /// A condition waiting for faces from an object in the 3D scene: (study, condition).
     pub scene_pick: Option<(usize, usize)>,
     /// Scene objects, as bodies.
     pub scene: scene_body::SceneBodies,
@@ -50,7 +46,6 @@ impl Default for SimState {
             active: None,
             jobs: JobManager::new(root),
             view: None,
-            picking: None,
             scene_pick: None,
             scene: Default::default(),
             pointer_over_ui: false,
@@ -93,15 +88,10 @@ impl Plugin for SimPlugin {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn ui(mut contexts: EguiContexts, mut state: ResMut<SimState>, mut slot: NonSendMut<Slot>, mut workspace: ResMut<Workspace>, mut panel_slot: ResMut<crate::ui::LeftPanelSlot>, mut block: ResMut<crate::scene::UiBlock>) -> Result {
+fn ui(mut contexts: EguiContexts, mut state: ResMut<SimState>, mut panel_slot: ResMut<crate::ui::LeftPanelSlot>, mut block: ResMut<crate::scene::UiBlock>) -> Result {
     panel_slot.results_shown = state.view.is_some();
     if std::mem::take(&mut panel_slot.open_simulations) {
         state.panel_open = true;
-    }
-    panel::finish_pick(&mut state, &mut slot);
-    if std::mem::take(&mut slot.want_notices) {
-        state.notices_open = true;
     }
     state.pointer_over_ui = block.pointer;
     // Clicks are for choosing faces now. Right-drag still turns the view.
@@ -114,11 +104,11 @@ fn ui(mut contexts: EguiContexts, mut state: ResMut<SimState>, mut slot: NonSend
         notices::show(&ctx, &mut open);
         state.notices_open = open;
     }
-    if *workspace != Workspace::Scene || panel_slot.bench.current != crate::ui::Workbench::Simulation {
+    if panel_slot.bench.current != crate::ui::Workbench::Simulation {
         return Ok(());
     }
     if state.panel_open {
-        panel::show(&ctx, &mut state, &mut slot, &mut workspace);
+        panel::show(&ctx, &mut state);
     }
     let installed = state.installed;
     if let Some(mut d) = state.dialog.take() {

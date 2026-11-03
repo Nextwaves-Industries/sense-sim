@@ -156,7 +156,7 @@ pub enum Issue {
 impl std::fmt::Display for Issue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Issue::Unassigned { entity, share } => write!(f, "{:.1}% of mesh surface {entity} is near no face of the design", share * 100.0),
+            Issue::Unassigned { entity, share } => write!(f, "{:.1}% of mesh surface {entity} is near no face of the body", share * 100.0),
             Issue::AreaMismatch { face, tagged, meshed } => write!(f, "face {face}: the mesh covers {meshed:.6e} m² of its {tagged:.6e} m²"),
             Issue::Disagreement { face, agreement } => write!(f, "face {face}: only {:.1}% of it maps back to itself", agreement * 100.0),
             Issue::MissingFace { face, area } => write!(f, "face {face} ({area:.6e} m²) has no mesh; a finer mesh may be needed"),

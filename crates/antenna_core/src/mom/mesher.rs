@@ -37,6 +37,9 @@ const LATTICE: f64 = 0.98;
 const FLAT_TRIS: usize = 64;
 /// Interior triangles sharper than this (degrees) get refined.
 const MIN_ANGLE: f64 = 22.0;
+/// The most points one plane's triangulation may reach, outside the metal included. Three unknowns
+/// come to about one point, so `MAX_UNKNOWNS` is far below this.
+const MAX_VERTICES: usize = 400_000;
 
 /// The finished mesh.
 #[derive(Clone, Debug, Default)]
@@ -904,8 +907,13 @@ impl Mesher {
         // whole; whatever is still above the limit gets split at its longest edge.
         let limit = self.h * (1.0 + 1e-9);
         for _ in 0..64 {
-            let extra_allowed = cdt.num_vertices();
-            let _ = cdt.refine(RefinementParameters::<f64>::new().with_angle_limit(AngleLimit::from_deg(MIN_ANGLE)).keep_constraint_edges().with_min_required_area(1e-3 * self.h * self.h).with_max_additional_vertices(extra_allowed));
+            // Each pass may double the points, and some outlines keep asking for more: one ordinary
+            // fractal reached 118 GB here. Past this many, no solve could use the mesh anyway.
+            let extra_allowed = MAX_VERTICES.saturating_sub(cdt.num_vertices());
+            if extra_allowed == 0 {
+                bail!("This shape's mesh keeps refining without end, past {MAX_VERTICES} points. Traces close together or meeting at sharp angles usually do it: widen the gaps or simplify the outline.");
+            }
+            let _ = cdt.refine(RefinementParameters::<f64>::new().with_angle_limit(AngleLimit::from_deg(MIN_ANGLE)).keep_constraint_edges().with_min_required_area(1e-3 * self.h * self.h).with_max_additional_vertices(extra_allowed.min(cdt.num_vertices())));
             let mut extra: Vec<Point2<f64>> = Vec::new();
             for f in cdt.inner_faces() {
                 let v = f.vertices().map(|x| x.position());

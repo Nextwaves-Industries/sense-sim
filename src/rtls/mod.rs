@@ -10,6 +10,7 @@ pub mod deploy;
 pub mod device;
 pub mod events;
 pub mod fdtd;
+pub mod flow;
 pub mod io;
 pub mod openems_local;
 pub mod persist;
@@ -20,6 +21,8 @@ pub mod region;
 pub mod rf;
 pub mod rng;
 pub mod sim;
+pub mod smart;
+pub mod smart_ui;
 pub mod solver;
 pub mod tag_card;
 pub mod tools;
@@ -478,19 +481,6 @@ impl RtlsState {
         self.rf_coverage = rf_coverage;
     }
 
-    /// (rmse, cep50, cep95, max) over the positioning fixes of the last `ERROR_WINDOW_S`.
-    /// All zero with no fixes: use `error_stats_checked`, or `run_stats` for a whole run.
-    pub fn error_stats(&self, tech: Option<&str>) -> (f32, f32, f32, f32) {
-        let mut e: Vec<f32> = self.errors.iter().filter(|(_, _, t)| tech.is_none_or(|x| x == *t)).map(|(_, e, _)| *e).collect();
-        if e.is_empty() {
-            return (0.0, 0.0, 0.0, 0.0);
-        }
-        e.sort_by(f32::total_cmp);
-        let rmse = (e.iter().map(|x| x * x).sum::<f32>() / e.len() as f32).sqrt();
-        let pct = |p: f32| e[((e.len() - 1) as f32 * p).round() as usize];
-        (rmse, pct(0.5), pct(0.95), *e.last().unwrap())
-    }
-
     /// The fixes of the last `ERROR_WINDOW_S`, `None` when there are none: no data isn't a
     /// perfect result.
     pub fn error_stats_checked(&self, tech: Option<&str>) -> Option<ErrorStats> {
@@ -602,6 +592,7 @@ impl Plugin for RtlsPlugin {
             .add_systems(Last, openems_local::sync)
             .add_systems(PostUpdate, view::draw.after(TransformSystems::Propagate))
             .add_systems(bevy_egui::EguiPrimaryContextPass, ui::rtls_ui.after(crate::ui::ui_system));
+        app.init_resource::<smart::SmartPlan>().add_systems(Update, smart::run_jobs);
         if let Some(t) = &self.autotest {
             app.insert_resource(t.clone()).add_systems(Update, sim::autotest.after(sim::drive));
         }

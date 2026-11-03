@@ -1,12 +1,7 @@
-//! Who made what this is built on, and on what terms. SolidCraft's own Help > About > Licences covers
-//! its dependencies too; this is the same text, reachable from the Sense Sim side, plus the solvers.
+//! Who made the solvers the simulations run, and on what terms.
 
 use bevy_egui::egui::{self, RichText};
 
-use crate::theme;
-
-const SOLIDCRAFT_NOTICE: &str = include_str!("../../third_party/solidcraft/NOTICE");
-const SOLIDCRAFT_THIRD_PARTY: &str = include_str!("../../third_party/solidcraft/THIRD-PARTY-LICENSES.txt");
 
 /// The separate programs the simulations run. None is linked into Sense Sim or sent with it: each is
 /// fetched from its own project, with consent, and runs as a process of its own.
@@ -22,13 +17,6 @@ pub fn show(ctx: &egui::Context, open: &mut bool) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.label(RichText::new("Solvers").strong());
             ui.label(SOLVERS);
-            ui.add_space(8.0);
-            ui.label(RichText::new("3D design: SolidCraft").strong());
-            ui.label(SOLIDCRAFT_NOTICE);
-            ui.add_space(8.0);
-            egui::CollapsingHeader::new("SolidCraft's dependencies, in full").show(ui, |ui| {
-                ui.label(RichText::new(SOLIDCRAFT_THIRD_PARTY).monospace().size(10.5).color(theme::WEAK));
-            });
         });
     });
 }
@@ -39,8 +27,7 @@ mod tests {
 
     #[test]
     fn the_notices_are_all_there() {
-        assert!(SOLIDCRAFT_NOTICE.contains("SolidCraft"));
-        assert!(SOLIDCRAFT_THIRD_PARTY.len() > 1000);
+
         for name in ["Gmsh", "CalculiX", "OpenFOAM", "Elmer", "not approved or endorsed"] {
             assert!(SOLVERS.contains(name), "{name}");
         }

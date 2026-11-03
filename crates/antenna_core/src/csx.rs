@@ -275,6 +275,13 @@ fn check_cells(cells: f64, f_hi: f64) -> Result<()> {
 
 /// Builds the mesh, near-field box and dumps.
 pub fn plan(geom: &Geometry, setup: &Setup, design_f: f64) -> Result<Plan> {
+    let built;
+    let geom = if geom.stack.is_some() {
+        built = geom.with_stack_built();
+        &built
+    } else {
+        geom
+    };
     setup.check_band()?;
     let lambda_min = C0 / setup.f_hi;
     let center = (setup.f_lo + setup.f_hi) / 2.0;
@@ -604,6 +611,13 @@ fn shape_xml(s: &mut String, shape: &Shape, ports: &[PortDef], prio: i32, max_ce
 /// Nothing in this model can lose power in an FDTD run: real metal only does on flat
 /// sheets, dielectrics only with a loss tangent.
 pub fn models_no_loss(geom: &Geometry) -> bool {
+    let built;
+    let geom = if geom.stack.is_some() {
+        built = geom.with_stack_built();
+        &built
+    } else {
+        geom
+    };
     geom.solids.iter().all(|s| {
         material::by_name(&s.material).is_none_or(|m| match m.kind {
             MatKind::Pec => true,
@@ -624,6 +638,13 @@ fn is_flat(shape: &Shape) -> bool {
 
 /// The whole run with `excite` as the driven port.
 pub fn to_xml(geom: &Geometry, plan: &Plan, excite: usize) -> String {
+    let built;
+    let geom = if geom.stack.is_some() {
+        built = geom.with_stack_built();
+        &built
+    } else {
+        geom
+    };
     let mut s = String::new();
     let end = 10f64.powf(-plan.end_db / 10.0);
     let _ = writeln!(s, r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>"#);

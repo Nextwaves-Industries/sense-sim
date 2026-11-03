@@ -239,7 +239,7 @@ pub struct ViewSettings {
 
 impl Default for ViewSettings {
     fn default() -> Self {
-        Self { grid: true, bounds: true, snap: 0.25, sun_lux: 7000.0, shadows: true, env_intensity: 2800.0, no_overlap: true, gravity: true, sampling: true, occlusion: false }
+        Self { grid: true, bounds: true, snap: 0.25, sun_lux: 3500.0, shadows: true, env_intensity: 2200.0, no_overlap: true, gravity: true, sampling: true, occlusion: false }
     }
 }
 
@@ -288,12 +288,15 @@ pub fn setup_scene(
     let env = images.add(studio_cubemap(128));
     commands.spawn((
         Camera3d::default(),
-        GeneratedEnvironmentMapLight { environment_map: env, intensity: 1500.0, ..default() },
+        // Of Bevy's tone curves, the closest to NVIDIA's own renders of these assets: right
+        // overall brightness, whites that stay white, colors that don't drift toward gray.
+        bevy::core_pipeline::tonemapping::Tonemapping::SomewhatBoringDisplayTransform,
+        GeneratedEnvironmentMapLight { environment_map: env, intensity: 2200.0, ..default() },
         Transform::from_xyz(3.0, 2.5, 4.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
         OrbitCamera { focus: Vec3::new(0.0, 0.5, 0.0), yaw: 0.65, pitch: 0.45, radius: 5.0 },
     ));
     commands.spawn((
-        DirectionalLight { illuminance: 9000.0, shadow_maps_enabled: true, ..default() },
+        DirectionalLight { illuminance: 3500.0, shadow_maps_enabled: true, ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.8, -0.9, 0.0)),
         Sun,
     ));
@@ -303,7 +306,8 @@ pub fn setup_scene(
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.985, 0.99, 0.995),
+            // Under the default lights this comes out close to the canvas color.
+            base_color: Color::linear_rgb(0.81, 0.81, 0.79),
             perceptual_roughness: 0.95,
             reflectance: 0.2,
             ..default()
@@ -347,9 +351,10 @@ fn spawn_parts(commands: &mut Commands, root: Entity, proto: &Prototype, ghost: 
             LodRange { error: 0.0, next_error: error_of(0), diagonal, triangles: part.triangles, object: root },
             VisibilityRange::abrupt(0.0, f32::MAX),
         ));
-        if ghost {
+        if ghost || part.see_through {
             e.insert(bevy::light::NotShadowCaster);
-        } else {
+        }
+        if !ghost {
             // USD decks are often single-sided with either winding: hit both sides
             // (Bevy picking); our own casts go through the part's BVH.
             e.insert((RayCastBackfaces, PartBvh(part.bvh.clone())));
@@ -368,7 +373,7 @@ fn spawn_parts(commands: &mut Commands, root: Entity, proto: &Prototype, ghost: 
                 VisibilityRange::abrupt(f32::MAX, f32::MAX),
                 Pickable::IGNORE,
             ));
-            if ghost {
+            if ghost || part.see_through {
                 version.insert(bevy::light::NotShadowCaster);
             }
         }
@@ -1688,11 +1693,14 @@ pub fn studio_cubemap(size: u32) -> Image {
     let radiance = |d: Vec3| -> Vec3 {
         let up = d.y;
         let sky = Vec3::new(0.80, 0.86, 0.95).lerp(Vec3::new(1.0, 1.0, 1.0), up.max(0.0));
-        let ground = Vec3::new(0.22, 0.21, 0.20);
+        // A pale floor, like the one in the view. Metals show what they reflect, so a dark
+        // floor would turn the lower half of every shiny part dark gray.
+        let ground = Vec3::new(0.88, 0.84, 0.80);
         let horizon = smoothstep(-0.05, 0.08, up);
         let mut c = ground.lerp(sky, horizon) * 0.9;
-        // Softboxes: key light high front-right, rim light behind-left.
-        for (dir, power) in [(Vec3::new(0.6, 0.7, 0.4), 6.0), (Vec3::new(-0.7, 0.5, -0.5), 3.0)] {
+        // Softboxes: key light high front-right, rim light behind-left. Kept modest: blurred
+        // by a surface's roughness they spread far, and wash the color out of glossy paint.
+        for (dir, power) in [(Vec3::new(0.6, 0.7, 0.4), 1.5), (Vec3::new(-0.7, 0.5, -0.5), 0.75)] {
             let k = d.dot(dir.normalize());
             c += Vec3::splat(smoothstep(0.93, 0.97, k) * power);
         }
@@ -1741,12 +1749,13 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-pub fn sync_environment(settings: Res<ViewSettings>, mut env: Query<&mut GeneratedEnvironmentMapLight>) {
-    if !settings.is_changed() {
-        return;
-    }
-    for mut e in &mut env {
-        e.intensity = settings.env_intensity;
+/// Lighting reads `EnvironmentMapLight`, which Bevy fills in from the generated light
+/// once, a frame or so after it appears. Its intensity has to be kept up here.
+pub fn sync_environment(settings: Res<ViewSettings>, mut env: Query<&mut EnvironmentMapLight, With<GeneratedEnvironmentMapLight>>) {
+    for mut light in &mut env {
+        if light.intensity != settings.env_intensity {
+            light.intensity = settings.env_intensity;
+        }
     }
 }
 
@@ -2015,5 +2024,21 @@ pub(crate) mod lock_tests {
         assert_eq!(w.get::<Transform>(locked).unwrap().translation.y, 3.0, "a locked object must not fall");
         assert!(w.get::<Falling>(locked).is_none(), "and must not stay marked as falling, which holds up undo");
         assert!(w.get::<Transform>(free).unwrap().translation.y < 3.0, "an unlocked one still falls");
+    }
+}
+
+
+#[cfg(test)]
+mod light_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn the_dome_setting_reaches_the_light_that_shading_reads() {
+        let mut w = World::new();
+        w.insert_resource(ViewSettings { env_intensity: 1234.0, ..default() });
+        let light = w.spawn((GeneratedEnvironmentMapLight::default(), EnvironmentMapLight { intensity: 1.0, ..default() })).id();
+        w.run_system_once(sync_environment).unwrap();
+        assert_eq!(w.get::<EnvironmentMapLight>(light).unwrap().intensity, 1234.0);
     }
 }

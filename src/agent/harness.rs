@@ -209,12 +209,15 @@ pub(super) fn complete_cancellable(provider: &Arc<dyn Provider>, system: &str, h
     }
 }
 
+/// Why a turn ended when the user stopped it.
+pub(super) const STOPPED: &str = "stopped";
+
 /// Runs until the model stops and `checks` agree, or something ends the turn. Returns why it
 /// ended early, if it did. The history is left in `turn`.
 pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn: &mut Turn, checks: &mut dyn StopChecks) -> Option<String> {
     for step in 0.. {
         if turn.cancel.load(Ordering::Relaxed) {
-            return Some("stopped".to_string());
+            return Some(STOPPED.to_string());
         }
         if step >= spec.max_steps {
             return Some(format!("stopped after {} steps (raise max_steps in agent.json)", spec.max_steps));
@@ -233,7 +236,7 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
         turn.save();
         let msg = match complete_cancellable(provider, &spec.system, &turn.history, &spec.tools, &turn.cancel) {
             Ok(Some(m)) => m,
-            Ok(None) => return Some("stopped".to_string()),
+            Ok(None) => return Some(STOPPED.to_string()),
             Err(e) => return Some(format!("{e:#}")),
         };
         if let Some(u) = msg.usage {
@@ -549,6 +552,31 @@ mod tests {
         let out = planning::ask(&json!({ "summary": "s", "steps": ["a"] }), &turn);
         assert!(out.is_error);
         assert!(turn.planning.load(Ordering::Relaxed));
+    }
+
+    /// An interrupting message follows whatever the stopped turn left, so that has to be sendable.
+    #[test]
+    fn a_turn_stopped_mid_tool_leaves_a_history_the_next_message_can_follow() {
+        let two_calls = Message { role: Role::Assistant, content: vec![Block::ToolUse { id: "a".into(), name: "get_scene".into(), input: json!({}) }, Block::ToolUse { id: "b".into(), name: "place_objects".into(), input: json!({}) }], raw: None, usage: None };
+        let s = script(vec![two_calls, text("never reached")], Usage::default());
+        let cancel: Arc<AtomicBool> = Arc::default();
+        let (tx, jobs) = unbounded::<ToolJob>();
+        let stopper = cancel.clone();
+        std::thread::spawn(move || {
+            for job in jobs {
+                stopper.store(true, Ordering::Relaxed);
+                let _ = job.reply.send(ToolOutput::text("done"));
+            }
+        });
+        let (ev, _events) = unbounded();
+        let provider: Arc<dyn Provider> = s.clone();
+        let mut turn = Turn::new(vec![Message::user(vec![Block::Text("the request".into())])], cancel, tx, Arc::new(McpHub::default()), ev);
+        let mut spec = AgentSpec { system: "main".into(), max_steps: 20, tools: Vec::new() };
+
+        assert_eq!(run_loop(&provider, &mut spec, &mut turn, &mut NoChecks).as_deref(), Some(STOPPED));
+        assert_eq!(s.seen.lock().unwrap().len(), 1, "no model call after the stop");
+        turn.history.push(Message::user(vec![Block::Text("do this instead".into())]));
+        context::validate(&turn.history).unwrap();
     }
 
     #[test]

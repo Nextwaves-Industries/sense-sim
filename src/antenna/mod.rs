@@ -6,8 +6,10 @@
 
 pub mod assist;
 pub mod gate;
+pub mod phased;
 pub mod reconfig;
 pub mod run;
+pub mod tagjob;
 pub mod tools;
 pub mod ui;
 
@@ -77,6 +79,8 @@ pub struct ConvergeState {
     pub finished: bool,
     /// Why the study stopped early, if it did.
     pub note: Option<String>,
+    /// It watched the power into a tag's chip: see [`Studio::run_converge_for`].
+    pub for_chip: bool,
 }
 
 #[derive(Clone, Default)]
@@ -123,6 +127,8 @@ struct Shared {
     gate_found: Option<Vec<antenna_core::project::DriveState>>,
     reconfig: Option<reconfig::ReconfigRun>,
     reconfig_found: Option<Vec<antenna_core::reconfig::Found>>,
+    phased: phased::PhasedJobs,
+    tag: Option<tagjob::TagRun>,
 }
 
 /// Radar cross section against angle, from a plane-wave MoM solve.
@@ -275,7 +281,8 @@ impl Studio {
         let shared = self.shared.clone();
         ctx.busy("Starting…", -1.0);
         std::thread::spawn(move || {
-            let r = job(&ctx, &shared);
+            // A job that panics must not leave the Studio busy for ever.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&ctx, &shared))).unwrap_or_else(|_| Err(anyhow::anyhow!("The job stopped on an internal error. Its settings may be out of range.")));
             let status = match r {
                 Ok(()) => Status::Idle,
                 Err(_) if ctx.cancelled() => Status::Failed("Cancelled".into()),
@@ -431,9 +438,16 @@ impl Studio {
     /// takes two passes running with the error left under `limit`, over every S entry,
     /// and with the peak gain settled.
     pub fn run_converge(&mut self, limit: f64, max_steps: usize) {
+        self.run_converge_for(limit, max_steps, None);
+    }
+
+    /// [`Self::run_converge`], and for a tag, `chip`: its impedance and the band to judge. Then the
+    /// study watches the power reaching the chip and the gain, since the S of a port nobody uses
+    /// says nothing, and `delta_s` holds the change in that share.
+    pub fn run_converge_for(&mut self, limit: f64, max_steps: usize, chip: Option<((f64, f64), f64, f64)>) {
         let base = self.project.clone();
         self.spawn(move |ctx, shared| {
-            shared.lock().unwrap().converge = Some(ConvergeState { limit, ..Default::default() });
+            shared.lock().unwrap().converge = Some(ConvergeState { limit, for_chip: chip.is_some(), ..Default::default() });
             let geom = base.geometry()?;
             let solver = base.solver_for(&geom);
             // A wire pass is cheap, so it can double. On FDTD or a surface 1.5 already
@@ -472,9 +486,11 @@ impl Studio {
                 };
                 let (mut delta, mut remaining, mut gain_change) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
                 if let Some(q) = &previous {
-                    delta = checks::delta_s(&r.network, &q.network);
+                    (delta, gain_change) = match chip {
+                        Some((z, lo, hi)) => (checks::power_change(&r.network, &q.network, z, lo, hi), checks::plain_gain_change_db(&r, q)),
+                        None => (checks::delta_s(&r.network, &q.network), checks::gain_change_db(&r, q)),
+                    };
                     remaining = checks::remaining_error(delta, ratio);
-                    gain_change = checks::gain_change_db(&r, q);
                     changes.push(checks::PassChange { delta_s: delta, gain_db: gain_change });
                 }
                 let converged = checks::study_converged(&changes, ratio, limit);
@@ -482,9 +498,18 @@ impl Studio {
                     r.convergence = Some(antenna_core::project::MeshCheck { converged, passes: i + 1, delta_s: delta, remaining });
                 }
                 let r = Arc::new(r);
-                let s_db = r.network.sij_db(0, 0);
-                let fres = r.network.f.iter().zip(&s_db).min_by(|a, b| a.1.total_cmp(b.1)).map_or(0.0, |x| *x.0);
-                let peak = r.metrics(0, 0).map_or(f64::NAN, |m| m.peak_realized_dbi);
+                let (fres, peak) = match chip {
+                    // Where the most reaches the chip: a dip in S against 50 ohm means nothing here.
+                    Some((z, _, _)) => {
+                        let zin = r.network.zin(0);
+                        let best = r.network.f.iter().zip(&zin).map(|(f, x)| (*f, antenna_core::tag::power_transfer(*x, antenna_core::tag::chip_at(z, *f)))).max_by(|a, b| a.1.total_cmp(&b.1));
+                        (best.map_or(0.0, |x| x.0), r.metrics(0, 0).map_or(f64::NAN, |m| m.peak_gain_dbi))
+                    }
+                    None => {
+                        let s_db = r.network.sij_db(0, 0);
+                        (r.network.f.iter().zip(&s_db).min_by(|a, b| a.1.total_cmp(b.1)).map_or(0.0, |x| *x.0), r.metrics(0, 0).map_or(f64::NAN, |m| m.peak_realized_dbi))
+                    }
+                };
                 let step = ConvergeStep { density, size: r.size, seconds: r.seconds, f_res: fres, peak_dbi: peak, delta_s: delta, remaining, gain_change_db: gain_change, result: r.clone() };
                 let mut s = shared.lock().unwrap();
                 let st = s.converge.get_or_insert_with(Default::default);

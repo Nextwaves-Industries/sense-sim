@@ -227,7 +227,7 @@ impl Study {
         use AnalysisId as A;
         let mut out = Vec::new();
         if self.body.is_none() {
-            out.push("Choose a body from the design.".to_string());
+            out.push("Choose a body: an object from the scene.".to_string());
         }
         for c in &self.conditions {
             if c.faces.is_empty() {
@@ -299,7 +299,7 @@ impl Study {
             A::Electromagnetics => {
                 let potentials = self.conditions.iter().filter(|c| matches!(c.kind, BcKind::Potential { .. })).count();
                 if self.settings.coil_ampere_turns == 0.0 && potentials < 2 {
-                    out.push("Add two potentials for an electric field, or set ampere-turns for a coil.".to_string());
+                    out.push("Add two potentials for an electric field.".to_string());
                 }
             }
             _ => {}
@@ -386,7 +386,7 @@ mod tests {
     fn electromagnetics_needs_two_potentials_or_a_coil() {
         let mut s = Study::new("t".into(), AnalysisId::Electromagnetics);
         s.body = Some("B".into());
-        assert!(s.problems().iter().any(|m| m.contains("ampere-turns")), "{:?}", s.problems());
+        assert!(s.problems().iter().any(|m| m.contains("two potentials")), "{:?}", s.problems());
         s.settings.coil_ampere_turns = 100.0;
         assert!(s.problems().is_empty(), "{:?}", s.problems());
     }

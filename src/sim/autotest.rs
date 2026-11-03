@@ -1,7 +1,7 @@
-//! `--sim-test OUT`: the whole path in the real app. A beam is modelled in SolidCraft; its end faces
-//! are found by geometry and picked as the UI picks them; a Static study runs through Gmsh and
-//! CalculiX; and the deflection must match beam theory. If labels went wrong anywhere, the answer
-//! would too. Writes `OUT.json`, and pictures of the dialog and the results.
+//! `--sim-test OUT`: the whole path in the real app. Test parts are placed in the scene as USD objects;
+//! a beam's end faces are found by geometry and picked as the UI picks them; a Static study runs through
+//! Gmsh and CalculiX; and the deflection must match beam theory. If labels went wrong anywhere, the
+//! answer would too. Writes `OUT.json`, and pictures of the dialog and the results.
 
 use bevy::app::AppExit;
 use bevy::input::ButtonState;
@@ -14,10 +14,8 @@ use sim_core::catalog::AnalysisId;
 use sim_core::jobs::State;
 use sim_core::results::ResultSet;
 use sim_core::study::{BcKind, Condition, FaceRef, Study};
-use solidcraft_engine::io::MeshQuality;
 
 use super::{SimState, dialog, panel, view};
-use crate::design::{Slot, Workspace, bridge};
 
 #[derive(Resource)]
 pub struct SimTest {
@@ -58,6 +56,133 @@ impl SimTest {
     }
 }
 
+type Surface = (Vec<[f64; 3]>, Vec<[u32; 3]>);
+
+/// A closed box, in metres with Z up.
+fn box_part(lo: [f64; 3], hi: [f64; 3]) -> Surface {
+    let corner = |i: u32| [if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] }];
+    let points = (0..8).map(corner).collect();
+    let quads = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    (points, quads.iter().flat_map(|q: &[u32; 4]| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]).collect())
+}
+
+/// Sides around an axis: fine enough that the crease angle sees one curved face, and that a radius is
+/// out by 0.05% at most.
+const SIDES: u32 = 96;
+
+/// A closed ring from `from` to `to` along an axis, or a solid cylinder if `inner` is zero. `at` makes a
+/// point from (along the axis, first across, second across).
+fn round_part(from: f64, to: f64, inner: f64, outer: f64, at: impl Fn(f64, f64, f64) -> [f64; 3]) -> Surface {
+    let angle = |i: u32| f64::from(i % SIDES) * std::f64::consts::TAU / f64::from(SIDES);
+    let (mut points, mut triangles) = (Vec::new(), Vec::new());
+    let mut circle = |along: f64, r: f64| {
+        let first = points.len() as u32;
+        for i in 0..SIDES {
+            points.push(at(along, r * angle(i).cos(), r * angle(i).sin()));
+        }
+        first
+    };
+    let (bottom, top) = (circle(from, outer), circle(to, outer));
+    let next = |i: u32| (i + 1) % SIDES;
+    for i in 0..SIDES {
+        triangles.push([bottom + i, bottom + next(i), top + next(i)]);
+        triangles.push([bottom + i, top + next(i), top + i]);
+    }
+    if inner > 0.0 {
+        let (low, high) = (circle(from, inner), circle(to, inner));
+        for i in 0..SIDES {
+            triangles.push([low + i, high + next(i), low + next(i)]);
+            triangles.push([low + i, high + i, high + next(i)]);
+            triangles.push([bottom + i, low + i, low + next(i)]);
+            triangles.push([bottom + i, low + next(i), bottom + next(i)]);
+            triangles.push([top + i, high + next(i), high + i]);
+            triangles.push([top + i, top + next(i), high + next(i)]);
+        }
+    } else {
+        let (low, high) = (circle(from, 0.0), circle(to, 0.0));
+        for i in 0..SIDES {
+            // A fan: every point of these two circles is the centre.
+            triangles.push([low, bottom + next(i), bottom + i]);
+            triangles.push([high, top + i, top + next(i)]);
+        }
+    }
+    (points, triangles)
+}
+
+/// What the test works on, each well clear of the others.
+fn parts() -> Vec<(&'static str, Surface)> {
+    vec![
+        ("Beam", box_part([0.0, 0.0, 0.0], [1.0, 0.05, 0.05])),
+        ("Pipe", round_part(0.0, 1.0, 0.0, 0.025, |x, a, b| [x, -0.3 + a, b])),
+        ("Tab", box_part([0.0, 1.0, 0.0], [0.4, 1.04, 0.01])),
+        // Wider than it is thick, so that the wrong axis would give a very different answer.
+        ("Plank", box_part([0.0, 2.0, 0.0], [1.0, 2.05, 0.02])),
+        ("Coil", round_part(0.0, 0.1, 0.05, 0.06, |z, a, b| [a, -2.0 + b, z])),
+        ("Cube", box_part([0.0, 3.0, 0.0], [0.1, 3.1, 0.1])),
+        ("Block", box_part([0.0, 4.0, 0.0], [0.1, 4.1, 0.1])),
+        ("Rotor", round_part(0.0, 0.4, 0.0, 0.05, |z, a, b| [a, 6.0 + b, z])),
+        ("Tower", box_part([0.0, 500.0, 0.0], [20.0, 520.0, 60.0])),
+    ]
+}
+
+/// A surface as a USDA file. Metres and Z up are stated in it, and the loader takes it from there.
+fn usda_of((points, triangles): &Surface, name: &str) -> String {
+    let counts = vec!["3"; triangles.len()].join(", ");
+    let indices = triangles.iter().map(|t| format!("{}, {}, {}", t[0], t[1], t[2])).collect::<Vec<_>>().join(", ");
+    let at = points.iter().map(|p| format!("({}, {}, {})", p[0] as f32, p[1] as f32, p[2] as f32)).collect::<Vec<_>>().join(", ");
+    format!("#usda 1.0\n(\n    defaultPrim = \"{name}\"\n    metersPerUnit = 1\n    upAxis = \"Z\"\n)\n\ndef Xform \"{name}\" (\n    kind = \"component\"\n)\n{{\n    def Mesh \"Mesh\"\n    {{\n        uniform token subdivisionScheme = \"none\"\n        int[] faceVertexCounts = [{counts}]\n        int[] faceVertexIndices = [{indices}]\n        point3f[] points = [{at}]\n    }}\n}}\n")
+}
+
+/// The loader stands an asset on the origin, bottom-centred: this puts it back where it was modelled,
+/// so that the solvers' frame has it at the coordinates above.
+fn back_in_place((points, _): &Surface) -> Transform {
+    let range = |k: usize| points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[k]), b.max(p[k])));
+    let ((x0, x1), (y0, y1), (z0, _)) = (range(0), range(1), range(2));
+    Transform::from_xyz(((x0 + x1) / 2.0) as f32, z0 as f32, (-(y0 + y1) / 2.0) as f32)
+}
+
+/// A study on an object in the scene, its material taken as confirmed unless a check says otherwise.
+fn on_scene(name: &str, analysis: AnalysisId, object: &str) -> Study {
+    let mut s = Study::new(name.into(), analysis);
+    s.body = Some(format!("{}{object}", sim_core::study::SCENE_PREFIX));
+    s.material_confirmed = true;
+    s
+}
+
+/// The same but for rounding: a number written to JSON and read back can come back a digit off in its
+/// 17th place. Metres, and a picked face's tolerance is 1 mm.
+fn near(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value::{Array, Number, Object};
+    match (a, b) {
+        (Number(x), Number(y)) => (x.as_f64().unwrap_or(f64::NAN) - y.as_f64().unwrap_or(f64::NAN)).abs() < 1e-12,
+        (Array(x), Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| near(p, q)),
+        (Object(x), Object(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| near(v, w))),
+        _ => a == b,
+    }
+}
+
+/// Which study differs and how, empty if none does, for a failed check to say.
+fn first_difference(got: &[Study], want: &[Study]) -> String {
+    if got.len() != want.len() {
+        return format!("{} studies, expected {}", got.len(), want.len());
+    }
+    for (a, b) in got.iter().zip(want) {
+        let value = |s: &Study| serde_json::to_value(s).unwrap_or_default();
+        if !near(&value(a), &value(b)) {
+            let (ta, tb) = (serde_json::to_string(a).unwrap_or_default(), serde_json::to_string(b).unwrap_or_default());
+            let at = ta.bytes().zip(tb.bytes()).position(|(x, y)| x != y).unwrap_or(ta.len().min(tb.len()));
+            let around = |t: &str| t.get(at.saturating_sub(60)..(at + 40).min(t.len())).unwrap_or_default().to_string();
+            return format!("{}: got ...{} want ...{}", b.name, around(&ta), around(&tb));
+        }
+    }
+    String::new()
+}
+
+/// A part's surface, once it has been read from the scene.
+fn part_of(state: &SimState, object: &str) -> sim_core::geometry::Partition {
+    state.scene.bodies[object].regions.partition.clone()
+}
+
 /// The tagged face whose triangles all lie at `x`, and a point on it.
 fn face_at_x(part: &sim_core::geometry::Partition, x: f64) -> Option<FaceRef> {
     for face in 0..part.faces {
@@ -75,14 +200,11 @@ pub fn run(
     mut test: ResMut<SimTest>,
     mut commands: Commands,
     mut state: ResMut<SimState>,
-    mut workspace: ResMut<Workspace>,
-    mut slot: NonSendMut<Slot>,
     mut exit: MessageWriter<AppExit>,
     mut pending: ResMut<crate::scene::PendingSpawns>,
     mut actions: ResMut<crate::scene::Actions>,
     looks: Query<(), With<view::LooksMarker>>,
-    (status, mut window_events, mut mouse, mut orbit, camera, window_id, picks): (
-        Res<crate::scene::Status>,
+    (mut window_events, mut mouse, mut orbit, camera, window_id, picks): (
         MessageWriter<WindowEvent>,
         MessageWriter<MouseButtonInput>,
         Single<&mut crate::scene::OrbitCamera>,
@@ -95,18 +217,6 @@ pub fn run(
     let shown_picks = picks.iter().count();
     let window_entity = *window_id;
     test.frame += 1;
-    if test.frame == 5 {
-        // A clean start: an earlier session's unsaved design would be brought back otherwise.
-        let _ = std::fs::remove_file(crate::design::autosave_path());
-        *workspace = Workspace::Design;
-    }
-    if slot.host.is_none() {
-        if test.frame > 1500 {
-            test.check("the design workspace starts", false, slot.failed.clone().unwrap_or_default());
-            finish(&mut test, &mut slot, &mut exit);
-        }
-        return;
-    }
     if test.frame < test.at {
         return;
     }
@@ -115,21 +225,29 @@ pub fn run(
     test.at = test.frame + 20;
     match step {
         0 => {
-            let h = slot.host.as_mut().unwrap();
-            h.app.home.open = false;
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Section"}},
-                {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [1000, 50]}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "50 mm", "body_name": "Beam"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a 1 m beam is modelled in SolidCraft", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            h.app.cam.set_view(solidcraft_engine::render::StandardView::Iso);
-            h.app.fit_view();
+            // The test's parts, as USD objects. A study on each makes the scene read them.
+            for (name, surface) in parts() {
+                let asset = std::env::temp_dir().join(format!("sense-sim-test-{name}.usda"));
+                std::fs::write(&asset, usda_of(&surface, name)).expect("writing a test part");
+                pending.0.push(crate::scene::PendingSpawn { asset, transform: back_in_place(&surface), name: Some(name.into()), joints: None, select: false, locked: false });
+                state.studies.push(on_scene(name, AnalysisId::Static, name));
+            }
+            test.step = 100;
+        }
+        100 => {
+            if !parts().iter().all(|(name, _)| state.scene.bodies.contains_key(*name)) {
+                test.step = 100;
+                test.at = test.frame + 10;
+                if test.frame > 40000 || !state.scene.errors.is_empty() {
+                    test.check("the test parts reach the scene", false, format!("{:?}", state.scene.errors));
+                    finish(&mut test, &mut exit);
+                }
+                return;
+            }
+            state.studies.clear();
+            test.step = 1;
         }
         1 => {
-            *workspace = Workspace::Scene;
             state.panel_open = true;
             state.dialog = Some(dialog::Dialog { analysis: Some(AnalysisId::ConjugateHeatTransferVoxel), ..Default::default() });
         }
@@ -138,16 +256,14 @@ pub fn run(
         }
         3 => {
             state.dialog = None;
-            let h = slot.host.as_ref().unwrap();
-            let bodies = bridge::bodies(&h.app.session);
-            test.check("the body reaches the study", bodies == ["Beam"], format!("{bodies:?}"));
-            let part = bridge::partition(&h.app.session, "Beam", MeshQuality::Fine).unwrap();
+            let offered = state.scene.names.iter().any(|n| n == "Beam");
+            test.check("the object is offered to the study", offered, format!("{:?}", state.scene.names));
+            let part = part_of(&state, "Beam");
             let closed = part.is_closed();
-            test.check("the tagged surface is closed", closed, format!("{} faces, {} triangles", part.faces, part.triangles.len()));
+            test.check("its surface is closed", closed, format!("{} faces, {} triangles", part.faces, part.triangles.len()));
             let (fixed, tip) = (face_at_x(&part, 0.0), face_at_x(&part, 1.0));
             test.check("both end faces are found", fixed.is_some() && tip.is_some(), "");
-            let mut s = Study::new("Beam, static".into(), AnalysisId::Static);
-            s.body = Some("Beam".into());
+            let mut s = on_scene("Beam, static", AnalysisId::Static, "Beam");
             s.settings.element_size = 0.012;
             s.conditions.push(Condition { kind: BcKind::Fixed, faces: vec![fixed.unwrap()] });
             s.conditions.push(Condition { kind: BcKind::Force { force: [0.0, 0.0, -1000.0] }, faces: vec![tip.unwrap()] });
@@ -155,7 +271,7 @@ pub fn run(
             state.studies.push(s);
             state.active = Some(0);
             // Before running: what the picks really land on. 50 by 50 mm at each end, and 4 sides left.
-            let rows = panel::preview_faces(&mut state, &mut slot, 0);
+            let rows = panel::preview_faces(&mut state, 0);
             let right = rows.as_ref().is_ok_and(|r| {
                 let near = |i: usize, area: f64, faces: usize| r.get(i).is_some_and(|c| (c.area - area).abs() < area * 0.001 && c.faces == faces);
                 near(0, 0.0025, 1) && near(1, 0.0025, 1) && near(2, 0.2, 4)
@@ -169,16 +285,16 @@ pub fn run(
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(format!("{}_faces.png", test.out)));
         }
         71 => {
-            // A pick the design has moved out from under: refused, not coloured or solved.
+            // A pick the object has moved out from under: refused, not coloured or solved.
             let mut moved = state.studies[0].clone();
             moved.conditions[0].faces[0].point = [0.5, 0.025, 0.025];
             state.studies.push(moved);
-            let refused = panel::preview_faces(&mut state, &mut slot, 1);
+            let refused = panel::preview_faces(&mut state, 1);
             test.check("checking faces refuses a pick that has gone stale", refused.as_ref().is_err_and(|e| e.contains("pick the face again")), format!("{refused:?}"));
             state.studies.pop();
             state.active = Some(0);
             state.view = None;
-            panel::run(&mut state, &mut slot, 0);
+            panel::run(&mut state, 0);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
             test.step = 4;
         }
@@ -189,7 +305,7 @@ pub fn run(
                 Some(State::Done) => {}
                 Some(State::Failed { error }) => {
                     test.check("the solve finishes", false, error);
-                    finish(&mut test, &mut slot, &mut exit);
+                    finish(&mut test, &mut exit);
                     return;
                 }
                 Some(_) => {
@@ -197,13 +313,13 @@ pub fn run(
                     test.at = test.frame + 10;
                     if test.frame > 40000 {
                         test.check("the solve finishes", false, "timed out");
-                        finish(&mut test, &mut slot, &mut exit);
+                        finish(&mut test, &mut exit);
                     }
                     return;
                 }
                 None => {
                     test.check("the solve starts", false, state.message.clone().unwrap_or_default());
-                    finish(&mut test, &mut slot, &mut exit);
+                    finish(&mut test, &mut exit);
                     return;
                 }
             }
@@ -212,7 +328,7 @@ pub fn run(
             let disp = last.field("DISP").expect("displacement");
             let (mut sum, mut n) = (0.0f64, 0.0f64);
             for (i, p) in set.mesh.nodes.iter().enumerate() {
-                if (p[0] - 1.0).abs() < 1e-6 {
+                if (p[0] - 1.0).abs() < 1e-5 {
                     sum += f64::from(disp.at(i)[2]);
                     n += 1.0;
                 }
@@ -221,7 +337,7 @@ pub fn run(
             let err = (tip - 3.054e-3).abs() / 3.054e-3;
             test.check("the deflection matches beam theory within 1%", err < 0.01, format!("{:.4} mm against 3.054 mm, {:.2}% off", tip * 1000.0, err * 100.0));
             let (lo, hi) = set.mesh.nodes.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[0]), b.max(p[0])));
-            test.check("results are in metres", (hi - lo - 1.0).abs() < 1e-6, format!("x spans {lo} to {hi}"));
+            test.check("results are in metres", (hi - lo - 1.0).abs() < 1e-5, format!("x spans {lo} to {hi}"));
             state.view = Some(view::View::new(test.job, set));
         }
         5 => {}
@@ -244,36 +360,23 @@ pub fn run(
             }
             // On to the other solver families, on real bodies. Only with `--sim-test-all`.
             if !test.all {
-                finish(&mut test, &mut slot, &mut exit);
+                finish(&mut test, &mut exit);
                 return;
             }
             state.view = None;
-            let h = slot.host.as_mut().unwrap();
-            // A pipe for the flow runs, well away from the beam.
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "YZ", "name": "Bore"}},
-                {"command": "sketch.circle.center", "params": {"center": [-300, 0], "diameter": 50}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "1000 mm", "body_name": "Pipe"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a pipe is modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let bodies = bridge::bodies(&h.app.session);
-            test.check("both bodies exist", bodies.iter().any(|b| b == "Pipe") && bodies.iter().any(|b| b == "Beam"), format!("{bodies:?}"));
-            let part = bridge::partition(&h.app.session, "Beam", MeshQuality::Fine).unwrap();
+            let part = part_of(&state, "Beam");
             // Electrostatics between the beam's ends.
-            let mut s = Study::new("Beam, potential".into(), AnalysisId::Electromagnetics);
-            s.body = Some("Beam".into());
+            let mut s = on_scene("Beam, potential", AnalysisId::Electromagnetics, "Beam");
             s.settings.element_size = 0.03;
             s.conditions.push(Condition { kind: BcKind::Potential { value: 0.0 }, faces: vec![face_at_x(&part, 0.0).unwrap()] });
             s.conditions.push(Condition { kind: BcKind::Potential { value: 100.0 }, faces: vec![face_at_x(&part, 1.0).unwrap()] });
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         8 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 7) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 7) else { return };
             let v = set.steps[0].field("potential").or_else(|| set.steps[0].fields.first()).expect("a field");
             let (mut sum, mut n) = (0.0f64, 0.0f64);
             for (i, p) in set.mesh.nodes.iter().enumerate() {
@@ -285,20 +388,18 @@ pub fn run(
             let mid = sum / n;
             test.check("Elmer: the potential halfway along is half the voltage", (mid - 50.0).abs() < 1.0, format!("{mid:.2} V against 50 V"));
             // Laminar flow through the pipe, on OpenFOAM through snappyHexMesh.
-            let h = slot.host.as_ref().unwrap();
-            let part = bridge::partition(&h.app.session, "Pipe", MeshQuality::Fine).unwrap();
-            let mut s = Study::new("Pipe, flow".into(), AnalysisId::Incompressible);
-            s.body = Some("Pipe".into());
+            let part = part_of(&state, "Pipe");
+            let mut s = on_scene("Pipe, flow", AnalysisId::Incompressible, "Pipe");
             s.settings.element_size = 0.008;
             s.conditions.push(Condition { kind: BcKind::VelocityInlet { speed: PIPE_SPEED }, faces: vec![face_at_x(&part, 0.0).unwrap()] });
             s.conditions.push(Condition { kind: BcKind::PressureOutlet { pressure: 0.0 }, faces: vec![face_at_x(&part, 1.0).unwrap()] });
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         9 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 8) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 8) else { return };
             let p = set.steps[0].field("p").expect("pressure");
             // The pipe's axis, from its nodes.
             let (ylo, yhi, zlo, zhi) = set.mesh.nodes.iter().fold((f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY), |(a, b, c, d), n| (a.min(n[1]), b.max(n[1]), c.min(n[2]), d.max(n[2])));
@@ -347,20 +448,18 @@ pub fn run(
         12 => {
             // Cooling on the GPU: the heat going in must come out with the air.
             state.view = None;
-            let h = slot.host.as_ref().unwrap();
-            let part = bridge::partition(&h.app.session, "Beam", MeshQuality::Fine).unwrap();
-            let mut s = Study::new("Beam, cooling".into(), AnalysisId::ConjugateHeatTransferVoxel);
-            s.body = Some("Beam".into());
+            let part = part_of(&state, "Beam");
+            let mut s = on_scene("Beam, cooling", AnalysisId::ConjugateHeatTransferVoxel, "Beam");
             s.settings.resolution = 32;
             s.settings.free_stream = 2.0;
             s.conditions.push(Condition { kind: BcKind::HeatFlux { flux: 2000.0 }, faces: vec![face_at_x(&part, 0.0).unwrap()] });
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         13 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 12) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 12) else { return };
             let balance = set.plots.iter().find(|p| p.name == "heat balance").expect("a heat balance");
             let (power, carried) = (balance.points[0].1, balance.points[1].1);
             test.check("GPU cooling: the heat balance closes within 25%", (carried - power).abs() / power < 0.25, format!("{power:.2} W in, {carried:.2} W out"));
@@ -395,26 +494,16 @@ pub fn run(
         20 => {
             // Wind over a tower, from two directions.
             state.view = None;
-            let h = slot.host.as_mut().unwrap();
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Footprint"}},
-                {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 500000], "p1": [20000, 520000]}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "60000 mm", "body_name": "Tower"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a tower is modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let mut s = Study::new("Tower, wind".into(), AnalysisId::PedestrianWindComfort);
-            s.body = Some("Tower".into());
+            let mut s = on_scene("Tower, wind", AnalysisId::PedestrianWindComfort, "Tower");
             s.settings.resolution = 16;
             s.settings.directions = 2;
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         21 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 20) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 20) else { return };
             let worst = set.steps[0].field("Worst speed-up").expect("the worst speed-up");
             let (lo, hi) = worst.range().unwrap_or((0.0, 0.0));
             let finite = worst.data.iter().all(|v| v.is_finite());
@@ -428,20 +517,8 @@ pub fn run(
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(format!("{}_wind.png", test.out)));
         }
         24 => {
-            // A USD object from the scene, simulated: a plank, wider than it is thick, so that the wrong
-            // axis would give a very different answer.
+            // A plank, wider than it is thick, so that the wrong axis would give a very different answer.
             state.view = None;
-            let h = slot.host.as_mut().unwrap();
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Plank"}},
-                {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 900000], "p1": [1000, 900050]}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "20 mm", "body_name": "Plank"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a plank is modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let asset = bridge::bake(&h.app.session, "Plank").expect("a USD asset");
-            pending.0.push(crate::scene::PendingSpawn { asset, transform: Transform::default(), name: Some("Plank".into()), joints: None, select: false, locked: false });
             let mut s = Study::new("Plank, static".into(), AnalysisId::Static);
             s.body = Some(format!("{}Plank", sim_core::study::SCENE_PREFIX));
             s.settings.element_size = 0.008;
@@ -454,7 +531,7 @@ pub fn run(
                 test.at = test.frame + 10;
                 if test.frame > 40000 {
                     test.check("the plank reaches the scene", false, format!("{:?}", state.scene.errors));
-                    finish(&mut test, &mut slot, &mut exit);
+                    finish(&mut test, &mut exit);
                 }
                 return;
             };
@@ -480,11 +557,11 @@ pub fn run(
             let asked = s.problems();
             test.check("a scene object's study asks for its material to be confirmed", asked.iter().any(|p| p.contains("Confirm the material")), format!("{asked:?}"));
             state.studies[last].material_confirmed = true;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         26 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 25) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 25) else { return };
             let disp = set.steps.last().unwrap().field("DISP").expect("displacement");
             let (mut sum, mut n) = (0.0f64, 0.0f64);
             for (i, p) in set.mesh.nodes.iter().enumerate() {
@@ -539,7 +616,7 @@ pub fn run(
             let (cam, gt) = *camera;
             let Ok(at) = cam.world_to_viewport(gt, test.pick_target) else {
                 test.check("the plank's end is on screen", false, "");
-                finish(&mut test, &mut slot, &mut exit);
+                finish(&mut test, &mut exit);
                 return;
             };
             commands.insert_resource(super::scene_body::TestPointer(at));
@@ -581,18 +658,8 @@ pub fn run(
             orbit.pitch = 0.5;
             state.studies.pop();
             state.active = None;
-            // The CAD kernel could take the whole app down: the scene is saved on the way into Design.
-            let _ = std::fs::remove_file(crate::design::scene_safety_path());
-            *workspace = Workspace::Design;
-            test.step = 72;
-        }
-        72 => {
-            let text = std::fs::read_to_string(crate::design::scene_safety_path()).unwrap_or_default();
-            test.check("opening Design saves the scene first", text.contains("Plank"), format!("{} bytes", text.len()));
-            test.check("and doesn't announce it", !status.0.contains("scene-before-design"), status.0.clone());
-            *workspace = Workspace::Scene;
             if std::env::var_os("SENSESIM_TEST_USD").is_some() {
-                finish(&mut test, &mut slot, &mut exit);
+                finish(&mut test, &mut exit);
                 return;
             }
             test.step = 29;
@@ -609,12 +676,12 @@ pub fn run(
                 return;
             }
             if test.job == 0 {
-                finish(&mut test, &mut slot, &mut exit);
+                finish(&mut test, &mut exit);
                 return;
             }
         }
         31 => {
-            let Some(_) = wait(&mut test, &state, &mut slot, &mut exit, 30) else { return };
+            let Some(_) = wait(&mut test, &state, &mut exit, 30) else { return };
             test.tools_results = true;
         }
         32 => {
@@ -623,10 +690,9 @@ pub fn run(
                 test.at = test.frame + 5;
                 return;
             }
-            // Saving: the studies go in the layout, and the design beside it.
+            // Saving: the studies go in the layout.
             let path = std::env::temp_dir().join("sense-sim-layout-test.json");
             let _ = std::fs::remove_file(&path);
-            let _ = std::fs::remove_file(super::persist::design_path(&path));
             test.saved = state.studies.clone();
             actions.0.push(crate::scene::Action::SaveLayout(path));
         }
@@ -635,12 +701,8 @@ pub fn run(
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
             let (studies, skipped) = super::persist::parse_section(&v["simulation"]);
-            let same = studies == test.saved;
-            test.check("the studies are saved with the layout", same && skipped == 0, format!("{} studies, {skipped} skipped", studies.len()));
-            let design = super::persist::design_path(&path);
-            let bodies = std::fs::read(&design).ok().and_then(|b| solidcraft_engine::io::read_design(&b).ok()).map(|doc| bridge::bodies(&solidcraft_engine::Session::opened_at(doc, None, None)));
-            let has = bodies.as_ref().is_some_and(|b| b.iter().any(|n| n == "Beam") && b.iter().any(|n| n == "Plank"));
-            test.check("the design is saved beside it, and reads back", has, format!("{bodies:?}"));
+            let differ = first_difference(&studies, &test.saved);
+            test.check("the studies are saved with the layout", differ.is_empty() && skipped == 0, format!("{} studies, {skipped} skipped. {differ}", studies.len()));
             actions.0.push(crate::scene::Action::ClearScene);
         }
         34 => {
@@ -648,85 +710,50 @@ pub fn run(
             actions.0.push(crate::scene::Action::LoadLayout(std::env::temp_dir().join("sense-sim-layout-test.json")));
         }
         35 => {
-            let same = state.studies == test.saved;
-            test.check("loading the layout brings the studies back", same, format!("{} studies", state.studies.len()));
-            let _ = std::fs::remove_file(crate::design::autosave_path());
+            let differ = first_difference(&state.studies, &test.saved);
+            test.check("loading the layout brings the studies back", differ.is_empty(), format!("{} studies. {differ}", state.studies.len()));
+            test.step = 101;
+        }
+        101 => {
+            // The objects came back with the layout: the scene reads what the studies want again.
+            let names_back = parts().iter().all(|(name, _)| state.scene.names.iter().any(|n| n == *name));
+            let read = state.studies.iter().filter_map(|s| s.scene_object()).all(|o| state.scene.bodies.contains_key(o));
+            if !names_back || !read {
+                test.step = 101;
+                test.at = test.frame + 10;
+                if test.frame > 40000 {
+                    test.check("the objects come back with the layout", false, format!("{:?} {:?}", state.scene.names, state.scene.errors));
+                    finish(&mut test, &mut exit);
+                }
+                return;
+            }
+            state.scene.errors.clear();
+            test.step = 36;
         }
         36 => {
-            // A coil, on a ring from the design, against the closed form for a thick solenoid.
-            let h = slot.host.as_mut().unwrap();
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Winding"}},
-                {"command": "sketch.circle.center", "params": {"center": [0, -2000000], "diameter": 120}},
-                {"command": "sketch.circle.center", "params": {"center": [0, -2000000], "diameter": 100}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "100 mm", "body_name": "Coil"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a coil's ring is modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let mut s = Study::new("Coil".into(), AnalysisId::Electromagnetics);
-            s.body = Some("Coil".into());
+            // A coil's region is cut out of the air, which takes CAD geometry: refused, with the reason.
+            let mut s = on_scene("Coil", AnalysisId::Electromagnetics, "Coil");
             s.settings.coil_ampere_turns = 1000.0;
-            s.settings.axis = 2;
-            s.settings.element_size = 0.02;
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
-            test.job = state.jobs.list().last().map_or(0, |j| j.id);
-        }
-        37 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 36) else { return };
-            // Radii 50 and 60 mm, 100 mm long, 1000 A round it: B = mu0 J r1 F(alpha, beta).
-            let (r1, r2, l) = (0.05f64, 0.06f64, 0.1f64);
-            let j = 1000.0 / ((r2 - r1) * l);
-            let (alpha, beta) = (r2 / r1, l / (2.0 * r1));
-            let f = beta * ((alpha + (alpha * alpha + beta * beta).sqrt()) / (1.0 + (1.0 + beta * beta).sqrt())).ln();
-            let exact = sim_core::elmer::MU_0 * j * r1 * f;
-            // The middle, from the ring's own nodes: its surface is drawn.
-            let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-            for t in &set.mesh.surface[..set.mesh.cut_start.unwrap_or(set.mesh.surface.len())] {
-                for n in t {
-                    let p = set.mesh.nodes[*n as usize];
-                    for k in 0..3 {
-                        lo[k] = lo[k].min(p[k]);
-                        hi[k] = hi[k].max(p[k]);
-                    }
-                }
-            }
-            let centre: [f64; 3] = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
-            let out = super::tools::probe_value(&set, 0, "magnetic flux density", centre);
-            let got = out.as_ref().ok().map_or(f64::NAN, |v| v[2].abs());
-            let err = (got - exact).abs() / exact;
-            test.check("a coil's field at its centre matches the closed form within 5%", err < 0.05, format!("{:.4} mT against {:.4} mT, {:.2}% off {:?}", got * 1e3, exact * 1e3, err * 100.0, out.err()));
-            panel::show_result(&mut state, test.job, "Coil", set);
-        }
-        38 => {}
-        39 => {
-            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(format!("{}_coil.png", test.out)));
+            let refused = panel::start_run(&mut state, last);
+            test.check("a coil is refused, and says why", refused.as_ref().is_err_and(|e| e.contains("CAD body")), format!("{refused:?}"));
+            state.studies.pop();
+            test.step = 40;
         }
         40 => {
             // Mach 2 at a block: a bow shock, so the nose sees the pitot pressure behind a normal shock.
             state.view = None;
-            let h = slot.host.as_mut().unwrap();
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Block"}},
-                {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 4000000], "p1": [100, 4000100]}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "100 mm", "body_name": "Block"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a block is modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let mut s = Study::new("Block, Mach 2".into(), AnalysisId::Compressible);
-            s.body = Some("Block".into());
+            let mut s = on_scene("Block, Mach 2", AnalysisId::Compressible, "Block");
             s.settings.free_stream = 2.0 * (1.4f64 * 8314.46 / 28.96 * 293.15).sqrt();
             s.settings.element_size = 0.05;
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         41 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 40) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 40) else { return };
             // Rayleigh's pitot formula, at Mach 2 and gamma 1.4: 5.640 times the free stream's pressure.
             let (m, g) = (2.0f64, 1.4f64);
             let ratio = ((g + 1.0) * (g + 1.0) * m * m / (4.0 * g * m * m - 2.0 * (g - 1.0))).powf(g / (g - 1.0)) * (1.0 - g + 2.0 * g * m * m) / (g + 1.0);
@@ -742,17 +769,7 @@ pub fn run(
         44 => {
             // A rotor: a cylinder spinning about its axis, in a zone from the panel's settings.
             state.view = None;
-            let h = slot.host.as_mut().unwrap();
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Rotor"}},
-                {"command": "sketch.circle.center", "params": {"center": [0, 6000], "diameter": 100}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "400 mm", "body_name": "Rotor"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a rotor is modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let mut s = Study::new("Rotor".into(), AnalysisId::MultiPurpose);
-            s.body = Some("Rotor".into());
+            let mut s = on_scene("Rotor", AnalysisId::MultiPurpose, "Rotor");
             s.settings.free_stream = 1e-5;
             s.settings.compressible = false;
             // Slow: a Reynolds number of about 10, which this coarse mesh can resolve. At 60 rpm, on the
@@ -762,11 +779,11 @@ pub fn run(
             s.settings.element_size = 0.08;
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         45 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 44) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 44) else { return };
             let wall = 0.6 * std::f64::consts::TAU / 60.0 * 0.05;
             let top = set.steps[0].field("U").and_then(|u| u.range()).map_or(0.0, |r| f64::from(r.1));
             let err = (top - wall).abs() / wall;
@@ -801,11 +818,10 @@ pub fn run(
         }
         46 => {
             // A hot block in a slow stream, body-fitted first.
-            let part = bridge::partition(&slot.host.as_ref().unwrap().app.session, "Block", MeshQuality::Fine).unwrap();
+            let part = part_of(&state, "Block");
             let lo_x = part.positions.iter().fold(f64::INFINITY, |a, p| a.min(p[0]));
             let face = face_at_x(&part, lo_x).expect("the block's front face");
-            let mut s = Study::new("Block, body-fitted cooling".into(), AnalysisId::ConjugateHeatTransfer);
-            s.body = Some("Block".into());
+            let mut s = on_scene("Block, body-fitted cooling", AnalysisId::ConjugateHeatTransfer, "Block");
             s.settings.free_stream = 0.2;
             s.settings.element_size = 0.06;
             s.conditions.push(Condition { kind: BcKind::HeatFlux { flux: 200.0 }, faces: vec![face.clone()] });
@@ -817,11 +833,11 @@ pub fn run(
             state.studies.push(s);
             state.studies.push(voxel);
             let last = state.studies.len() - 2;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         47 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 46) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 46) else { return };
             let balance = set.plots.iter().find(|p| p.name == "heat balance").expect("a heat balance");
             let (power, carried) = (balance.points[0].1, balance.points[1].1);
             test.check("body-fitted CHT: the heat balance closes within 5%", (carried - power).abs() / power < 0.05, format!("{power:.2} W in, {carried:.2} W out"));
@@ -837,119 +853,46 @@ pub fn run(
         }
         50 => {
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         51 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 50) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 50) else { return };
             let t = set.steps[0].field("T").expect("temperature");
             let voxel_peak = t.range().map_or(0.0, |r| f64::from(r.1));
             // Rises above the 20 degree air. Two different meshes and flow solvers on the same part.
             let (a, b) = (test.body_fitted_peak - 20.0, voxel_peak - 20.0);
             let apart = (a - b).abs() / a.max(b).max(1e-9);
             test.check("the two CHT routes agree on the block's hottest rise, within 35%", apart < 0.35, format!("body-fitted {a:.2} K, voxel {b:.2} K, {:.0}% apart", apart * 100.0));
-        }
-        52 => {
-            // Contact: one block pressed down on another. With contact the column carries E strain A, as
-            // one piece. Without it, the top block would just move, carrying nothing.
-            let h = slot.host.as_mut().unwrap();
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Anvil"}},
-                {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [50, 50]}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "50 mm", "body_name": "Anvil", "operation": "new"}},
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Punch", "offset": 50}},
-                {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [50, 50]}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "50 mm", "body_name": "Punch", "operation": "new"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("two touching blocks are modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let bodies = bridge::bodies(&h.app.session);
-            test.check("they are two bodies", bodies.iter().any(|b| b == "Anvil") && bodies.iter().any(|b| b == "Punch"), format!("{bodies:?}"));
-            let face_at_z = |part: &sim_core::geometry::Partition, z: f64| -> Option<FaceRef> {
-                (0..part.faces).find_map(|face| {
-                    let tris: Vec<_> = (0..part.triangles.len()).filter(|i| part.tri_face[*i] == face).collect();
-                    if !tris.is_empty() && tris.iter().all(|i| part.triangle(*i).iter().all(|p| (p[2] - z).abs() < 1e-6)) {
-                        let [a, b, c] = part.triangle(tris[0]);
-                        Some(FaceRef { face, point: std::array::from_fn(|k| (a[k] + b[k] + c[k]) / 3.0), second: false })
-                    } else {
-                        None
-                    }
-                })
-            };
-            let anvil = bridge::partition(&h.app.session, "Anvil", MeshQuality::Fine).unwrap();
-            let punch = bridge::partition(&h.app.session, "Punch", MeshQuality::Fine).unwrap();
-            let z_of = |part: &sim_core::geometry::Partition| part.positions.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[2]), b.max(p[2])));
-            let ((a0, a1), (p0, p1)) = (z_of(&anvil), z_of(&punch));
-            test.check("the blocks touch", (a1 - p0).abs() < 1e-6, format!("anvil to z = {a1}, punch from z = {p0}"));
-            let on_second = |f: FaceRef| FaceRef { second: true, ..f };
-            let mut s = Study::new("Blocks in contact".into(), AnalysisId::NonlinearMechanical);
-            s.body = Some("Anvil".into());
-            s.second_body = Some("Punch".into());
-            s.settings.element_size = 0.1;
-            s.settings.load_increment = 0.25;
-            s.conditions.push(Condition { kind: BcKind::Fixed, faces: vec![face_at_z(&anvil, a0).unwrap()] });
-            s.conditions.push(Condition { kind: BcKind::Displacement { displacement: [0.0, 0.0, -1e-5] }, faces: vec![on_second(face_at_z(&punch, p1).unwrap())] });
-            s.conditions.push(Condition { kind: BcKind::Contact { friction: 0.0 }, faces: vec![face_at_z(&anvil, a1).unwrap(), on_second(face_at_z(&punch, p0).unwrap())] });
-            test.check("the contact study has what it needs", s.problems().is_empty(), format!("{:?}", s.problems()));
-            state.studies.push(s);
-            let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
-            test.job = state.jobs.list().last().map_or(0, |j| j.id);
-        }
-        53 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 52) else { return };
-            let reaction = set.plots.iter().find(|p| p.name.starts_with("Displacement") && p.name.ends_with("along z")).and_then(|p| p.points.last()).map_or(0.0, |p| p.1.abs());
-            let young = state.studies.last().unwrap().material.young;
-            let exact = young * (1e-5 / 0.1) * (0.05 * 0.05);
-            let err = (reaction - exact).abs() / exact;
-            test.check("contact: the column carries the force of one solid piece, within 5%", err < 0.05, format!("{:.0} N against {exact:.0} N, {:.1}% off", reaction, err * 100.0));
-            panel::show_result(&mut state, test.job, "Blocks in contact", set);
-        }
-        54 => {}
-        55 => {
-            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(format!("{}_contact.png", test.out)));
+            test.step = 56;
         }
         56 => {
             // Two solvers on one case: air past a cube at Re 100, on OpenFOAM and then on the GPU.
             state.view = None;
-            let h = slot.host.as_mut().unwrap();
-            let script = json!({"commands": [
-                {"command": "sketch.create", "params": {"plane": "XY", "name": "Cube"}},
-                {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 3000000], "p1": [100, 3000100]}},
-                {"command": "sketch.finish", "params": {}},
-                {"command": "solid.extrude", "params": {"distance": "100 mm", "body_name": "Cube"}},
-            ]});
-            let r = h.app.session.run_script(&script);
-            test.check("a cube is modelled", r.is_ok(), r.err().map_or(String::new(), |e| e.to_string()));
-            let mut s = Study::new("Cube, OpenFOAM".into(), AnalysisId::Incompressible);
-            s.body = Some("Cube".into());
+            let mut s = on_scene("Cube, OpenFOAM", AnalysisId::Incompressible, "Cube");
             s.settings.free_stream = CUBE_SPEED;
             // Coarser than this, OpenFOAM's speed above the cube is 15% of the wind's away from the GPU's.
             s.settings.element_size = std::env::var("CUBE_ELEMENT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.015);
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         57 => {
-            let Some(set) = wait(&mut test, &state, &mut slot, &mut exit, 56) else { return };
+            let Some(set) = wait(&mut test, &state, &mut exit, 56) else { return };
             test.first_answer = Some(set);
-            let mut s = Study::new("Cube, GPU".into(), AnalysisId::IncompressibleLbm);
-            s.body = Some("Cube".into());
+            let mut s = on_scene("Cube, GPU", AnalysisId::IncompressibleLbm, "Cube");
             s.settings.free_stream = CUBE_SPEED;
             s.settings.resolution = 40;
             state.studies.push(s);
             let last = state.studies.len() - 1;
-            panel::run(&mut state, &mut slot, last);
+            panel::run(&mut state, last);
             test.job = state.jobs.list().last().map_or(0, |j| j.id);
         }
         58 => {
-            let Some(gpu) = wait(&mut test, &state, &mut slot, &mut exit, 57) else { return };
+            let Some(gpu) = wait(&mut test, &state, &mut exit, 57) else { return };
             let foam = test.first_answer.take().expect("OpenFOAM's answer");
-            let h = slot.host.as_ref().unwrap();
-            let part = bridge::partition(&h.app.session, "Cube", MeshQuality::Fine).unwrap();
+            let part = part_of(&state, "Cube");
             let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
             for p in &part.positions {
                 for k in 0..3 {
@@ -974,7 +917,7 @@ pub fn run(
                 }
             }
             test.check("OpenFOAM and the GPU solver agree on air past a cube, within 10% of the wind's speed", failed.is_none() && worst < 0.10, format!("worst {:.1}%; {} m/s {}", worst * 100.0, rows.join(", "), failed.unwrap_or_default()));
-            finish(&mut test, &mut slot, &mut exit);
+            finish(&mut test, &mut exit);
         }
         _ => {}
     }
@@ -1010,27 +953,15 @@ pub fn tools_step(world: &mut World) {
     }
     world.resource_mut::<SimTest>().job = 0;
 
-    let listed = call(world, "design_commands", json!({ "filter": "extrude" }));
-    check(world, "tool design_commands finds commands", listed.as_ref().is_ok_and(|l| l["total"].as_u64().is_some_and(|n| n > 0)), format!("{:?}", listed.as_ref().map(|l| l["total"].clone())));
-    let refused = call(world, "design_run", json!({ "commands": [{ "command": "file.save_as", "params": { "path": "C:/x.sc" } }] }));
-    check(world, "tool design_run leaves files to the user", refused.as_ref().is_err_and(|e| e.contains("leaves to the user")), format!("{refused:?}"));
-    let made = call(world, "design_run", json!({ "commands": [
-        { "command": "sketch.create", "params": { "plane": "XY", "name": "Tab" } },
-        { "command": "sketch.rectangle.two_point", "params": { "p0": [0, 1000], "p1": [400, 1040] } },
-        { "command": "sketch.finish", "params": {} },
-        { "command": "solid.extrude", "params": { "distance": "10 mm", "body_name": "Tab" } },
-    ] }));
-    check(world, "tool design_run models a part", made.as_ref().is_ok_and(|m| m["bodies"].as_array().is_some_and(|b| b.iter().any(|n| n == "Tab"))), format!("{:?}", made.as_ref().map(|m| m["bodies"].clone())));
-    let bad = call(world, "design_run", json!({ "commands": [{ "command": "no.such.command" }] }));
-    check(world, "tool design_run reports a bad command", bad.is_err(), format!("{bad:?}"));
-    let faces = call(world, "design_faces", json!({ "body": "Tab" }));
+    let tab = format!("{}Tab", sim_core::study::SCENE_PREFIX);
+    let faces = call(world, "sim_faces", json!({ "body": tab }));
     let Ok(faces) = faces else {
-        check(world, "tool design_faces lists faces", false, format!("{faces:?}"));
+        check(world, "tool sim_faces lists faces", false, format!("{faces:?}"));
         return;
     };
     let along_x = |want: f64| -> Option<u64> { faces["faces"].as_array()?.iter().find(|f| f["outward"][0].as_f64() == Some(want))?["face"].as_u64() };
     let (root, tip) = (along_x(-1.0), along_x(1.0));
-    check(world, "tool design_faces gives faces by direction", root.is_some() && tip.is_some(), format!("{} faces", faces["face_count"]));
+    check(world, "tool sim_faces gives faces by direction", root.is_some() && tip.is_some(), format!("{} faces", faces["face_count"]));
     let catalog = call(world, "sim_catalog", json!({}));
     let can_run = catalog.as_ref().ok().and_then(|c| c["analyses"].as_array().map(|a| (a.len(), a.iter().find(|x| x["id"] == "static").map(|x| x["can_run_now"].clone()))));
     check(world, "tool sim_catalog has all 17, and says what can run", can_run.as_ref().is_some_and(|(n, s)| *n == 17 && *s == Some(json!(true))), format!("{can_run:?}"));
@@ -1045,7 +976,10 @@ pub fn tools_step(world: &mut World) {
     check(world, "tool sim_run says what's still missing", not_ready.as_ref().is_err_and(|e| e.contains("Not ready")), format!("{not_ready:?}"));
     let typo = call(world, "sim_study_set", json!({ "study": study, "settings": { "element_sise": 0.1 } }));
     check(world, "tool sim_study_set refuses a setting that doesn't exist", typo.as_ref().is_err_and(|e| e.contains("no setting called")), format!("{typo:?}"));
-    let set = call(world, "sim_study_set", json!({ "study": study, "body": "Tab", "settings": { "element_size": 0.012 }, "conditions": [
+    let contact = call(world, "sim_study_set", json!({ "study": study, "second_body": tab }));
+    check(world, "tool sim_study_set says contact can't be set up", contact.as_ref().is_err_and(|e| e.contains("Contact")), format!("{contact:?}"));
+    let material = sim_core::materials::solids().remove(0).name;
+    let set = call(world, "sim_study_set", json!({ "study": study, "body": tab, "material": material, "settings": { "element_size": 0.012 }, "conditions": [
         { "kind": { "type": "fixed" }, "faces": [root] },
         { "kind": { "type": "force", "force": [0.0, 0.0, -50.0] }, "faces": [tip] },
     ] }));
@@ -1063,13 +997,13 @@ pub fn tools_step(world: &mut World) {
 }
 
 /// The current job's result once it's done; while it runs, keeps the test on `repeat_step`.
-fn wait(test: &mut SimTest, state: &SimState, slot: &mut Slot, exit: &mut MessageWriter<AppExit>, repeat_step: usize) -> Option<std::sync::Arc<ResultSet>> {
+fn wait(test: &mut SimTest, state: &SimState, exit: &mut MessageWriter<AppExit>, repeat_step: usize) -> Option<std::sync::Arc<ResultSet>> {
     let info = state.jobs.list().into_iter().find(|j| j.id == test.job);
     match info.map(|j| j.state) {
         Some(State::Done) => state.jobs.result(test.job),
         Some(State::Failed { error }) => {
             test.check("the run finishes", false, error);
-            finish(test, slot, exit);
+            finish(test, exit);
             None
         }
         Some(_) => {
@@ -1079,20 +1013,60 @@ fn wait(test: &mut SimTest, state: &SimState, slot: &mut Slot, exit: &mut Messag
         }
         None => {
             test.check("the run starts", false, state.message.clone().unwrap_or_default());
-            finish(test, slot, exit);
+            finish(test, exit);
             None
         }
     }
 }
 
-fn finish(test: &mut SimTest, slot: &mut Slot, exit: &mut MessageWriter<AppExit>) {
+fn finish(test: &mut SimTest, exit: &mut MessageWriter<AppExit>) {
     let pass = !test.checks.is_empty() && test.checks.iter().all(|c| c["pass"] == true);
     let report = json!({ "pass": pass, "checks": test.checks });
     let path = format!("{}.json", test.out);
     let _ = std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default());
     println!("{} ({path})", if pass { "ALL PASSED" } else { "FAILED" });
-    if let Some(h) = slot.host.as_mut() {
-        h.shutdown();
-    }
     exit.write(if pass { AppExit::Success } else { AppExit::from_code(1) });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sim_core::geometry::regions;
+
+    /// Every test part must read as the solid the checks expect, or a later check fails for the wrong reason.
+    #[test]
+    fn the_test_parts_read_as_closed_solids_with_the_right_faces() {
+        for (name, (points, triangles)) in parts() {
+            let r = regions::from_triangles(name, &points, &triangles, regions::CREASE_DEGREES).unwrap();
+            let want = match name {
+                "Pipe" | "Rotor" => 3,
+                "Coil" => 4,
+                _ => 6,
+            };
+            assert_eq!(r.partition.faces as usize, want, "{name}");
+            assert!(r.solid_problem().is_none(), "{name}: {:?}", r.solid_problem());
+        }
+    }
+
+    #[test]
+    fn a_rounded_digit_is_the_same_study_and_a_real_change_isnt() {
+        let mut a = on_scene("x", AnalysisId::Static, "Beam");
+        a.conditions.push(Condition { kind: BcKind::Fixed, faces: vec![FaceRef { face: 0, point: [0.0, -0.012157924349108859, 0.0], second: false }] });
+        let mut rounded = a.clone();
+        rounded.conditions[0].faces[0].point[1] = -0.01215792434910886;
+        assert_eq!(first_difference(std::slice::from_ref(&a), std::slice::from_ref(&rounded)), "");
+        let mut moved = a.clone();
+        moved.conditions[0].faces[0].point[1] = -0.0122;
+        assert!(!first_difference(std::slice::from_ref(&a), std::slice::from_ref(&moved)).is_empty());
+        let mut other = a.clone();
+        other.conditions[0].faces[0].face = 1;
+        assert!(!first_difference(std::slice::from_ref(&a), std::slice::from_ref(&other)).is_empty());
+    }
+
+    #[test]
+    fn a_pipes_ends_are_found_by_where_they_are() {
+        let (_, (points, triangles)) = parts().into_iter().find(|p| p.0 == "Pipe").unwrap();
+        let part = regions::from_triangles("Pipe", &points, &triangles, regions::CREASE_DEGREES).unwrap().partition;
+        assert!(face_at_x(&part, 0.0).is_some() && face_at_x(&part, 1.0).is_some());
+    }
 }

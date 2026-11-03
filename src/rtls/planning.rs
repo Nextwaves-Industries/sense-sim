@@ -130,7 +130,28 @@ pub struct Coverage {
     /// Where the propagation loss comes from, and what that means for this map.
     pub source: MapSource,
     pub source_note: String,
+    /// Where tags are worked out to go, once a smart plan has read the site.
+    pub traffic: Option<TrafficMap>,
     entity: Option<Entity>,
+}
+
+/// How much traffic each spot of the floor carries (averaging 1 over the walkable floor).
+#[derive(Clone, Debug, Default)]
+pub struct TrafficMap {
+    pub origin: Vec2,
+    pub cell: f32,
+    pub nx: usize,
+    pub nz: usize,
+    pub traffic: Vec<f32>,
+}
+
+/// Quiet floor is pale, a busy aisle deep blue, so it reads as use rather than as good or bad.
+fn traffic_color(t: f32) -> [u8; 4] {
+    if t <= 0.0 {
+        return [0, 0, 0, 0];
+    }
+    let s = (t / 6.0).clamp(0.0, 1.0).sqrt();
+    [(190.0 - 150.0 * s) as u8, (215.0 - 125.0 * s) as u8, (250.0 - 20.0 * s) as u8, (40.0 + 170.0 * s) as u8]
 }
 
 impl Coverage {
@@ -290,7 +311,7 @@ struct Node {
 
 /// The tag a plan or map is made for. The tags in the scene decide how UWB is measured:
 /// TDoA if all of them blink.
-fn planned_tag<'a>(profiles: &Profiles, tech: Tech, devices: impl Iterator<Item = &'a Device>) -> Profile {
+pub(super) fn planned_tag<'a>(profiles: &Profiles, tech: Tech, devices: impl Iterator<Item = &'a Device>) -> Profile {
     let default = tag_profile(profiles, tech);
     let tags: Vec<Profile> = devices.filter(|d| d.enabled && d.kind == default.kind).map(|d| profiles.for_device(d)).collect();
     if !tags.is_empty() && tags.iter().all(|t| t.mode == UwbMode::Tdoa) { tags[0].clone() } else { default }
@@ -335,11 +356,11 @@ fn eval(tech: Tech, p: Vec3, nodes: &[Node], paths: &[Path], props: &[Option<f32
         let to = p - n.pos;
         let u = to.normalize_or_zero().to_array();
         let e = match placement::link_info(m, &n.prof, tag, path, n.fwd.angle_between(to), 0.0) {
-            Some(l) => Entry { pt: 0, p: l.p, w: l.w, v: l.v, b: l.b, u, bearing: l.bearing },
+            Some(l) => Entry { pt: 0, p: l.p, w: l.w, v: l.v, b: l.b, clear: l.clear, at: [n.pos.x, n.pos.z], u, bearing: l.bearing },
             None if m == Method::Aoa => return false,
             None => {
                 let s = if m == Method::Rssi { radio::rssi_distance_sigma(&n.prof, path.distance) } else { n.prof.range_sigma_m.max(0.02) };
-                Entry { pt: 0, p: 0.9, w: 0.9 / (s * s), v: 0.9 / (s * s), b: 0.0, u, bearing: false }
+                Entry { pt: 0, p: 0.9, w: 0.9 / (s * s), v: 0.9 / (s * s), b: 0.0, clear: 0.9, at: [n.pos.x, n.pos.z], u, bearing: false }
             }
         };
         acc.add(i as u32, &e);
@@ -573,6 +594,7 @@ pub fn compute(
         height: req.height,
         source: cov.source,
         source_note,
+        traffic: cov.traffic.take(),
         entity: cov.entity,
     };
     let (covered, mean, p95) = cov.stats();
@@ -722,23 +744,56 @@ struct SceneMover<'a, S, G> {
     hi: Vec2,
 }
 
+/// Where a device really lands when slid from `from` to `to` along its surface, inside the area.
+pub(super) fn slide_along_surface<S: RadioScene>(scene: &S, from: &Candidate, to: Vec3, lo: Vec2, hi: Vec2) -> Option<Vec3> {
+    if to.x < lo.x || to.x > hi.x || to.z < lo.y || to.z > hi.y {
+        return None;
+    }
+    // Same gap to the surface behind it, wherever it slides.
+    let back = -from.facing.normalize_or_zero();
+    let gap = scene.surface(from.pos, back, 1.0)?;
+    let t = scene.surface(to, back, gap + 0.3)?;
+    let land = to + back * (t - gap);
+    // Rounding a corner onto another surface is not sliding.
+    (land.distance(from.pos) <= (to - from.pos).length() + 0.05).then_some(land)
+}
+
 impl<S: RadioScene, G: Fn(&Profile, Vec3, Vec3) -> f32 + Sync> Mover for SceneMover<'_, S, G> {
     fn settle(&self, from: &Candidate, to: Vec3) -> Option<Vec3> {
-        if to.x < self.lo.x || to.x > self.hi.x || to.z < self.lo.y || to.z > self.hi.y {
-            return None;
-        }
-        // Same gap to the surface behind it, wherever it slides.
-        let back = -from.facing.normalize_or_zero();
-        let gap = self.scene.surface(from.pos, back, 1.0)?;
-        let t = self.scene.surface(to, back, gap + 0.3)?;
-        let land = to + back * (t - gap);
-        // Rounding a corner onto another surface is not sliding.
-        (land.distance(from.pos) <= (to - from.pos).length() + 0.05).then_some(land)
+        slide_along_surface(self.scene, from, to, self.lo, self.hi)
     }
 
     fn column(&self, pos: Vec3, facing: Vec3) -> Column {
         placement::column(self.scene, self.pts, self.method, self.prof, self.tag, pos, facing, self.gain)
     }
+}
+
+/// Mounting points in a plan-independent order, each once, with what they cost: a spot's
+/// mount, its cable, and a discount where another technology's device already hangs.
+pub(super) fn candidates_from(raw: &[(Vec3, Vec3)], mounts: Option<&[Mount]>, reserved: &[Vec3], shared: &[Vec3], head_end: Option<Vec3>) -> Vec<Candidate> {
+    // Rounded and sorted: mount points are derived from objects in the order
+    // they finished loading, and that must not change the plan.
+    let round = |v: Vec3, k: f32| (v * k).round() / k;
+    let mut raw: Vec<(Vec3, Vec3, Option<Mount>)> = raw.iter().enumerate().map(|(i, (p, f))| (round(*p, 1000.0), round(*f, 10000.0), mounts.and_then(|m| m.get(i)).copied())).collect();
+    raw.sort_by(|a, b| {
+        let key = |c: &(Vec3, Vec3, Option<Mount>)| [c.0.x, c.0.y, c.0.z, c.1.x, c.1.y, c.1.z];
+        key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut cands: Vec<Candidate> = Vec::new();
+    for (pos, facing, given) in raw {
+        let mount = match given {
+            Some(m) => m,
+            None if facing.y < -0.9 => Mount::Ceiling,
+            None => Mount::Wall,
+        };
+        if reserved.iter().any(|r| r.distance(pos) < SAME_SPOT_M) || cands.iter().any(|c: &Candidate| c.pos.distance(pos) < SAME_SPOT_M && c.facing.dot(facing) > 0.98) {
+            continue;
+        }
+        let on_shared = shared.iter().any(|s| s.distance(pos) < SAME_SPOT_M);
+        let cost = placement::install_cost(mount, pos, head_end) * if on_shared { 0.3 } else { 1.0 };
+        cands.push(Candidate { pos, facing, mount, cost });
+    }
+    cands
 }
 
 /// Chooses mounting points for the most coverage and accuracy at the lowest
@@ -828,28 +883,7 @@ pub fn optimize(
     // Candidate mounting points, with what they cost and hang on.
     let spacing = req.min_spacing_m.unwrap_or(if reads { 1.0 } else { 1.5 });
     let raw = req.candidates.clone().unwrap_or_default();
-    // Rounded and sorted: mount points are derived from objects in the order
-    // they finished loading, and that must not change the plan.
-    let round = |v: Vec3, k: f32| (v * k).round() / k;
-    let mut raw: Vec<(Vec3, Vec3, Option<Mount>)> = raw.into_iter().enumerate().map(|(i, (p, f))| (round(p, 1000.0), round(f, 10000.0), req.mounts.as_ref().and_then(|m| m.get(i)).copied())).collect();
-    raw.sort_by(|a, b| {
-        let key = |c: &(Vec3, Vec3, Option<Mount>)| [c.0.x, c.0.y, c.0.z, c.1.x, c.1.y, c.1.z];
-        key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut cands: Vec<Candidate> = Vec::new();
-    for (pos, facing, given) in raw {
-        let mount = match given {
-            Some(m) => m,
-            None if facing.y < -0.9 => Mount::Ceiling,
-            None => Mount::Wall,
-        };
-        if req.reserved.iter().any(|r| r.distance(pos) < SAME_SPOT_M) || cands.iter().any(|c: &Candidate| c.pos.distance(pos) < SAME_SPOT_M && c.facing.dot(facing) > 0.98) {
-            continue;
-        }
-        let shared = req.shared_mounts.iter().any(|s| s.distance(pos) < SAME_SPOT_M);
-        let cost = placement::install_cost(mount, pos, req.head_end) * if shared { 0.3 } else { 1.0 };
-        cands.push(Candidate { pos, facing, mount, cost });
-    }
+    let mut cands = candidates_from(&raw, req.mounts.as_deref(), &req.reserved, &req.shared_mounts, req.head_end);
     let occ = Occluders::build(&parts, &occ_objects);
     if req.expand_heights && cands.len() * 3 <= MAX_EXPANDED_CANDS {
         // Up to the lowest thing overhead at mid-room, if anything is there.
@@ -979,6 +1013,8 @@ pub enum MapView {
     Quality,
     Accuracy,
     Signal,
+    /// Where tags are worked out to go, not how well they're heard.
+    Traffic,
 }
 
 /// dBm range (weak, strong) used to colour the signal map.
@@ -1065,15 +1101,23 @@ pub fn sync_heatmap(
     if let Some(e) = cov.entity.take() {
         commands.entity(e).despawn();
     }
-    if cov.cells.is_empty() {
+    // Traffic has a grid of its own: it comes from the walkable floor, not the radio scan.
+    let traffic = cov.traffic.as_ref().filter(|_| cov.view == MapView::Traffic);
+    let (nx, nz, cell, origin) = traffic.map_or((cov.nx, cov.nz, cov.cell, cov.origin), |t| (t.nx, t.nz, t.cell, t.origin));
+    if traffic.is_none() && cov.cells.is_empty() {
         return;
     }
-    let mut data = Vec::with_capacity(cov.nx * cov.nz * 4);
-    for c in &cov.cells {
-        data.extend_from_slice(&color_for(cov.tech, cov.view, cov.quality, c));
+    let mut data = Vec::with_capacity(nx * nz * 4);
+    match traffic {
+        Some(t) => t.traffic.iter().for_each(|v| data.extend_from_slice(&traffic_color(*v))),
+        None => {
+            for c in &cov.cells {
+                data.extend_from_slice(&color_for(cov.tech, cov.view, cov.quality, c));
+            }
+        }
     }
     let mut img = Image::new(
-        Extent3d { width: cov.nx as u32, height: cov.nz as u32, depth_or_array_layers: 1 },
+        Extent3d { width: nx as u32, height: nz as u32, depth_or_array_layers: 1 },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -1081,8 +1125,8 @@ pub fn sync_heatmap(
     );
     img.sampler = bevy::image::ImageSampler::nearest();
     let tex = images.add(img);
-    let w = cov.nx as f32 * cov.cell;
-    let d = cov.nz as f32 * cov.cell;
+    let w = nx as f32 * cell;
+    let d = nz as f32 * cell;
     let mesh = meshes.add(Plane3d::default().mesh().size(w, d));
     let mat = materials.add(StandardMaterial {
         base_color_texture: Some(tex),
@@ -1092,7 +1136,7 @@ pub fn sync_heatmap(
         cull_mode: None,
         ..default()
     });
-    let center = Vec3::new(cov.origin.x + w * 0.5, 0.02, cov.origin.y + d * 0.5);
+    let center = Vec3::new(origin.x + w * 0.5, 0.02, origin.y + d * 0.5);
     let e = commands
         .spawn((
             Name::new("RTLS coverage"),

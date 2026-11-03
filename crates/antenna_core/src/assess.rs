@@ -106,17 +106,27 @@ pub fn assess(r: &SimResult, req: &Requirements, ctx: Context) -> Assessment {
         trust_issues.push("The design changed after this run, so these numbers describe an older design.".to_string());
         next.push("Call antenna_run, then antenna_assess again.".to_string());
     }
-    trust_issues.extend(r.warnings.iter().cloned());
+    // A sliver is a reason to suspect a mesh. A study showing the answer has stopped moving settles it,
+    // and a thin trace's triangles are slivers on a mesh that's plenty for it: reactance on one was
+    // within 4 % at 192 edges a wavelength with the triangles still sharp. It stays a note, and the
+    // mesh study it points to is what decides.
+    let thin_trace_fine = req.chip_z.is_some() && r.density >= 192.0;
+    for w in &r.warnings {
+        if w.starts_with("The surface mesh has sliver") && (ctx.mesh_converged == Some(true) || thin_trace_fine) {
+            notes.push(w.clone());
+        } else {
+            trust_issues.push(w.clone());
+        }
+    }
 
     let covered = net.ports() > 0 && net.f.first().is_some_and(|f| *f <= req.f_lo) && net.f.last().is_some_and(|f| *f >= req.f_hi);
     if let (true, Some((re, im))) = (covered, req.chip_z) {
-        let chip = crate::C64::new(re, im);
         let need = req.min_power_transfer.unwrap_or(0.7);
         let band = net.interpolate(&crate::linspace(req.f_lo, req.f_hi, 21));
-        let worst = band.zin(PORT).iter().map(|z| crate::tag::power_transfer(*z, chip)).fold(1.0, f64::min);
+        let worst = band.f.iter().zip(band.zin(PORT)).map(|(f, z)| crate::tag::power_transfer(z, crate::tag::chip_at((re, im), *f))).fold(1.0, f64::min);
         check(&mut checks, "power into the chip", worst >= need, format!("worst {worst:.2} across the band"), format!("{need:.2} or more, {} to {}", ghz(req.f_lo), ghz(req.f_hi)));
         if worst < need {
-            diagnose_chip(net.interpolate(&[fc]).zin(PORT).first().copied(), chip, &mut diagnosis, &mut next);
+            diagnose_chip(net.interpolate(&[fc]).zin(PORT).first().copied(), crate::tag::chip_at((re, im), fc), &mut diagnosis, &mut next);
         }
     } else if covered {
         let worst = band_worst(net, PORT, PORT, req.f_lo, req.f_hi).unwrap_or(f64::INFINITY);
@@ -143,9 +153,9 @@ pub fn assess(r: &SimResult, req: &Requirements, ctx: Context) -> Assessment {
             if let (Some((re, im)), Some((read_dbm, eirp_dbm))) = (req.chip_z, req.read_range_from) {
                 let z = net.interpolate(&[fc]).zin(PORT).first().copied();
                 if let Some(z) = z {
-                    let transfer = crate::tag::power_transfer(z, crate::C64::new(re, im));
+                    let transfer = crate::tag::power_transfer(z, crate::tag::chip_at((re, im), fc));
                     let range = crate::tag::read_range_m(fc, eirp_dbm, m.peak_gain_dbi, transfer, read_dbm, 1.0);
-                    notes.push(format!("Forward-link read range about {range:.1} m at {}, in free space and aligned: {eirp_dbm:.1} dBm EIRP, {read_dbm:.1} dBm chip sensitivity, {:.2} dBi gain, {transfer:.2} power transfer. A circular reader costs 3 dB of that, and a real product more.", ghz(fc), m.peak_gain_dbi));
+                    notes.push(format!("Forward-link read range about {range:.1} m at {}, in the surroundings modelled and aligned: {eirp_dbm:.1} dBm EIRP, {read_dbm:.1} dBm chip sensitivity, {:.2} dBi gain, {transfer:.2} power transfer. A circular reader costs 3 dB of that, and a real product more.", ghz(fc), m.peak_gain_dbi));
                 }
             }
             // Against a chip, realized gain would be charged for a 50 ohm mismatch that isn't there.
@@ -208,7 +218,13 @@ pub fn assess(r: &SimResult, req: &Requirements, ctx: Context) -> Assessment {
         };
         let (a, b) = (sorted(size), sorted(max));
         let fits = a.iter().zip(&b).all(|(x, y)| x <= y);
-        check(&mut checks, "size", fits, format!("{:.1} x {:.1} x {:.1} mm", size[0] * 1e3, size[1] * 1e3, size[2] * 1e3), format!("within {:.1} x {:.1} x {:.1} mm", max[0] * 1e3, max[1] * 1e3, max[2] * 1e3));
+        // Two decimals: at one, a design 16 µm over reads the same as its limit, which looks like nonsense.
+        check(&mut checks, "size", fits, format!("{:.2} x {:.2} x {:.2} mm", size[0] * 1e3, size[1] * 1e3, size[2] * 1e3), format!("no larger than {:.2} x {:.2} x {:.2} mm", max[0] * 1e3, max[1] * 1e3, max[2] * 1e3));
+        if !fits {
+            let over = a.iter().zip(&b).map(|(x, y)| x - y).fold(0.0, f64::max);
+            diagnosis.push(format!("It's {:.2} mm too large. Only being too large fails this check: a design smaller than the limit is fine, so there's nothing to fill.", over * 1e3));
+            next.push("Bring it in by that much, then put the match back. For a tag, antenna_tag_tune with max_mm does both.".to_string());
+        }
     }
 
     let met = checks.iter().all(|c| c.pass);
@@ -410,6 +426,21 @@ mod tests {
         assert_eq!(assess(&result(good), &r, Context { mesh_converged: Some(false), ..Default::default() }).verdict, Verdict::NotTrustworthy);
     }
 
+    /// A sliver warns about the mesh. A study that has converged has answered it; nothing else
+    /// gets waved through that way.
+    #[test]
+    fn a_converged_study_settles_a_sliver_warning_and_nothing_else() {
+        let f = band(0.8e9, 1.0e9, 201);
+        let good = series_rlc(0.9e9, 50.0, 5.0, &f);
+        let r = req(0.89e9, 0.91e9);
+        let sliver = SimResult { warnings: vec!["The surface mesh has sliver triangles, the sharpest with a 2.2° corner".into()], ..result(good.clone()) };
+        assert_eq!(assess(&sliver, &r, Context::default()).verdict, Verdict::NotTrustworthy);
+        let settled = assess(&sliver, &r, Context { mesh_converged: Some(true), ..Default::default() });
+        assert_ne!(settled.verdict, Verdict::NotTrustworthy, "{settled:?}");
+        let other = SimResult { warnings: vec!["Port 1 is not passive".into()], ..result(good) };
+        assert_eq!(assess(&other, &r, Context { mesh_converged: Some(true), ..Default::default() }).verdict, Verdict::NotTrustworthy);
+    }
+
     #[test]
     fn gain_and_efficiency_are_judged_at_the_band_centre() {
         let f = band(0.8e9, 1.0e9, 201);
@@ -445,5 +476,11 @@ mod tests {
         assert!(fits.checks.iter().any(|c| c.name == "size" && c.pass), "{fits:?}");
         let big = assess(&r, &q, Context { size_m: Some([0.2, 0.05, 0.01]), ..Default::default() });
         assert_eq!(big.verdict, Verdict::NotMet);
+        // A hair over has to read as over, and say that smaller is fine.
+        let hair = assess(&r, &q, Context { size_m: Some([0.100016, 0.02, 0.0]), ..Default::default() });
+        assert_eq!(hair.verdict, Verdict::NotMet);
+        let size = hair.checks.iter().find(|c| c.name == "size").unwrap();
+        assert!(size.measured.contains("100.02") && size.required.contains("100.00"), "{size:?}");
+        assert!(hair.diagnosis.iter().any(|d| d.contains("0.02 mm too large") && d.contains("nothing to fill")), "{hair:?}");
     }
 }

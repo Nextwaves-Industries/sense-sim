@@ -495,10 +495,18 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.add(egui::Spinner::new().size(12.0).color(if waiting { theme::ONLINE } else { theme::ACCENT }));
-            ui.label(RichText::new(if waiting { "Waiting for your answer" } else { "Working…" }).small().color(theme::WEAK));
+            let status = if agent.interrupting {
+                "Stopping this step to send your message…"
+            } else if waiting {
+                "Waiting for your answer"
+            } else {
+                "Working…"
+            };
+            ui.label(RichText::new(status).small().color(theme::WEAK));
         });
         ui.add_space(4.0);
     }
+    queue(ui, agent);
     // Outline the box while the text field has focus (known from last frame).
     let input_id = egui::Id::new("assistant_input");
     let focused = ctx.memory(|m| m.has_focus(input_id));
@@ -531,7 +539,13 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
             egui::TextEdit::multiline(&mut agent.input)
                 .id(input_id)
                 .frame(egui::Frame::NONE)
-                .hint_text(if agent.attachments.is_empty() { "Ask the assistant…" } else { "What should I do with this photo? (optional)" })
+                .hint_text(if !agent.attachments.is_empty() {
+                    "What should I do with this photo? (optional)"
+                } else if agent.running {
+                    "Queue a message for when this finishes…"
+                } else {
+                    "Ask the assistant…"
+                })
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
         );
@@ -554,24 +568,68 @@ fn composer(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, bridge: &
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if agent.running {
                     // The status line sits above the box (see `composer`).
-                    if round_button(ui, icon::STOP, theme::DANGER).on_hover_text("Stop").clicked() {
+                    if round_button(ui, icon::STOP, theme::DANGER).on_hover_text("Stop. Queued messages go back in the box").clicked() {
                         agent.stop();
                     }
+                }
+                let can = (!agent.input.trim().is_empty() || !agent.attachments.is_empty()) && agent.blocker().is_none();
+                // Disabled: a quiet grey circle rather than a dimmed accent one.
+                let r = if can {
+                    round_button(ui, icon::ARROW_UP, theme::ACCENT)
                 } else {
-                    let can = (!agent.input.trim().is_empty() || !agent.attachments.is_empty()) && agent.blocker().is_none();
-                    // Disabled: a quiet grey circle rather than a dimmed accent one.
-                    let r = if can {
-                        round_button(ui, icon::ARROW_UP, theme::ACCENT)
-                    } else {
-                        ui.add(egui::Button::new(RichText::new(icon::ARROW_UP).size(15.0).color(theme::FAINT)).fill(theme::HOVER).corner_radius(14).min_size(vec2(28.0, 28.0)).sense(egui::Sense::hover()))
-                    };
-                    if (r.on_hover_text("Send (Enter) · Shift+Enter for a new line").clicked() || send_key) && can {
-                        agent.send(bridge);
-                    }
+                    ui.add(egui::Button::new(RichText::new(icon::ARROW_UP).size(15.0).color(theme::FAINT)).fill(theme::HOVER).corner_radius(14).min_size(vec2(28.0, 28.0)).sense(egui::Sense::hover()))
+                };
+                let tip = if agent.running { "Queue for when this finishes (Enter) · Shift+Enter for a new line" } else { "Send (Enter) · Shift+Enter for a new line" };
+                if (r.on_hover_text(tip).clicked() || send_key) && can {
+                    agent.send(bridge);
                 }
             });
         });
     });
+}
+
+/// Messages waiting for the turn to end. Each can be dropped, or cut in with "Send now".
+fn queue(ui: &mut egui::Ui, agent: &mut Agent) {
+    let (mut send_now, mut remove) = (None, None);
+    for (k, q) in agent.queued.iter().enumerate() {
+        let words = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = match (words.is_empty(), q.images.len()) {
+            (false, _) => words,
+            (true, 1) => "1 photo".to_string(),
+            (true, n) => format!("{n} photos"),
+        };
+        egui::Frame::new().fill(theme::RAISED).corner_radius(6).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Inside a row: on its own, a right-to-left layout takes the whole height of the panel.
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if theme::icon_button(ui, icon::X, "Don't send this").clicked() {
+                        remove = Some(k);
+                    }
+                    // Once it's on its way there is nothing left to press.
+                    if !(agent.interrupting && k == 0)
+                        && ui
+                            .add(egui::Button::new(RichText::new(format!("{} Send now", icon::LIGHTNING)).small()).fill(theme::HOVER).corner_radius(10))
+                            .on_hover_text("Stop the current step and send this next. What's already done is kept")
+                            .clicked()
+                    {
+                        send_now = Some(k);
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(egui::Label::new(RichText::new(&shown).small().color(theme::TEXT)).truncate()).on_hover_text(&q.text);
+                    });
+                });
+            });
+        });
+        ui.add_space(4.0);
+    }
+    if let Some(k) = remove {
+        agent.queued.remove(k);
+    }
+    if let Some(k) = send_now {
+        agent.send_now(k);
+    }
 }
 
 fn round_button(ui: &mut egui::Ui, ic: &str, fill: Color32) -> egui::Response {

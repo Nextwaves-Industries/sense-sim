@@ -1073,6 +1073,168 @@ mod tests {
         }
     }
 
+    /// A dipole on z, drawn so the layered solver can take it.
+    fn flat_dipole(l_mm: f64, w_mm: f64, f_lo: f64, f_hi: f64) -> Project {
+        let mut p = Project::from_template("custom", Some("915MHz")).unwrap();
+        antenna_core::freeform::draw(&mut p, &serde_json::json!({
+            "vars": { "L": format!("{l_mm}mm"), "w": format!("{w_mm}mm"), "gp": "2mm", "Z0": "73" },
+            "parts": [{ "kind": "strip", "name": "arm", "path": [["gp/2", "0"], ["L/2", "0"]], "w": "w", "mirror": "x" }],
+            "feeds": [{ "a": ["-gp/2", "0"], "b": ["gp/2", "0"], "width": "w" }]
+        })).unwrap();
+        p.setup.f_lo = f_lo;
+        p.setup.f_hi = f_hi;
+        p.setup.far_freqs = vec![(f_lo + f_hi) / 2.0];
+        p.setup.field_planes = false;
+        p
+    }
+
+    /// The layered solver against openEMS, which meshes the same layers, built to size. Layers thick
+    /// enough to mesh at a sensible price, and wide enough to stand in for infinite ones, so this
+    /// checks the Green's function and not what a label's edge does.
+    /// `cargo test --bin SenseSim antenna_fdtd_agrees_with_the_layered_solver -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn antenna_fdtd_agrees_with_the_layered_solver() {
+        use antenna_core::stack::{Layer, Stack};
+        let margin = 0.08;
+        for (name, stack) in [
+            ("1 mm of paper over it", Stack { above: vec![Layer::new("paper", "Paper", 1e-3)], margin, ..Default::default() }),
+            ("on 1.6 mm of FR-4", Stack { below: vec![Layer::new("board", "FR-4", 1.6e-3)], margin, ..Default::default() }),
+            ("between 1 mm paper and 1 mm polycarbonate", Stack { above: vec![Layer::new("paper", "Paper", 1e-3)], below: vec![Layer::new("case", "Polycarbonate", 1e-3)], margin, ..Default::default() }),
+        ] {
+            let mut base = flat_dipole(150.0, 4.0, 650e6, 1100e6);
+            base.setup.cells_per_lambda = 40.0;
+            base.stack = stack;
+            let mut mom = base.clone();
+            mom.setup.solver = SolverKind::MomSurface;
+            mom.setup.edges_per_lambda = 96.0;
+            let c = ctx();
+            let a = simulate(&mom, &c, &RunOptions::default()).unwrap();
+            let b = fdtd(base);
+            let (fa, fb) = (zero_reactance(&a).unwrap(), zero_reactance(&b).unwrap());
+            let (ra, rb) = (at(&a, fa).1.re, at(&b, fb).1.re);
+            let (ma, mb) = (a.metrics(0, 0).unwrap(), b.metrics(0, 0).unwrap());
+            eprintln!("{name}: layered MoM {} unknowns {:.1} s: X = 0 at {:.1} MHz, R {ra:.1}, gain {:.2} dBi, eff {:.3}; FDTD {:.2} M cells {:.0} s: X = 0 at {:.1} MHz, R {rb:.1}, gain {:.2} dBi, eff {:.3}; {:+.2} % apart", a.size, a.seconds, fa / 1e6, ma.peak_gain_dbi, ma.rad_efficiency, b.size as f64 / 1e6, b.seconds, fb / 1e6, mb.peak_gain_dbi, mb.rad_efficiency, (fa / fb - 1.0) * 100.0);
+            assert!((fa / fb - 1.0).abs() < 0.025, "{name}: resonance {fa} vs {fb}");
+            assert!((ra / rb - 1.0).abs() < 0.2, "{name}: resistance {ra} vs {rb}");
+            assert!((ma.peak_gain_dbi - mb.peak_gain_dbi).abs() < 0.5, "{name}: gain {} vs {}", ma.peak_gain_dbi, mb.peak_gain_dbi);
+        }
+    }
+
+    /// A coupled loop drawn with traces wide enough for FDTD to give them several cells, which it
+    /// can't afford on a real inlay. If the two agree here, a gap between them on a thin trace comes
+    /// from resolving the trace, not from the physics of a loop coupled to a radiator.
+    /// `cargo test --bin SenseSim antenna_fdtd_agrees_on_a_wide_coupled_loop -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn antenna_fdtd_agrees_on_a_wide_coupled_loop() {
+        for gap_mm in [6.0, 3.5] {
+            let mut p = Project::from_template("custom", Some("915MHz")).unwrap();
+            antenna_core::freeform::draw(&mut p, &serde_json::json!({
+                "vars": { "L": "135mm", "w": "2mm", "A": "15mm", "B": "20mm", "gc": format!("{gap_mm}mm"), "gp": "1.5mm", "Z0": "200" },
+                "parts": [
+                    { "kind": "strip", "name": "loop", "path": [["gp/2", "-B"], ["A", "-B"], ["A", "0"], ["-A", "0"], ["-A", "-B"], ["-gp/2", "-B"]], "w": "w" },
+                    { "kind": "strip", "name": "radiator", "path": [["-L/2", "gc"], ["L/2", "gc"]], "w": "w" }
+                ],
+                "feeds": [{ "a": ["-gp/2", "-B"], "b": ["gp/2", "-B"], "width": "w" }]
+            })).unwrap();
+            p.setup.f_lo = 700e6;
+            p.setup.f_hi = 1200e6;
+            p.setup.far_freqs = vec![915e6];
+            p.setup.field_planes = false;
+            p.setup.cells_per_lambda = 24.0;
+            p.setup.max_steps = 3_000_000;
+            let c = ctx();
+            let mut results = Vec::new();
+            for edges in [192.0, 768.0] {
+                let mut mom = p.clone();
+                mom.setup.solver = SolverKind::MomSurface;
+                mom.setup.edges_per_lambda = edges;
+                mom.setup.mom_samples = 41;
+                results.push((edges, simulate(&mom, &c, &RunOptions::default()).unwrap()));
+            }
+            let b = fdtd(p);
+            eprintln!("gap {gap_mm} mm centre to centre, 2 mm traces. FDTD {:.2} M cells, {:.0} s {:?}", b.size as f64 / 1e6, b.seconds, b.warnings);
+            for f in [800e6, 860e6, 902e6, 915e6, 928e6, 980e6, 1050e6] {
+                let zb = at(&b, f).1;
+                let list: Vec<String> = results.iter().map(|(e, r)| { let z = at(r, f).1; format!("MoM {e:.0}/λ {:>6.1} {:>+7.1}j", z.re, z.im) }).collect();
+                eprintln!("{:>5.0} MHz: {} | FDTD {:>6.1} {:>+7.1}j", f / 1e6, list.join(" | "), zb.re, zb.im);
+            }
+        }
+    }
+
+    /// A bare loop at rising FDTD densities, against the solvers it disagreed with. Nothing near it, so
+    /// only the loop's own inductance is in question.
+    /// `cargo test --bin SenseSim antenna_fdtd_bare_loop_against_density -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn antenna_fdtd_bare_loop_against_density() {
+        for cells in [24.0, 48.0] {
+            let mut p = Project::from_template("custom", Some("915MHz")).unwrap();
+            antenna_core::freeform::draw(&mut p, &serde_json::json!({
+                "vars": { "A": "15mm", "B": "20mm", "w": "2mm", "gp": "1.5mm", "Z0": "200" },
+                "parts": [{ "kind": "strip", "name": "loop", "path": [["gp/2", "0"], ["A", "0"], ["A", "B"], ["-A", "B"], ["-A", "0"], ["-gp/2", "0"]], "w": "w" }],
+                "feeds": [{ "a": ["-gp/2", "0"], "b": ["gp/2", "0"], "width": "w" }]
+            })).unwrap();
+            p.setup.f_lo = 300e6;
+            p.setup.f_hi = 1200e6;
+            p.setup.far_freqs = Vec::new();
+            p.setup.field_planes = false;
+            p.setup.cells_per_lambda = cells;
+            p.setup.max_steps = 3_000_000;
+            let b = fdtd(p);
+            let list: Vec<String> = [400e6, 600e6, 800e6, 915e6, 1100e6].iter().map(|f| { let z = at(&b, *f).1; format!("{:.0} MHz {:.2} {:+.1}j", f / 1e6, z.re, z.im) }).collect();
+            eprintln!("FDTD {cells} cells/λ, {:.2} M cells, {:.0} s {:?}: {}", b.size as f64 / 1e6, b.seconds, b.warnings, list.join(" | "));
+        }
+    }
+
+    /// The design the search ranks first, against openEMS, which owes nothing to the method of moments.
+    /// Fine coupled traces are where it could go wrong, and every ranking rests on them. In free space,
+    /// so FDTD needn't mesh a film as well. An hour or more:
+    /// `cargo test --bin SenseSim antenna_fdtd_agrees_on_the_searched_tag -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn antenna_fdtd_agrees_on_the_searched_tag() {
+        use antenna_core::tag::{chip_at, power_transfer};
+        let mut base = Project::from_template("tag_loop", Some("915MHz")).unwrap();
+        for (name, mm) in [("Lx", 93.356), ("w", 0.567), ("a", 16.338), ("b", 14.906), ("wl", 1.867), ("gc", 1.817), ("g", 0.763), ("Hm", 3.474), ("s", 2.655), ("x0", 17.502), ("Lp", 17.954), ("Hp", 13.055)] {
+            base.params.iter_mut().find(|r| r.name == name).unwrap().expr = format!("{mm}mm");
+        }
+        base.params.iter_mut().find(|r| r.name == "n").unwrap().expr = "2".into();
+        base.setup.f_lo = 800e6;
+        base.setup.f_hi = 1030e6;
+        base.setup.far_freqs = vec![915e6];
+        base.setup.field_planes = false;
+        base.setup.cells_per_lambda = 110.0;
+        base.setup.max_steps = 3_000_000;
+        let mut mom = base.clone();
+        mom.setup.solver = SolverKind::MomSurface;
+        mom.setup.edges_per_lambda = 192.0;
+        mom.setup.mom_samples = 47;
+        let c = ctx();
+        let a = simulate(&mom, &c, &RunOptions::default()).unwrap();
+        let b = fdtd(base);
+        eprintln!("MoM {} unknowns {:.0} s; FDTD {:.1} M cells {:.0} s; {:?}", a.size, a.seconds, b.size as f64 / 1e6, b.seconds, b.warnings);
+        let mut worst_x = 0.0f64;
+        for f in [860e6, 880e6, 902e6, 915e6, 928e6, 950e6, 980e6] {
+            let (za, zb) = (at(&a, f).1, at(&b, f).1);
+            let chip = chip_at((15.0, -231.0), f);
+            eprintln!("{:>4.0} MHz: MoM {:>6.1} {:>+7.1}j, power {:.2}; FDTD {:>6.1} {:>+7.1}j, power {:.2}", f / 1e6, za.re, za.im, power_transfer(za, chip), zb.re, zb.im, power_transfer(zb, chip));
+            if (902e6..=928e6).contains(&f) {
+                worst_x = worst_x.max((za.im - zb.im).abs() / za.im.abs());
+            }
+        }
+        let (ma, mb) = (a.metrics(0, 0).unwrap(), b.metrics(0, 0).unwrap());
+        eprintln!("gain: MoM {:.2} dBi, FDTD {:.2} dBi; worst reactance difference in band {:.1} %", ma.peak_gain_dbi, mb.peak_gain_dbi, worst_x * 100.0);
+        // Measured at 14 %, with gain within 0.04 dB. Not agreement. On a bare loop the method of
+        // moments lands on the textbook inductance and on the thin-wire solver at low frequency,
+        // and FDTD climbs towards them with density without arriving (153, then 158 ohm against
+        // 170 at 400 MHz; `antenna_fdtd_bare_loop_against_density`). So the MoM is the better
+        // supported, and only a measured tag can settle it. This holds the gap from growing.
+        assert!(worst_x < 0.2, "{worst_x}");
+        assert!((ma.peak_gain_dbi - mb.peak_gain_dbi).abs() < 0.5);
+    }
+
     /// FDTD and MoM on the same gate, field by field through the aisle, and the read
     /// shares that come out. A smaller gate than the template, to keep it a few minutes:
     /// `cargo test --bin SenseSim antenna_fdtd_gate_agrees_with_mom -- --ignored --nocapture`

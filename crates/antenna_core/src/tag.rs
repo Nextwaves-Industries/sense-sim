@@ -40,6 +40,12 @@ pub fn chip(id: &str) -> Option<&'static TagChip> {
     CHIPS.iter().find(|c| c.id == id)
 }
 
+/// A chip's series impedance at `f`, from its value at 915 MHz: a resistance and a capacitance. Its
+/// reactance moves with frequency, which is what makes a band as wide as 860-960 MHz hard.
+pub fn chip_at(z915: (f64, f64), f: f64) -> C64 {
+    C64::new(z915.0, z915.1 * 915e6 / f)
+}
+
 /// The share of the power an antenna collects that reaches the chip, 0 to 1: one minus the power
 /// reflection |(Za - Zc*) / (Za + Zc)|² of NXP AN1715, equation 36.
 pub fn power_transfer(za: C64, zc: C64) -> f64 {

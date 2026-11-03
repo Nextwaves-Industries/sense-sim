@@ -453,12 +453,12 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ),
         def(
             "add_structure",
-            "Add building structure that isn't in the asset library: floor slab, walls, columns, ceiling, roof beams or plain blocks. Either give one piece (kind, size_m = [length, height, depth], x, z, yaw_deg, material), or from_photo = image_id to build the room shell you estimated: floor, walls, columns and always a ceiling, painted with the photo. Give it room and height_m, your estimates; refine it with materials; pass ceiling false only for an outdoor photo. A ceiling without size_m covers the whole scene at height_m (default: tallest object + 1 m); with_beams adds roof trusses under it. Ceilings are see-through from above and are the main mounting surface for RTLS anchors.",
+            "Add building structure that isn't in the asset library: floor slab, walls, columns, ceiling, roof beams, plain blocks or a glass door. Either give one piece (kind, size_m = [length, height, depth], x, z, yaw_deg, material), or from_photo = image_id to build the room shell you estimated: floor, walls, columns and always a ceiling, painted with the photo. Give it room and height_m, your estimates; refine it with materials; pass ceiling false only for an outdoor photo. A ceiling without size_m covers the whole scene at height_m (default: tallest object + 1 m); with_beams adds roof trusses under it. Ceilings are see-through from above and are the main mounting surface for RTLS anchors. A wall or other piece with a see-through material such as glass counts as glass in radio predictions. kind glass_door is a closed glass door in an aluminium frame, size_m = [width, height, any], default 1.8 by 2.1 m: stand it in a gap in the wall, since inside a solid wall radio still pays for the wall, close the wall above it with a wall piece at y = its height, and put door, entrance or exit in its name so RFID portals find it.",
             json!({
                 "type": "object",
                 "properties": {
                     "from_photo": { "type": "string" },
-                    "kind": { "type": "string", "enum": ["floor", "wall", "column", "block", "ceiling", "roof", "beam"] },
+                    "kind": { "type": "string", "enum": ["floor", "wall", "column", "block", "ceiling", "roof", "beam", "glass_door"] },
                     "size_m": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "x": { "type": "number" }, "z": { "type": "number" }, "y": { "type": "number" },
                     "height_m": { "type": "number", "description": "ceiling height" },
@@ -523,7 +523,7 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
         ),
         def(
             "set_object_material",
-            "Change the look of a placed object: any library asset or generated piece. Recolors all of it, replacing its base texture unless keep_texture (which tints it instead). Use the color perceive_photo measured for that object. Saved layouts keep it; USDA export to other tools shows the original look of library assets.",
+            "Change the look of a placed object: any library asset or generated piece. Recolors all of it, replacing its base texture unless keep_texture (which tints it instead). Use the color perceive_photo measured for that object. Saved layouts keep it; USDA export to other tools shows the original look of library assets. A see-through look (the glass preset, or opacity under 0.9) also makes it glass in radio predictions; other looks leave radio alone.",
             json!({
                 "type": "object",
                 "properties": {
@@ -589,7 +589,6 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
     v.extend(crate::outcomes::tools::defs());
     v.push(bim_tool_def());
     v.extend(crate::plant::tools::defs());
-    #[cfg(feature = "design")]
     v.extend(crate::sim::tools::defs());
     v.extend(toolmaker::defs());
     #[cfg(feature = "antenna-studio")]
@@ -677,8 +676,9 @@ pub fn run_tool_jobs(world: &mut World) {
     let jobs: Vec<ToolJob> = world.resource::<ToolBridge>().rx.try_iter().collect();
     for job in jobs {
         if job.ctx.origin == Origin::Mcp {
-            let summary = format!("{} {}", job.name, short(&job.input.to_string(), 160));
-            world.resource_mut::<Agent>().transcript.push(ChatItem::Info(format!("MCP client → {summary}")));
+            // To the log, not the chat: that's the user's conversation with the assistant, and a
+            // client can make hundreds of calls.
+            debug!("MCP client → {} {}", job.name, short(&job.input.to_string(), 160));
         }
         run_gated(world, job);
     }
@@ -1198,6 +1198,20 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
                 return defer(world, Wait::Place { items, reply, started: Instant::now(), extra: Value::Null });
             }
         }
+        "add_structure" if i["kind"].as_str() == Some("glass_door") => {
+            let (width, height) = vec3(&i["size_m"]).map_or(assetgen::GLASS_DOOR_M, |s| (s.x, s.y));
+            match assetgen::glass_door(width, height) {
+                Ok(door) => {
+                    world.resource_mut::<Catalog>().dims.insert(door.path.to_string_lossy().replace('\\', "/"), door.size.to_array());
+                    world.resource_mut::<Library>().rescan();
+                    world.resource_mut::<PrototypeCache>().request(&door.path);
+                    let transform = Transform::from_xyz(f(i, "x").unwrap_or(0.0), f(i, "y").unwrap_or(0.0), f(i, "z").unwrap_or(0.0)).with_rotation(Quat::from_rotation_y(f(i, "yaw_deg").unwrap_or(0.0).to_radians()));
+                    let items = vec![PlaceItem { usd: door.path, transform, name: i["name"].as_str().filter(|s| !s.is_empty()).map(str::to_string), ..Default::default() }];
+                    return defer(world, Wait::Place { items, reply, started: Instant::now(), extra: Value::Null });
+                }
+                Err(e) => ToolOutput::err(format!("{e:#}")),
+            }
+        }
         "add_structure" => {
             use super::structures::{self, Kind, Piece};
             let mut extra = Value::Null;
@@ -1506,11 +1520,6 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
             }
             None => ToolOutput::err("path is required"),
         },
-        #[cfg(feature = "design")]
-        "open_in_design" => match crate::design::open_file(world, Path::new(i["path"].as_str().unwrap_or(""))) {
-            Ok(said) => ToolOutput::text(said),
-            Err(e) => ToolOutput::err(e),
-        },
         "get_screen" => match world.resource::<Agent>().screen_note() {
             Some(note) => ToolOutput::text(note),
             None => ToolOutput::text("The user has turned off sharing what is on screen. Ask them if you need to know."),
@@ -1532,7 +1541,6 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
         }
         "site_import_bim" => return import_bim(world, i, reply),
         // Before the outcome recipes, which claim the rest of the `design_` prefix.
-        #[cfg(feature = "design")]
         other if crate::sim::tools::is_tool(other) => crate::sim::tools::start(world, other, i),
         other if crate::outcomes::tools::is_tool(other) => match crate::outcomes::tools::start(world, other, i) {
             Some(out) => out,
@@ -2077,8 +2085,11 @@ fn import_bim(world: &mut World, i: &Value, reply: Sender<ToolOutput>) -> Option
         return Some(ToolOutput::err(format!("{path}: nothing to place ({} entities skipped)", building.skipped.len())));
     }
     let mut items = Vec::with_capacity(pieces.len());
+    let glass = assetgen::Mat::preset("glass").unwrap_or_default();
     for (p, name, material) in &pieces {
-        match super::structures::usd_for(p.kind, p.size) {
+        // What radio sees as glass should look like glass, not a grey block.
+        let usd = if material.0 == crate::rtls::radio::Material::Glass { super::structures::usd_with_material(p.kind, p.size, &glass) } else { super::structures::usd_for(p.kind, p.size) };
+        match usd {
             Ok(usd) => {
                 crate::rtls::radio::set_object_material(name, Some(*material));
                 items.push(PlaceItem {
@@ -2113,6 +2124,22 @@ mod lock_tests {
     fn tool(world: &mut World, name: &str, input: Value) -> ToolOutput {
         let (reply, _rx) = unbounded();
         start(world, ToolJob { name: name.into(), input, reply, ctx: CallCtx::default(), check_only: false }).expect("finishes at once")
+    }
+
+    /// One client's `site_trace` calls filled the chat, burying the conversation.
+    #[test]
+    fn a_call_from_an_mcp_client_is_answered_and_stays_out_of_the_chat() {
+        let mut w = World::new();
+        w.insert_resource(Agent::new(Default::default()));
+        w.init_resource::<ToolBridge>();
+        w.init_resource::<PendingTools>();
+        let (reply, answer) = unbounded();
+        let tx = w.resource::<ToolBridge>().tx.clone();
+        let ctx = CallCtx { origin: Origin::Mcp, ..CallCtx::default() };
+        tx.send(ToolJob { name: "no_such_tool".into(), input: json!({ "from": [0.0, 1.2, 0.0] }), reply, ctx, check_only: false }).unwrap();
+        run_tool_jobs(&mut w);
+        answer.try_recv().expect("the client still gets its answer");
+        assert!(w.resource::<Agent>().transcript.is_empty());
     }
 
     #[test]
@@ -2189,10 +2216,9 @@ mod routing_tests {
     }
 
     /// All six failed from the assistant: the outcome recipes claimed the `design_` prefix first.
-    #[cfg(feature = "design")]
     #[test]
-    fn cad_tools_arent_taken_for_outcome_recipes() {
-        for name in ["design_commands", "design_run", "design_bodies", "design_faces", "design_show", "design_send_to_scene"] {
+    fn sim_tools_arent_taken_for_outcome_recipes() {
+        for name in ["sim_faces", "sim_catalog", "sim_run"] {
             assert!(crate::sim::tools::is_tool(name), "{name}");
             assert!(tool_defs(false).iter().any(|d| d.name == name), "{name} is still offered");
             assert!(reaches_a_handler(name), "{name}");

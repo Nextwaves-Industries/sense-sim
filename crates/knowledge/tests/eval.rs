@@ -191,7 +191,7 @@ fn documents_are_traceable() {
 #[test]
 fn named_tools_exist() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
-    let code: String = ["rtls/tools.rs", "plant/tools.rs", "agent/tools.rs", "antenna/tools.rs", "antenna/gate.rs", "antenna/reconfig.rs", "antenna/assist.rs", "outcomes/tools.rs"].iter().map(|f| std::fs::read_to_string(src.join(f)).unwrap()).collect();
+    let code: String = ["rtls/tools.rs", "plant/tools.rs", "agent/tools.rs", "antenna/tools.rs", "antenna/gate.rs", "antenna/reconfig.rs", "antenna/assist.rs", "antenna/tagjob.rs", "outcomes/tools.rs"].iter().map(|f| std::fs::read_to_string(src.join(f)).unwrap()).collect();
     let mut problems = Vec::new();
     for d in builtin_docs() {
         for c in &d.chunks {

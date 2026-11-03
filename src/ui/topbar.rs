@@ -102,7 +102,7 @@ pub fn show(
     flags: &mut Flags,
 ) {
     let scene = !slot.canvas_taken();
-    let thing = if slot.studio_open { "antenna project" } else if slot.design_open { "design" } else { "layout" };
+    let thing = if slot.studio_open { "antenna project" } else { "layout" };
     let (active_dl, queued_dl) = library.download_count();
     egui::Panel::top("menu").exact_size(46.0).frame(egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 6))).show(root, |ui| {
         ui.horizontal_centered(|ui| {
@@ -113,11 +113,8 @@ pub fn show(
 
             // What is in front: its name (click to rename) and where it lives.
             let name_font = theme::bold(16.0);
-            let design = slot.design_info.designs.get(slot.design_info.active).map_or_else(|| "3D Design".to_string(), |d| d.0.clone());
             let shown = if slot.studio_open {
                 slot.studio_doc.name.clone()
-            } else if slot.design_open {
-                design.clone()
             } else if state.scene_name.is_empty() {
                 crate::APP_NAME.to_string()
             } else {
@@ -130,8 +127,6 @@ pub fn show(
                 if r.changed() {
                     slot.studio_rename = Some(name);
                 }
-            } else if slot.design_open {
-                ui.label(RichText::new(shown).font(name_font));
             } else {
                 ui.add(egui::TextEdit::singleline(&mut state.scene_name).font(name_font).frame(egui::Frame::NONE).hint_text(crate::APP_NAME).desired_width(w.clamp(40.0, 280.0)).id_salt("scene_name"))
                     .on_hover_text("Scene name: click to rename");
@@ -144,9 +139,6 @@ pub fn show(
                     Some(f) => (f.clone(), doc.path.clone().unwrap_or_default()),
                     None => ("Draft".to_string(), "This antenna project isn't saved to a file yet".to_string()),
                 }
-            } else if slot.design_open {
-                let unsaved = slot.design_info.designs.get(slot.design_info.active).is_some_and(|d| d.1);
-                ((if unsaved { "Unsaved" } else { "Design" }).to_string(), "Save and open designs from the Design file menu".to_string())
             } else {
                 match &state.layout_path {
                     Some(p) => (p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(), p.display().to_string()),
@@ -180,10 +172,6 @@ pub fn show(
                         flags.open |= menu_entry(ui, icon::FOLDER_OPEN, "Open antenna project…", "Ctrl+O", true);
                         flags.save |= menu_entry(ui, icon::FLOPPY_DISK, "Save antenna project", "Ctrl+S", true);
                         flags.save_as |= menu_entry(ui, icon::FLOPPY_DISK, "Save antenna project as…", "Ctrl+Shift+S", true);
-                        ui.separator();
-                    } else if slot.design_open {
-                        flags.new |= menu_entry(ui, icon::PLUS, "New design", "Ctrl+N", true);
-                        flags.save |= menu_entry(ui, icon::FLOPPY_DISK, "Save design", "Ctrl+S", true);
                         ui.separator();
                     } else {
                         flags.new |= menu_entry(ui, icon::PLUS, "New…", "Ctrl+N", true);

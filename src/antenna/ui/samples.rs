@@ -44,6 +44,8 @@ pub fn opening_words(s: &Sample) -> &'static str {
             Opens::FarField => "Solves in seconds",
             Opens::Reconfig => "Solves when opened",
             Opens::Gate => "Solves when opened",
+            Opens::Drawing => "Opens on the drawing",
+            Opens::Phased | Opens::DirectionFinding => "Solves when opened",
         }
     }
 }
@@ -68,10 +70,16 @@ pub fn open(st: &mut Studio, s: &'static Sample) -> Result<(), String> {
     u.far_k = 0;
     u.plane_k = 0;
     u.use_drive = !s.drive.is_empty();
+    u.draw = Default::default();
     let page = match s.opens {
         Opens::FarField => {
             u.view = view3d::ViewMode::Pattern;
             Page::FarField
+        }
+        Opens::Drawing => {
+            u.view = view3d::ViewMode::Model;
+            u.draw.tool = super::draw::Tool::Select;
+            Page::Draw
         }
         Opens::Reconfig => {
             u.view = view3d::ViewMode::Model;
@@ -81,11 +89,26 @@ pub fn open(st: &mut Studio, s: &'static Sample) -> Result<(), String> {
             u.view = view3d::ViewMode::Model;
             Page::Gate
         }
+        Opens::Phased => {
+            u.view = view3d::ViewMode::Pattern;
+            Page::Phased
+        }
+        Opens::DirectionFinding => {
+            u.view = view3d::ViewMode::Model;
+            Page::DirectionFinding
+        }
     };
     u.page = page;
     // It stays on this page's message and view rather than resetting them on arrival.
     u.shown_page = Some(page);
     let note = match s.opens {
+        // On the drawing, which is what it's for: the solve is there when you turn to the results.
+        Opens::Drawing => {
+            super::draw::entered(st);
+            st.ui.reconfig.view_f = Some(s.centre());
+            st.run();
+            s.about.to_string()
+        }
         Opens::FarField => match stored(s.id) {
             Some(r) => {
                 let k = r.far_index(s.centre()).unwrap_or(0);
@@ -101,6 +124,11 @@ pub fn open(st: &mut Studio, s: &'static Sample) -> Result<(), String> {
         },
         Opens::Reconfig => {
             st.run_reconfig();
+            s.about.to_string()
+        }
+        Opens::Phased | Opens::DirectionFinding => {
+            st.ui.reconfig.view_f = Some(s.centre());
+            st.run();
             s.about.to_string()
         }
         Opens::Gate => {
@@ -137,7 +165,9 @@ fn card(ui: &mut egui::Ui, st: &mut Studio, index: usize, s: &'static Sample, w:
     let line = format!("{} · {}", s.band_text(), opening_words(s));
     let sub = ui.painter().layout(line, egui::FontId::proportional(11.0), theme::WEAK, w);
     ui.painter().galley(pic.left_bottom() + vec2(0.0, 5.0 + title_h), sub, theme::WEAK);
-    let resp = resp.on_hover_text(s.about).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let held = s.held_to();
+    let tip = if held.is_empty() { s.about.to_string() } else { format!("{}\n\nChecked against a solver: {held}.", s.about) };
+    let resp = resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.clicked()
         && let Err(e) = open(st, s)
     {
@@ -216,6 +246,24 @@ mod tests {
             assert!(r.warnings.iter().all(|w| !w.contains("diverged")), "{id}: {:?}", r.warnings);
         }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// A drawn sample opens on the drawing with nothing to set up, and still solves.
+    #[test]
+    fn antenna_a_drawn_sample_opens_on_the_drawing_and_solves() {
+        let mut st = Studio::default();
+        let s = samples::by_id("drawn_dipole").unwrap();
+        open(&mut st, s).unwrap();
+        assert_eq!(st.ui.page, Page::Draw);
+        assert_eq!(st.ui.draw.tool, super::super::draw::Tool::Select);
+        let t0 = std::time::Instant::now();
+        while st.busy() {
+            assert!(t0.elapsed().as_secs() < 120);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let r = st.latest().expect("solved");
+        let f = s.figures(&r).unwrap();
+        assert!(s.shortfalls(&f).is_empty(), "{:?}", s.shortfalls(&f));
     }
 
     /// A sample with a stored result opens at once with it; one without solves.

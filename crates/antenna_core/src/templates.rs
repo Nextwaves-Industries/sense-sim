@@ -18,11 +18,12 @@ pub enum Category {
     Aperture,
     Wideband,
     Reconfigurable,
+    Array,
     Custom,
 }
 
 impl Category {
-    pub const ALL: [Category; 7] = [Category::Wire, Category::Planar, Category::Printed, Category::Aperture, Category::Wideband, Category::Reconfigurable, Category::Custom];
+    pub const ALL: [Category; 8] = [Category::Wire, Category::Planar, Category::Printed, Category::Aperture, Category::Wideband, Category::Reconfigurable, Category::Array, Category::Custom];
     pub fn label(self) -> &'static str {
         match self {
             Category::Wire => "Wire",
@@ -31,6 +32,7 @@ impl Category {
             Category::Aperture => "Aperture",
             Category::Wideband => "Wideband",
             Category::Reconfigurable => "Reconfigurable",
+            Category::Array => "Array",
             Category::Custom => "Custom",
         }
     }
@@ -48,6 +50,10 @@ impl Ctx<'_> {
             Some(v) => Ok(*v),
             None => bail!("variable '{name}' is missing from the table"),
         }
+    }
+    /// A row added after projects were first saved: one saved without it builds as it did.
+    fn get_or(&self, name: &str, default: f64) -> f64 {
+        self.v.get(name).copied().unwrap_or(default)
     }
     fn count(&self, name: &str, min: usize, max: usize) -> Result<usize> {
         Ok((self.get(name)?.round().max(0.0) as usize).clamp(min, max))
@@ -454,8 +460,10 @@ fn patch_air_params() -> Vec<Param> {
         p("h", "0.025*lambda0", "Height above the ground plate"),
         p("L", "0.46*lambda0", "Patch length (resonant, along y)"),
         p("W", "0.6*lambda0", "Patch width"),
-        p("G", "1.1*lambda0", "Ground plate size"),
-        p("yf", "0.22*L", "Probe offset from the centre"),
+        p("G", "1.1*lambda0", "Ground plate size along x"),
+        p("Gy", "G", "Ground plate size along y"),
+        p("yf", "0.22*L", "Probe offset from the centre, along the resonant length"),
+        p("xf", "0", "Probe offset from the centre, across it: excites the other mode too"),
         p("wp", "lambda0/80", "Probe width"),
         p("Z0", "50", "Port impedance"),
     ]);
@@ -463,12 +471,13 @@ fn patch_air_params() -> Vec<Param> {
 }
 fn patch_air(c: &Ctx) -> Result<Geometry> {
     let (h, l, w, gs, yf, wp, z0) = (c.get("h")?, c.get("L")?, c.get("W")?, c.get("G")?, c.get("yf")?, c.get("wp")?, c.get("Z0")?);
+    let (gy, xf) = (c.get_or("Gy", gs), c.get_or("xf", 0.0));
     Ok(Geometry {
         solids: vec![
-            bx("ground", c.metal, [-gs / 2.0, -gs / 2.0, 0.0], [gs / 2.0, gs / 2.0, 0.0]),
+            bx("ground", c.metal, [-gs / 2.0, -gy / 2.0, 0.0], [gs / 2.0, gy / 2.0, 0.0]),
             bx("patch", c.metal, [-w / 2.0, -l / 2.0, h], [w / 2.0, l / 2.0, h]),
         ],
-        ports: vec![port("probe", [0.0, yf, 0.0], [0.0, yf, h], wp, z0)],
+        ports: vec![port("probe", [xf, yf, 0.0], [xf, yf, h], wp, z0)],
         axis_forward: true,
         hints: vec![hint([-w / 2.0, -l / 2.0, 0.0], [w / 2.0, l / 2.0, h], l / 40.0)],
         ..Default::default()
@@ -481,6 +490,7 @@ fn pifa_params() -> Vec<Param> {
         p("L", "0.207*lambda0", "Plate length from the short"),
         p("W", "0.1*lambda0", "Plate width"),
         p("h", "0.05*lambda0", "Height"),
+        p("ws", "W", "Width of the short: narrower lowers the frequency, at less bandwidth"),
         p("xf", "0.035*lambda0", "Feed distance from the short"),
         p("Gx", "0.6*lambda0", "Ground length"),
         p("Gy", "0.4*lambda0", "Ground width"),
@@ -491,11 +501,12 @@ fn pifa_params() -> Vec<Param> {
 }
 fn pifa(c: &Ctx) -> Result<Geometry> {
     let (l, w, h, xf, gx, gy, wp, z0) = (c.get("L")?, c.get("W")?, c.get("h")?, c.get("xf")?, c.get("Gx")?, c.get("Gy")?, c.get("wp")?, c.get("Z0")?);
+    let ws = c.get_or("ws", w);
     Ok(Geometry {
         solids: vec![
             bx("ground", c.metal, [-gx / 4.0, -gy / 2.0, 0.0], [3.0 * gx / 4.0, gy / 2.0, 0.0]),
             bx("top plate", c.metal, [0.0, -w / 2.0, h], [l, w / 2.0, h]),
-            bx("short", c.metal, [0.0, -w / 2.0, 0.0], [0.0, w / 2.0, h]),
+            bx("short", c.metal, [0.0, -ws / 2.0, 0.0], [0.0, ws / 2.0, h]),
         ],
         ports: vec![port("feed", [xf, 0.0, 0.0], [xf, 0.0, h], wp, z0)],
         hints: vec![hint([0.0, -w / 2.0, 0.0], [l, w / 2.0, h], (h / 4.0).min(l / 30.0))],
@@ -510,6 +521,7 @@ fn slot_params() -> Vec<Param> {
         p("ws", "lambda0/40", "Slot width"),
         p("Gx", "0.8*lambda0", "Plate size along x"),
         p("Gy", "1.0*lambda0", "Plate size along y"),
+        p("yf", "0", "Feed offset along the slot: towards an end brings the impedance down"),
         p("wp", "lambda0/60", "Feed width"),
         p("Z0", "500", "Port impedance"),
     ]);
@@ -517,12 +529,13 @@ fn slot_params() -> Vec<Param> {
 }
 fn slot(c: &Ctx) -> Result<Geometry> {
     let (ls, ws, gx, gy, wp, z0) = (c.get("Ls")?, c.get("ws")?, c.get("Gx")?, c.get("Gy")?, c.get("wp")?, c.get("Z0")?);
+    let yf = c.get_or("yf", 0.0);
     let (x, y, sx, sy) = (gx / 2.0, gy / 2.0, ws / 2.0, ls / 2.0);
     // Outer rectangle, then the slot cut through a zero-width keyhole.
     let pts = vec![[-x, -y], [x, -y], [x, y], [-x, y], [-x, -y], [-sx, -sy], [-sx, sy], [sx, sy], [sx, -sy], [-sx, -sy]];
     Ok(Geometry {
         solids: vec![poly("plate", c.metal, 2, 0.0, pts)],
-        ports: vec![port("feed", [-sx, 0.0, 0.0], [sx, 0.0, 0.0], wp, z0)],
+        ports: vec![port("feed", [-sx, yf, 0.0], [sx, yf, 0.0], wp, z0)],
         hints: vec![hint([-sx, -sy, 0.0], [sx, sy, 0.0], ws / 3.0)],
         ..Default::default()
     })
@@ -643,20 +656,22 @@ fn patch_probe_params() -> Vec<Param> {
     v.extend([
         p("Gx", "max(W+6*h,1.3*W)", "Ground size along x"),
         p("Gy", "max(L+6*h,1.3*L)", "Ground size along y"),
-        p("yf", "0.25*L", "Probe offset from the centre"),
+        p("yf", "0.25*L", "Probe offset from the centre, along the resonant length"),
+        p("xf", "0", "Probe offset from the centre, across it: excites the other mode too"),
         p("Z0", "50", "Port impedance"),
     ]);
     v
 }
 fn patch_probe(c: &Ctx) -> Result<Geometry> {
     let (h, w, l, gx, gy, yf, z0) = (c.get("h")?, c.get("W")?, c.get("L")?, c.get("Gx")?, c.get("Gy")?, c.get("yf")?, c.get("Z0")?);
+    let xf = c.get_or("xf", 0.0);
     Ok(Geometry {
         solids: vec![
             bx("substrate", c.substrate, [-gx / 2.0, -gy / 2.0, 0.0], [gx / 2.0, gy / 2.0, h]),
             bx("ground", c.metal, [-gx / 2.0, -gy / 2.0, 0.0], [gx / 2.0, gy / 2.0, 0.0]),
             bx("patch", c.metal, [-w / 2.0, -l / 2.0, h], [w / 2.0, l / 2.0, h]),
         ],
-        ports: vec![port("probe", [0.0, yf, 0.0], [0.0, yf, h], h / 2.0, z0)],
+        ports: vec![port("probe", [xf, yf, 0.0], [xf, yf, h], h / 2.0, z0)],
         axis_forward: true,
         hints: vec![hint([-w / 2.0, -l / 2.0, 0.0], [w / 2.0, l / 2.0, h], l.min(w) / 40.0)],
         ..Default::default()
@@ -889,6 +904,7 @@ fn dra_params() -> Vec<Param> {
         p("Hd", "Rd", "Dielectric height"),
         p("lp", "1.8*Hd", "Probe length"),
         p("rp", "lambda0/200", "Probe radius"),
+        p("xp", "Rd+2*rp", "Probe distance from the centre: closer couples harder"),
         p("g", "lambda0/100", "Feed gap"),
         p("G", "2*Rd+lambda0/2", "Ground plate size"),
         p("Z0", "50", "Port impedance"),
@@ -897,7 +913,7 @@ fn dra_params() -> Vec<Param> {
 }
 fn dra(c: &Ctx) -> Result<Geometry> {
     let (r, hh, lp, rp, g, gs, z0) = (c.get("Rd")?, c.get("Hd")?, c.get("lp")?, c.get("rp")?, c.get("g")?, c.get("G")?, c.get("Z0")?);
-    let xp = r + 2.0 * rp;
+    let xp = c.get_or("xp", r + 2.0 * rp);
     Ok(Geometry {
         solids: vec![
             Solid { name: "resonator".into(), material: c.substrate.into(), shape: Shape::Cylinder { a: [0.0, 0.0, 0.0], b: [0.0, 0.0, hh], r } },
@@ -925,7 +941,7 @@ fn gate_params() -> Vec<Param> {
         p("Pm", "0.3*lambda0", "Panel beyond the top and bottom elements"),
         p("pol", "1", "0: all vertical; 1: vertical and horizontal in turn"),
         p("sides", "1", "Panels: 1, or 2 facing across the aisle"),
-        p("A", "1", "Distance between the two panels"),
+        p("A", "1", "Distance between the two panels, when sides is 2"),
         p("floor", "0", "1: a metal floor at z = 0; 0: no floor"),
         p("Z0", "50", "Port impedance"),
     ]);
@@ -1231,7 +1247,7 @@ fn rfid_reader_dual(c: &Ctx) -> Result<Geometry> {
 
 fn custom_params() -> Vec<Param> {
     let mut v = base("2.45GHz");
-    v.extend([p("L", "0.47*lambda0", "Example variable"), p("Z0", "50", "Port impedance")]);
+    v.push(p("Z0", "50", "Port impedance"));
     v
 }
 fn custom(c: &Ctx) -> Result<Geometry> {
@@ -1243,7 +1259,10 @@ const fn tpl(id: &'static str, title: &'static str, category: Category, blurb: &
     Template { id, title, category, blurb, band, substrate, params, build }
 }
 
-static TEMPLATES: [Template; 36] = [
+mod arrays;
+mod tag_shapes;
+
+static TEMPLATES: [Template; 47] = [
     tpl("dipole", "Half-wave dipole", Category::Wire, "The reference antenna: omnidirectional, about 2.15 dBi, 73 Ω.", (0.7, 1.3), "Air", dipole_params, dipole),
     tpl("monopole", "Monopole on ground", Category::Wire, "Quarter-wave over an infinite ground plane: about 5.15 dBi, 36 Ω.", (0.7, 1.3), "Air", monopole_params, monopole),
     tpl("folded_dipole", "Folded dipole", Category::Wire, "A dipole's pattern with four times the impedance, about 300 Ω.", (0.7, 1.3), "Air", folded_params, folded),
@@ -1273,13 +1292,24 @@ static TEMPLATES: [Template; 36] = [
     tpl("dra", "Dielectric resonator", Category::Aperture, "A ceramic cylinder on a ground plate, probe fed: low loss at high frequency.", (0.75, 1.25), "Ceramic (εr 20)", dra_params, dra),
     tpl("rfid_gate", "RFID security gate", Category::Planar, "A pedestal of five separately fed elements in front of a metal panel: test read rate through the aisle under any phases.", (0.9, 1.1), "Air", gate_params, gate),
     tpl("rfid_tag", "RFID tag inlay", Category::Planar, "A meandered dipole with a T-match, inductive to suit a chip's capacitive input. Judged by power into the chip, not by S11.", (0.85, 1.15), "Air", rfid_tag_params, rfid_tag),
+    tpl("tag_loop", "RFID tag, coupled loop", Category::Planar, "A small loop holding the chip, coupled to a separate radiator with no metal between them: resistance and reactance tune nearly apart.", (0.85, 1.15), "Air", tag_shapes::loop_params, tag_shapes::loop_coupled),
+    tpl("tag_dual", "RFID tag, two radiators", Category::Planar, "One loop coupled to a long and a short radiator: two resonances from one chip, for a tag that covers two bands.", (0.85, 1.15), "Air", tag_shapes::dual_params, tag_shapes::dual_radiator),
+    tpl("tag_dogbone", "RFID tag, dogbone", Category::Planar, "Wide arms ending in plates, with a T-match: a lot of aperture and low Q for its length.", (0.85, 1.15), "Air", tag_shapes::dogbone_params, tag_shapes::dogbone),
+    tpl("tag_bowtie", "RFID tag, bow-tie", Category::Planar, "A flared flat dipole with an inductive hairpin across the chip: the widest band, for the most area.", (0.8, 1.2), "Air", tag_shapes::bowtie_params, tag_shapes::bowtie_tag),
+    tpl("tag_slot", "RFID tag, slotted plate", Category::Planar, "A solid plate with an inductive window and a slit holding the chip: low loss, and works on a spacer over metal.", (0.85, 1.15), "Air", tag_shapes::slot_plate_params, tag_shapes::slot_plate),
+    tpl("tag_spiral", "RFID tag, square spiral", Category::Planar, "Two arms wound into a square with a hairpin across the chip: a square label with no length to spare.", (0.85, 1.15), "Air", tag_shapes::spiral_params, tag_shapes::spiral),
+    tpl("tag_fractal", "RFID tag, fractal arms", Category::Planar, "Each arm fills a block with a Hilbert curve, with a T-match: a lot of wire in a small area, at a cost in loss.", (0.85, 1.15), "Air", tag_shapes::fractal_params, tag_shapes::fractal),
+    tpl("tag_bent", "RFID tag, bent arms", Category::Planar, "Arms turned at right angles with a T-match: current along x and y fills in a dipole's nulls, so it reads at more orientations.", (0.85, 1.15), "Air", tag_shapes::bent_params, tag_shapes::bent_arms),
     tpl("rfid_reader_cp", "RFID reader panel, cut corners", Category::Planar, "An air-spaced patch with two corners cut and one feed: circular over a narrow band, such as 865-868 MHz.", (0.9, 1.1), "Air", rfid_reader_cp_params, rfid_reader_cp),
     tpl("rfid_reader_dual", "RFID reader panel, two feeds", Category::Planar, "An air-spaced patch fed on two axes in quadrature: circular over a band as wide as 902-928 MHz.", (0.85, 1.15), "Air", rfid_reader_dual_params, rfid_reader_dual),
     tpl("reconfig_dipole", "Switched-length dipole", Category::Reconfigurable, "Frequency: PIN diodes join sections of a dipole, one band per state.", (0.45, 1.25), "Air", reconfig_dipole_params, reconfig_dipole),
     tpl("reconfig_pifa", "Varactor-tuned PIFA", Category::Reconfigurable, "Frequency: a varactor at the plate's open end tunes it continuously with bias, as on a phone.", (0.5, 1.3), "Air", reconfig_pifa_params, reconfig_pifa),
     tpl("reconfig_parasitic", "Switched-beam parasitic array", Category::Reconfigurable, "Pattern: a monopole ringed by four parasitics. A shorted one reflects, so PIN diodes turn the beam.", (0.85, 1.15), "Air", reconfig_parasitic_params, reconfig_parasitic),
     tpl("reconfig_pol_patch", "Polarisation-switched patch", Category::Reconfigurable, "Polarisation: a square patch with switched corners over ground, for linear and either hand of circular.", (0.88, 1.12), "Air", reconfig_pol_params, reconfig_pol),
-    tpl("custom", "Blank model", Category::Custom, "Start empty: add your own parts, ports and variables, or import a DXF, Gerber or STL.", (0.7, 1.3), "Air", custom_params, custom),
+    tpl("array_dipole", "Phased array, dipoles over ground", Category::Array, "Half-wave dipoles over a ground plane, a port per element: its coupling is in the solve, so the Phased array page reads active impedance and scan loss with no new one.", (0.85, 1.15), "Air", arrays::dipole_params, arrays::dipole),
+    tpl("array_ring", "Direction-finding ring, monopoles", Category::Array, "Monopoles round a circle on a ground plate, a port each: a bearing all the way round. Four of them is an Adcock; eight or more suits MUSIC.", (0.85, 1.15), "Air", arrays::ring_params, arrays::ring),
+    tpl("array_patch", "Phased array, air patches", Category::Array, "Probe-fed patches on an air gap over a ground plane, a port per element, the shape of a real planar panel.", (0.9, 1.1), "Air", arrays::patch_params, arrays::patch),
+    tpl("custom", "Blank model", Category::Custom, "Start empty: draw shapes, give their dimensions names, and tune them like any template's. Or import a DXF, Gerber or STL.", (0.7, 1.3), "Air", custom_params, custom),
 ];
 
 pub fn all() -> &'static [Template] {
@@ -1308,6 +1338,52 @@ mod tests {
             let size = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max);
             let lambda = crate::C0 / p.f0();
             assert!(size > 0.02 * lambda && size < 12.0 * lambda, "{}: {size} m at λ {lambda}", t.id);
+        }
+    }
+
+    /// A row in a template's table is a promise that changing it changes the antenna. Every row
+    /// also says what it is. Rows that only feed others count, through what they feed.
+    #[test]
+    fn every_variable_does_something_and_says_what() {
+        let mut problems = Vec::new();
+        for t in all().iter().filter(|t| t.id != "custom") {
+            let base = Project::from_template(t.id, None).unwrap();
+            let shape = |p: &Project| p.geometry().map_or_else(|e| format!("{e:#}"), |g| format!("{:?} {:?} {}", g.solids, g.ports, g.ground));
+            let before = shape(&base);
+            let vars = base.vars().unwrap();
+            for row in base.params.iter().filter(|r| !r.derived) {
+                if row.note.trim().is_empty() {
+                    problems.push(format!("{}: {} has no note", t.id, row.name));
+                }
+                // Only has a meaning once there's a second panel, as its note says.
+                if (t.id, row.name.as_str()) == ("rfid_gate", "A") {
+                    continue;
+                }
+                let v = vars[&row.name];
+                // A count may round away a small change, and a sign only notices a flip.
+                let moves = [v * 1.1, v + 1.0, -v, v + 1e-3].iter().any(|new| {
+                    let mut q = base.clone();
+                    q.params.iter_mut().find(|r| r.name == row.name).unwrap().expr = format!("{new:e}");
+                    shape(&q) != before
+                });
+                if !moves {
+                    problems.push(format!("{}: {} changes nothing", t.id, row.name));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+    }
+
+    /// The rows added later have to leave every existing antenna as it was, and a project saved
+    /// before they existed has to go on building.
+    #[test]
+    fn rows_added_later_change_nothing_until_they_are_used() {
+        for (id, row) in [("patch_air", "xf"), ("patch_air", "Gy"), ("pifa", "ws"), ("slot", "yf"), ("patch_probe", "xf"), ("dra", "xp")] {
+            let now = Project::from_template(id, None).unwrap();
+            let mut saved_earlier = now.clone();
+            saved_earlier.params.retain(|r| r.name != row);
+            let shape = |p: &Project| format!("{:?}", p.geometry().unwrap().solids) + &format!("{:?}", p.geometry().unwrap().ports);
+            assert_eq!(shape(&now), shape(&saved_earlier), "{id}: {row}");
         }
     }
 

@@ -417,6 +417,10 @@ pub fn drive(world: &mut World) {
     if !s.running {
         return;
     }
+    // A plan being tested is on the floor between its tests, and isn't anything's live data.
+    if world.resource::<super::smart::SmartPlan>().job.is_some() {
+        return;
+    }
     let dt = world.resource::<Time>().delta_secs_f64().min(0.25);
     let tick = 1.0 / s.tick_hz.clamp(1.0, 200.0) as f64;
     let mut st = world.resource_mut::<RtlsState>();
@@ -1401,11 +1405,25 @@ pub fn autotest(world: &mut World) {
         let doc = serde_json::json!({ "format": "sense_sim_layout", "version": 3, "objects": objs, "rtls": super::persist::rtls_json(devs.into_iter(), zones.into_iter()) });
         let _ = std::fs::write(t.report.with_extension("layout.json"), serde_json::to_string_pretty(&doc).unwrap_or_default());
     }
+    // `SENSESIM_SMART=1`: the plan search instead, with `SENSESIM_DEPLOY_TARGET=<m>`.
+    let smart = (std::env::var("SENSESIM_SMART").is_ok_and(|v| v == "1")).then(|| {
+        let mut req = super::smart::SmartRequest::default();
+        if let Some(m) = std::env::var("SENSESIM_DEPLOY_TARGET").ok().and_then(|m| m.parse().ok()) {
+            req.target_m = m;
+        }
+        if let Some(s) = std::env::var("SENSESIM_SEED").ok().and_then(|s| s.parse().ok()) {
+            world.resource_mut::<RtlsConfig>().settings.seed = s;
+        }
+        super::smart::run_to_end(world, req)
+    });
     world.resource_mut::<RtlsState>().restart(seed);
     run_for(world, t.duration);
     let mut report = report_json(world);
     if let Some(d) = deployed {
         report["auto_deploy"] = d;
+    }
+    if let Some(s) = smart {
+        report["smart_plan"] = serde_json::to_value(&s).unwrap_or_default();
     }
     let text = serde_json::to_string_pretty(&report).unwrap_or_default();
     if let Some(d) = t.report.parent() {

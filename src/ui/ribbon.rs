@@ -45,10 +45,7 @@ pub fn show(
     flags: &mut Flags,
     assistant_open: &mut bool,
 ) {
-    // 3D Design's tools are SolidCraft's own ribbon, in the workspace: a second row of them here
-    // would only stand between the tabs and it. Its file actions are in the strip below this.
-    let tools_height = if slot.bench.current == Workbench::Design && state.ribbon_tab == RibbonTab::Tools { 0.0 } else { TOOLS_HEIGHT };
-    egui::Panel::top("ribbon").exact_size(TABS_HEIGHT + tools_height).frame(egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 0))).show(root, |ui| {
+    egui::Panel::top("ribbon").exact_size(TABS_HEIGHT + TOOLS_HEIGHT).frame(egui::Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(8, 0))).show(root, |ui| {
         ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
         ui.allocate_ui_with_layout(vec2(ui.available_width(), TABS_HEIGHT), Layout::left_to_right(Align::Center), |ui| {
             if theme::ribbon_tab(ui, "File", state.ribbon_tab == RibbonTab::File).clicked() {
@@ -81,7 +78,6 @@ pub fn show(
             RibbonTab::View => view_tools(ui, state, actions, settings, assistant_open, slot.bench.current.has_library(), !slot.canvas_taken()),
             RibbonTab::Tools => match slot.bench.current {
                 Workbench::Layout => layout_tools(ui, state, place, walls, undo_stack, undo_req, selection, actions, settings),
-                Workbench::Design => {}
                 Workbench::Placement => placement_tools(ui, slot, rtls),
                 Workbench::Antenna => antenna_tools(ui, slot),
                 Workbench::Simulation => simulation_tools(ui, slot, rtls),
@@ -141,6 +137,14 @@ fn layout_tools(
     }
     if theme::ribbon_button(ui, icon::WALL, "Walls", true, walls.active, "Draw walls: click points on the floor (Ctrl snap, Shift 15°, Esc or right-click to stop)").clicked() {
         walls.active = !walls.active;
+    }
+    let placing_door = place.asset.as_deref().is_some_and(crate::agent::assetgen::is_glass_door);
+    if theme::ribbon_button(ui, icon::DOOR_OPEN, "Glass door", true, placing_door, "Place a closed glass door, 1.8 by 2.1 m, for an entrance or exit. Stand it in a gap between walls: inside a solid wall, radio still pays for the wall. Q and E turn it.").clicked() {
+        if placing_door {
+            place.asset = None;
+        } else {
+            walls.glass_door = true;
+        }
     }
     if theme::ribbon_button(ui, icon::STACK, "Multi-place", true, place.sticky, "Keep placing copies after each click (or hold Shift)").clicked() {
         place.sticky = !place.sticky;
@@ -240,7 +244,7 @@ fn simulation_tools(ui: &mut egui::Ui, slot: &mut LeftPanelSlot, rtls: &mut Rtls
 fn antenna_tools(ui: &mut egui::Ui, slot: &mut LeftPanelSlot) {
     use crate::antenna::ui::Page as Studio;
     type Button = (Studio, &'static str, &'static str, &'static str);
-    const GROUPS: [(&str, &[Button]); 5] = [
+    const GROUPS: [(&str, &[Button]); 6] = [
         ("Design", &[
             (Studio::Samples, "samples", icon::PACKAGE, "Samples"),
             (Studio::Gallery, "gallery", icon::SQUARES_FOUR, "Templates"),
@@ -264,6 +268,12 @@ fn antenna_tools(ui: &mut egui::Ui, slot: &mut LeftPanelSlot) {
             (Studio::Mimo, "mimo", icon::SHARE_NETWORK, "MIMO"),
             (Studio::Link, "link", icon::PULSE, "Link"),
             (Studio::Rcs, "rcs", icon::CROSSHAIR, "RCS"),
+        ]),
+        ("Arrays and signals", &[
+            (Studio::Phased, "phased", icon::GRID_FOUR, "Phased"),
+            (Studio::DirectionFinding, "df", icon::CROSSHAIR, "DF"),
+            (Studio::SignalChain, "chain", icon::CPU, "Chain"),
+            (Studio::Radar, "radar", icon::BROADCAST, "Radar"),
         ]),
         ("Automate", &[
             (Studio::Sweep, "sweep", icon::FADERS, "Sweep"),

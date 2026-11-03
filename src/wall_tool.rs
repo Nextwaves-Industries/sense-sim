@@ -7,6 +7,7 @@ use std::f32::consts::PI;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use crate::agent::assetgen;
 use crate::agent::structures::{self, Kind};
 use crate::prototype::PrototypeCache;
 use crate::scene::{OrbitCamera, PendingSpawn, PendingSpawns, PlaceMode, PlacedObject, Selection, Status, UiBlock, ViewSettings, ray_plane_y, snap};
@@ -21,6 +22,8 @@ pub struct WallTool {
     pub active: bool,
     pub height: f32,
     pub thickness: f32,
+    /// Asked to start placing a glass door. Here, where a failure can reach the status bar.
+    pub glass_door: bool,
     /// Start of the segment being drawn.
     start: Option<Vec3>,
     /// Snapped point under the cursor.
@@ -30,7 +33,7 @@ pub struct WallTool {
 
 impl Default for WallTool {
     fn default() -> Self {
-        Self { active: false, height: 3.0, thickness: 0.2, start: None, cursor: None, was_active: false }
+        Self { active: false, height: 3.0, thickness: 0.2, glass_door: false, start: None, cursor: None, was_active: false }
     }
 }
 
@@ -76,6 +79,13 @@ pub fn draw_walls(
     (block, settings, mut status): (Res<UiBlock>, Res<ViewSettings>, ResMut<Status>),
     mut gizmos: Gizmos,
 ) {
+    if std::mem::take(&mut tool.glass_door) {
+        let (width, height) = assetgen::GLASS_DOOR_M;
+        match assetgen::glass_door(width, height) {
+            Ok(door) => place.asset = Some(door.path),
+            Err(e) => status.0 = format!("Could not create the door: {e}"),
+        }
+    }
     // Turning the tool on stops placing; picking an asset turns it off.
     if tool.active && !tool.was_active {
         place.asset = None;

@@ -105,7 +105,7 @@ pub enum Class {
 /// Tools that exist only inside the assistant's own loop. The MCP port has no login, and a macro
 /// runs unattended, so neither may reach them.
 pub fn agent_only(name: &str) -> bool {
-    super::workspace::is_tool(name) || matches!(name, "python_run" | "delegate" | "open_layout_tab" | "open_in_design" | "propose_plan")
+    super::workspace::is_tool(name) || matches!(name, "python_run" | "delegate" | "open_layout_tab" | "propose_plan")
 }
 
 /// What a tool does, ignoring where it writes. Input matters for a few that do different things.
@@ -117,13 +117,22 @@ pub fn class_of(name: &str, input: &Value) -> Class {
     match name {
         // Control and lookups.
         "ask_user" | "update_plan" | "get_screen" | "propose_plan" | "read_file" | "list_files" | "open_file" | "list_asset_categories" | "search_assets" | "get_asset_info" | "get_scene" | "verify_scene" | "check_against_depth" | "perceive_photo" | "load_reference_image"
-        | "search_knowledge" | "read_knowledge" | "list_knowledge" | "design_commands" | "design_bodies" | "design_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
+        | "search_knowledge" | "read_knowledge" | "list_knowledge" | "sim_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
         | "sim_results" | "sim_probe" | "plant_list_ports" | "plant_status" | "outcomes_ledger" | "site_material_ranges" | "rtls_list_regions" | "rtls_list_profiles" | "rtls_list_devices" | "rtls_status"
         | "rtls_coverage" | "antenna_assess" | "antenna_calc" | "antenna_sweep_results" | "antenna_converge_results" | "antenna_yield_results" | "antenna_gate_results" | "antenna_list_samples"
         | "antenna_references" | "antenna_list_templates" | "antenna_get" | "antenna_results" | "antenna_job_state" | "antenna_wait" | "antenna_reconfig_parts" | "antenna_reconfig_results" | "antenna_reconfig_found"
-        | "antenna_reconfig_tuning" | "antenna_reconfig_spread" => Read,
+        | "antenna_reconfig_tuning" | "antenna_reconfig_spread" | "antenna_phased_results" | "antenna_phased_table" | "antenna_df_results" | "antenna_df_fix" | "antenna_df_switched" | "antenna_chain_budget" | "antenna_chain_results" | "antenna_radar_results" | "antenna_tag_options" => Read,
 
         // Reading an optimizer's progress is a lookup; applying its result changes the design.
+        // Reading a tag's two metrics changes nothing. Tuning replaces the last result, and applying moves the design.
+        "antenna_tag_tune" => {
+            if input["only_read"].as_bool().unwrap_or(false) && !input["apply"].as_bool().unwrap_or(false) {
+                Read
+            } else {
+                Project
+            }
+        }
+
         "antenna_optimize_status" => {
             if input["apply"].as_bool().unwrap_or(false) {
                 Project
@@ -133,18 +142,18 @@ pub fn class_of(name: &str, input: &Value) -> Class {
         }
 
         "place_objects" | "update_object" | "delete_objects" | "clear_scene" | "load_template" | "add_photo_backdrop" | "place_from_photo" | "optimize_layout" | "add_structure" | "set_object_material"
-        | "design_send_to_scene" | "plant_add_part" | "plant_route_pipe" | "plant_connect" | "plant_disconnect" | "plant_build" | "plant_set" | "rtls_auto_deploy" | "rtls_add_device" | "rtls_update_device"
+        | "plant_add_part" | "plant_route_pipe" | "plant_connect" | "plant_disconnect" | "plant_build" | "plant_set" | "rtls_auto_deploy" | "rtls_smart_plan" | "rtls_add_device" | "rtls_update_device"
         | "rtls_remove_device" | "rtls_add_zone" | "rtls_optimize_anchors" => Scene,
 
-        "set_camera" | "frame_all" | "screenshot" | "compare_to_photo" | "design_show" | "antenna_reconfig_view" => View,
+        "set_camera" | "frame_all" | "screenshot" | "compare_to_photo" | "antenna_reconfig_view" => View,
 
-        "python_run" | "write_file" | "open_layout_tab" | "open_in_design" | "download_assets" | "set_photo_layout" | "create_asset" | "define_tool" | "delete_tool" | "save_layout" | "export_usda" | "design_run" | "sim_study_create" | "sim_study_set" | "sim_run" | "sim_cancel"
+        "python_run" | "write_file" | "open_layout_tab" | "download_assets" | "set_photo_layout" | "create_asset" | "define_tool" | "delete_tool" | "save_layout" | "export_usda" | "sim_study_create" | "sim_study_set" | "sim_run" | "sim_cancel"
         | "plant_run" | "plant_define_port" | "design_uwb_bias" | "design_shelf" | "design_aoa" | "design_integrate" | "design_tag" | "design_coexist" | "design_field_yield" | "design_tunnel"
         | "design_medical_coexist" | "design_sar" | "site_survey_plan" | "site_trace" | "site_guess_materials" | "site_survey_clear" | "site_survey_practice" | "site_stress" | "site_set_material"
         | "site_conditions" | "site_erces" | "site_compare_tech" | "site_acceptance_plan" | "site_acceptance_preview" | "site_anchor_practice" | "site_battery" | "site_esl" | "site_route_coverage"
         | "site_proximity" | "site_set_antenna" | "site_import_bim" | "rtls_set_region" | "rtls_run" | "rtls_control" | "antenna_spec" | "antenna_sweep" | "antenna_converge" | "antenna_match" | "antenna_yield"
         | "antenna_array" | "antenna_save_pattern" | "antenna_import_cad" | "antenna_states" | "antenna_gate_test" | "antenna_find_phases" | "antenna_open_sample" | "antenna_new" | "antenna_set" | "antenna_run"
-        | "antenna_optimize" | "antenna_cancel" | "antenna_reconfig_set" | "antenna_reconfig_solve" | "antenna_reconfig_search" => Project,
+        | "antenna_optimize" | "antenna_cancel" | "antenna_reconfig_set" | "antenna_reconfig_solve" | "antenna_reconfig_search" | "antenna_phased_set" | "antenna_phased_shape" | "antenna_df_set" | "antenna_df_study" | "antenna_chain_set" | "antenna_chain_run" | "antenna_radar_set" | "antenna_radar_run" | "antenna_stack" | "antenna_draw" | "antenna_tag_design" | "antenna_tag_open" | "antenna_tag_retune" => Project,
 
         "open_external" => OpensOutside,
 
@@ -525,7 +534,7 @@ mod tests {
 
     #[test]
     fn the_assistants_own_tools_are_out_of_reach_of_mcp_and_macros() {
-        for name in ["read_file", "list_files", "write_file", "open_file", "open_external", "python_run", "delegate", "open_layout_tab", "open_in_design", "propose_plan"] {
+        for name in ["read_file", "list_files", "write_file", "open_file", "open_external", "python_run", "delegate", "open_layout_tab", "propose_plan"] {
             assert!(agent_only(name), "{name}");
             assert!(refused(&verdict(name, json!({}), Origin::Mcp, Mode::All)), "{name}");
         }

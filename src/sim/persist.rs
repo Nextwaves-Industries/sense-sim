@@ -1,15 +1,14 @@
 //! Studies live in the layout file under a `simulation` key, added after the scene writes it (the
-//! same hook as RTLS and the plant), and the design beside it as a `.sc` file of the same name.
+//! same hook as RTLS and the plant).
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bevy::prelude::*;
 use serde_json::{Value, json};
 use sim_core::study::Study;
 
 use super::SimState;
-use crate::design::{Slot, bridge};
 use crate::scene::{Action, Actions, Status};
 
 #[derive(Resource, Default)]
@@ -30,15 +29,11 @@ pub fn peek_actions(actions: Res<Actions>, mut hook: ResMut<Hook>) {
     }
 }
 
-/// The design's file beside a layout.
-pub fn design_path(layout: &Path) -> PathBuf {
-    layout.with_extension("sc")
-}
-
-/// The section for the layout file: its studies, and the design's file name if `saved_design`.
-pub fn section(studies: &[Study], saved_design: Option<&str>) -> Value {
+/// The section for the layout file: its studies, and the name of a design file an older version saved
+/// beside it, so that the file can still be found.
+pub fn section(studies: &[Study], older_design: Option<&str>) -> Value {
     let mut v = json!({ "studies": studies });
-    if let Some(name) = saved_design {
+    if let Some(name) = older_design {
         v["design_file"] = json!(name);
     }
     v
@@ -58,28 +53,16 @@ pub fn parse_section(v: &Value) -> (Vec<Study>, usize) {
     (studies, skipped)
 }
 
-fn save(path: &Path, state: &SimState, slot: &Slot) -> Result<Option<usize>> {
-    let mut design_name = None;
-    let mut body_count = None;
-    if let Some(host) = &slot.host {
-        let session = &host.app.session;
-        let bodies = bridge::bodies(session).len();
-        if bodies > 0 {
-            let bytes = solidcraft_engine::io::write_design_container(&session.design()).map_err(|e| anyhow!("writing the design: {e}"))?;
-            let file = design_path(path);
-            std::fs::write(&file, bytes).map_err(|e| anyhow!("writing {}: {e}", file.display()))?;
-            design_name = file.file_name().map(|n| n.to_string_lossy().to_string());
-            body_count = Some(bodies);
-        }
-    }
+fn save(path: &Path, state: &SimState) -> Result<()> {
     let mut v = crate::project_file::read(path)?;
-    v["simulation"] = section(&state.studies, design_name.as_deref());
-    crate::project_file::write(path, &v)?;
-    Ok(body_count)
+    let older_design = v["simulation"]["design_file"].as_str().map(str::to_string);
+    v["simulation"] = section(&state.studies, older_design.as_deref());
+    crate::project_file::write(path, &v)
 }
 
-/// Reads a layout's section. A design with unsaved work open is left alone, and said so.
-fn load(path: &Path, state: &mut SimState, slot: &mut Slot) -> Result<String> {
+/// Reads a layout's section. A design file from an older version can't be opened any more: it stays
+/// where it is, and that's said.
+fn load(path: &Path, state: &mut SimState) -> Result<String> {
     let v = crate::project_file::read(path)?;
     let section = &v["simulation"];
     let (studies, skipped) = parse_section(section);
@@ -87,7 +70,6 @@ fn load(path: &Path, state: &mut SimState, slot: &mut Slot) -> Result<String> {
     state.studies = studies;
     state.active = (count > 0).then_some(0);
     state.view = None;
-    state.picking = None;
     state.scene_pick = None;
     let mut said = String::new();
     if count > 0 {
@@ -97,37 +79,15 @@ fn load(path: &Path, state: &mut SimState, slot: &mut Slot) -> Result<String> {
         said.push_str(&format!(" ({skipped} studies couldn't be read)"));
     }
     if let Some(name) = section["design_file"].as_str() {
-        let file = path.parent().map_or_else(|| PathBuf::from(name), |dir| dir.join(name));
-        if !file.is_file() {
-            said.push_str(&format!(" (its design, {name}, is missing)"));
-        } else {
-            let text = file.to_string_lossy().to_string();
-            match slot.host.as_mut() {
-                // Not over work that hasn't been saved.
-                Some(h) if h.app.session.is_dirty() => said.push_str(&format!(" (the open design has unsaved changes, so {name} wasn't opened)")),
-                Some(h) => {
-                    h.app.open_path(&text);
-                    said.push_str(" + its design");
-                }
-                None => {
-                    slot.open_when_started = Some(file);
-                    said.push_str(" + its design");
-                }
-            }
-        }
+        said.push_str(&format!(" (its 3D design, {name}, wasn't opened: this version has no 3D Design)"));
     }
     Ok(said)
 }
 
-pub fn after_actions(mut hook: ResMut<Hook>, mut state: ResMut<SimState>, mut slot: NonSendMut<Slot>, mut status: ResMut<Status>) {
+pub fn after_actions(mut hook: ResMut<Hook>, mut state: ResMut<SimState>, mut status: ResMut<Status>) {
     for path in std::mem::take(&mut hook.save) {
-        let safety_save = path == crate::design::scene_safety_path();
-        match save(&path, &state, &slot) {
-            // The save on the way into Design isn't news. If it failed, that still is.
-            Ok(_) if safety_save && status.0.starts_with("Saved ") => status.0.clear(),
-            Ok(Some(bodies)) => status.0 = format!("{} + {bodies} design bodies", status.0),
-            Ok(None) => {}
-            Err(e) => status.0 = format!("{} (simulation not saved: {e:#})", status.0),
+        if let Err(e) = save(&path, &state) {
+            status.0 = format!("{} (simulation not saved: {e:#})", status.0);
         }
     }
     let loads = std::mem::take(&mut hook.load);
@@ -135,11 +95,10 @@ pub fn after_actions(mut hook: ResMut<Hook>, mut state: ResMut<SimState>, mut sl
         state.studies.clear();
         state.active = None;
         state.view = None;
-        state.picking = None;
         state.scene_pick = None;
     }
     for path in loads {
-        match load(&path, &mut state, &mut slot) {
+        match load(&path, &mut state) {
             Ok(said) => status.0 = format!("{}{said}", status.0),
             Err(e) => status.0 = format!("{} (simulation: {e:#})", status.0),
         }
@@ -182,8 +141,4 @@ mod tests {
         assert_eq!(skipped, 1);
     }
 
-    #[test]
-    fn the_design_goes_beside_the_layout() {
-        assert_eq!(design_path(Path::new("C:/x/plant.json")), PathBuf::from("C:/x/plant.sc"));
-    }
 }

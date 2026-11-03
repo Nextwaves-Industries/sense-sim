@@ -21,7 +21,8 @@ pub fn defs() -> Vec<ToolDef> {
         "type": "object",
         "description": "Tag motion. {type:'static'} | {type:'path', points:[[x,y,z],...], speed:m/s, ping_pong:bool} | {type:'wander', center:[x,y,z], radius, speed} | {type:'follow', object:'<scene object name>', offset:[x,y,z]}"
     });
-    vec![
+    #[allow(unused_mut)]
+    let mut all = vec![
         def(
             "rtls_auto_deploy",
             "ONE-SHOT: design and place a complete positioning system for the current scene (the fewest UWB anchors that cover the floor and every zone at the target accuracy, or the best placement within max_anchors, BLE beacons, BLE AoA locators, WiFi APs, RFID readers aimed at shelves and zones with portal pairs on doorways, UWB tags on vehicles, RFID tags on goods, workers walking the aisles), mounted on the ceiling, walls, columns and racks, then simulate it and report accuracy. Never in mid-air: a scene with none of those gets an error, so add_structure first. Replaces devices from a previous auto deploy; keeps manual ones.",
@@ -137,7 +138,13 @@ pub fn defs() -> Vec<ToolDef> {
             "Configure and (re)connect real-time outputs. Pass any subset: {mqtt:{enabled,host,port,username,password,prefix,qos,subscribe}, openems:{enabled,url,username,password,period_s,write:[{metric,address}],read:[address]}, webhook:{enabled,url,headers,batch_ms}, udp:{enabled,target,format}, modbus:{enabled,bind}, recorder:{enabled,path}}. Metrics for OpenEMS: tags_total, tags_located, tags_lost, infra_online, alarms_active, rmse_cm, cep95_cm, rfid_reads_per_s, zone:<name>, tag:<id>:x|y|z|lost.",
             json!({ "type": "object", "properties": { "outputs": { "type": "object" } }, "required": ["outputs"] }),
         ),
-    ]
+    ];
+    all.push(def(
+        "rtls_smart_plan",
+        "Find UWB plans a site can live with, rather than one layout. Works out from the layout where tags really go and judges plans there, searches for anchors that hold on a busy shift, with materials 50 % worse and with racks half full (taking the worst, not the average), then simulates the choices (Lean, Balanced, Bulletproof), each on every day and with its most relied-on anchor dead, and runs plain Auto deploy on the same tests to compare. Puts the recommended plan on the floor. Also returns why each anchor is there, what each extra anchor buys, and an antenna brief: the cone the anchors really serve and how much range shift it can take, ready for design_uwb_bias theta_min/theta_max. Slow: minutes on a big site. Use it when the user wants to choose a plan or asks whether one will hold; rtls_auto_deploy is for one quick answer and for other technologies.",
+        json!({ "type": "object", "properties": { "target_cm": { "type": "number", "description": "95th-percentile position error to hold, default 30" }, "max_anchors": { "type": "integer", "description": "Cap on anchors in the scene, yours included" }, "test_s": { "type": "number", "description": "Simulated seconds per test, default 20" }, "anchor_price": { "type": "number" }, "fit_price": { "type": "number" } } }),
+    ));
+    all
 }
 
 fn vec3(v: &Value) -> Option<Vec3> {
@@ -620,6 +627,7 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             };
             let r = super::deploy::auto_deploy(world, &req);
             world.resource_mut::<super::ui::DeployState>().last = Some(r.clone());
+            world.resource_mut::<super::smart::SmartPlan>().floor_replaced();
             if r.no_mounts {
                 return Some(ToolOutput::err(format!("{} Build the shell with add_structure and call this again.", super::deploy::NO_MOUNTS)));
             }
@@ -656,6 +664,28 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                 "notes": r.notes,
                 "region": region_json(world),
             }))
+        }
+        "rtls_smart_plan" => {
+            let d = super::smart::SmartRequest::default();
+            let costing = world.resource::<super::smart::SmartPlan>().costing;
+            let given = |k: &str| i[k].as_f64();
+            let mut edited = costing.edited;
+            edited[0] |= given("anchor_price").is_some();
+            edited[1] |= given("fit_price").is_some();
+            let costing = super::smart::Costing { anchor: given("anchor_price").unwrap_or(costing.anchor), fit: given("fit_price").unwrap_or(costing.fit), edited, ..costing };
+            // A test too short to see anything isn't a test.
+            let test_s = i["test_s"].as_f64().unwrap_or(d.test_s).max(5.0);
+            let req = super::smart::SmartRequest { target_m: i["target_cm"].as_f64().map_or(d.target_m, |c| c as f32 / 100.0), max_anchors: i["max_anchors"].as_u64().map(|m| m as usize), test_s, costing, ..d };
+            let r = super::smart::run_to_end(world, req);
+            if let Some(why) = &r.failed {
+                return Some(ToolOutput::err(why.clone()));
+            }
+            let mut v = serde_json::to_value(&r).unwrap_or_default();
+            v["brief"] = serde_json::to_value(&r.brief).unwrap_or_default();
+            v["brief"]["theta_range_deg_upright_wire"] = json!(r.brief.theta_range(false));
+            v["brief"]["theta_range_deg_patch"] = json!(r.brief.theta_range(true));
+            v["evidence"] = json!("Simulated: not validated on hardware. Traffic is worked out from the layout, not measured");
+            ToolOutput::ok(v)
         }
         "rtls_openems" => {
             let action = i["action"].as_str().unwrap_or("status");

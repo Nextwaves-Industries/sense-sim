@@ -233,6 +233,7 @@ pub fn run_deploy_jobs(world: &mut World) {
     let Some(req) = world.resource_mut::<DeployState>().pending.take() else { return };
     let report = super::deploy::auto_deploy(world, &req);
     world.resource_mut::<DeployState>().last = Some(report);
+    world.resource_mut::<super::smart::SmartPlan>().floor_replaced();
 }
 
 /// Plain-language version of an output error.
@@ -311,6 +312,7 @@ pub struct RtlsPanel<'w, 's> {
     outcomes: ResMut<'w, crate::outcomes::ui::OutcomesUi>,
     predictions: ResMut<'w, crate::outcomes::Predictions>,
     recipe_jobs: Res<'w, crate::outcomes::hardware::Jobs>,
+    smart: ResMut<'w, super::smart::SmartPlan>,
 }
 
 impl RtlsPanel<'_, '_> {
@@ -318,7 +320,33 @@ impl RtlsPanel<'_, '_> {
     /// positioning tools, OpenEMS (the energy-management link) and FDTD (the
     /// openEMS field solver).
     pub fn show(&mut self, ui: &mut egui::Ui, max_height: f32) {
-        let Self { commands, cfg, state, hub, place, rsel, cov, profiles, jobs, ems, deploy, bindings, ui_state, devices, zones, orbit, names, rf_hist, fdtd, applied, library, outcomes, predictions, recipe_jobs } = self;
+        let Self {
+            commands,
+            cfg,
+            state,
+            hub,
+            place,
+            rsel,
+            cov,
+            profiles,
+            jobs,
+            ems,
+            deploy,
+            bindings,
+            ui_state,
+            devices,
+            zones,
+            orbit,
+            names,
+            rf_hist,
+            fdtd,
+            applied,
+            library,
+            outcomes,
+            predictions,
+            recipe_jobs,
+            smart,
+        } = self;
         let local = &mut ui_state.local;
         let Ok(mut orbit) = orbit.single_mut() else { return };
         let page = local.page;
@@ -431,10 +459,38 @@ impl RtlsPanel<'_, '_> {
                             }
                         }
                     }
+                    // UWB gets real choices. Auto deploy stays for one quick answer and for the
+                    // technologies the plan search doesn't cover yet.
+                    let smart_busy = {
+                        if deploy.uwb {
+                            let mut go_to = None;
+                            let ids: std::collections::HashMap<String, Entity> = if smart.result.is_some() { devices.iter().map(|(e, d, _)| (d.id.clone(), e)).collect() } else { Default::default() };
+                            let mut cx = super::smart_ui::Context {
+                                target_cm: deploy.target_cm,
+                                max_anchors: (deploy.max_anchors > 0).then_some(deploy.max_anchors),
+                                cov,
+                                selected: &mut rsel.device,
+                                device_named: &|id: &str| ids.get(id).copied(),
+                                outcomes,
+                                go_to: &mut go_to,
+                            };
+                            super::smart_ui::show(ui, smart, &mut cx);
+                            if let Some(p) = go_to {
+                                local.set_page(p);
+                            }
+                            ui.add_space(4.0);
+                        }
+                        smart.job.is_some()
+                    };
+                    let primary = !deploy.uwb;
                     let busy = deploy.pending.is_some();
-                    let label = if busy { "Placing devices and testing…".to_string() } else { theme::label(theme::icon::LIGHTNING, "Auto deploy") };
-                    let b = egui::Button::new(RichText::new(label).strong().size(15.0).color(theme::ON_ACCENT)).fill(if busy { theme::FAINT } else { theme::ACCENT }).stroke(egui::Stroke::NONE).min_size(vec2(ui.available_width(), 36.0));
-                    if ui.add_enabled(!busy && (deploy.uwb || deploy.ble || deploy.ble_aoa || deploy.wifi || deploy.rfid), b)
+                    let label = if busy { "Placing devices and testing…".to_string() } else { theme::label(theme::icon::LIGHTNING, if primary { "Auto deploy" } else { "Quick Auto deploy" }) };
+                    let b = if primary {
+                        egui::Button::new(RichText::new(label).strong().size(15.0).color(theme::ON_ACCENT)).fill(if busy { theme::FAINT } else { theme::ACCENT }).stroke(egui::Stroke::NONE).min_size(vec2(ui.available_width(), 36.0))
+                    } else {
+                        egui::Button::new(RichText::new(label)).min_size(vec2(ui.available_width(), 28.0))
+                    };
+                    if ui.add_enabled(!busy && !smart_busy && (deploy.uwb || deploy.ble || deploy.ble_aoa || deploy.wifi || deploy.rfid), b)
                         .on_hover_text("Places anchors, beacons, readers and tags for this scene, then runs a 30 s test. Running it again replaces only what it placed.")
                         .clicked()
                     {
@@ -461,7 +517,11 @@ impl RtlsPanel<'_, '_> {
                         ui.add_space(2.0);
                         theme::caption(ui, "Floor map");
                         let mut view = cov.visible.then_some(cov.view);
-                        if theme::segmented_fill(ui, &mut view, &[(None, "Off"), (Some(MapView::Quality), "Quality"), (Some(MapView::Accuracy), "Accuracy"), (Some(MapView::Signal), "Signal")]) {
+                        let mut views = vec![(None, "Off"), (Some(MapView::Quality), "Quality"), (Some(MapView::Accuracy), "Accuracy"), (Some(MapView::Signal), "Signal")];
+                        if cov.traffic.is_some() {
+                            views.push((Some(MapView::Traffic), "Traffic"));
+                        }
+                        if theme::segmented_fill(ui, &mut view, &views) {
                             cov.visible = view.is_some();
                             if let Some(v) = view {
                                 cov.view = v;
@@ -521,6 +581,7 @@ impl RtlsPanel<'_, '_> {
                                 let (lo, hi) = super::planning::signal_scale(t);
                                 format!("red {lo:.0} dBm (weak) → green {hi:.0} dBm (strong) · grey = nothing heard")
                             }
+                            (MapView::Traffic, _) => "Where tags are worked out to go, from the layout: deep blue = busiest · pale = quiet".to_string(),
                         };
                         ui.label(RichText::new(legend).small().color(theme::WEAK));
                         if let Some(a) = applied.0.as_ref().filter(|a| a.tech == cov.tech && !cov.cells.is_empty()) {
@@ -1611,6 +1672,7 @@ fn planning_tab(
                 let (lo, hi) = super::planning::signal_scale(t);
                 format!("red {lo:.0} dBm (weak) → green {hi:.0} dBm (strong) · grey = nothing heard")
             }
+            (_, MapView::Traffic) => "where tags are worked out to go, from the layout: deep blue = busiest · pale = quiet".to_string(),
         };
         ui.label(RichText::new(legend).small().color(theme::WEAK));
     }

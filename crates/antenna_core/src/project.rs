@@ -163,6 +163,36 @@ pub enum ExtraPrim {
     /// its height is an expression, so a stack follows the substrate thickness. `cell`
     /// is the FDTD cell its finest detail asks for, 0 for none.
     Outline { file: String, axis: usize, at: String, pts: Vec<[f64; 2]>, thick: String, cell: f64 },
+    /// A trace `w` wide along a path, each point an expression, so a variable can move any corner.
+    Strip { axis: usize, at: String, path: Vec<[String; 2]>, w: String },
+    /// A flat plate with holes cut in it, all of it expressions.
+    Plate { axis: usize, at: String, outline: Vec<[String; 2]>, holes: Vec<Vec<[String; 2]>> },
+    Disc { axis: usize, at: String, c: [String; 2], r: String },
+    /// A trace along part of a circle, angles in degrees from +u towards +v.
+    Arc { axis: usize, at: String, c: [String; 2], r: String, from_deg: String, to_deg: String, w: String },
+    /// `n` periods from `start`: up `height`, along `step`, down twice `height`, along `step`, back
+    /// up. The count is an expression too, rounded, so it can be searched.
+    Meander { axis: usize, at: String, start: [String; 2], step: String, height: String, n: String, w: String },
+    /// A shape drawn on the canvas, every dimension an expression, so what was drawn with the
+    /// mouse can be typed exactly, tied to a variable, swept and optimised. It can have
+    /// thickness (a dielectric block) and holes (a slot).
+    Drawn {
+        axis: usize,
+        at: String,
+        thick: String,
+        form: Form,
+        #[serde(default)]
+        holes: Vec<Vec<[String; 2]>>,
+    },
+}
+
+/// The outline of a drawn part, by the dimensions a designer thinks of it in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "form", rename_all = "snake_case")]
+pub enum Form {
+    Rect { c: [String; 2], size: [String; 2] },
+    Circle { c: [String; 2], r: String },
+    Poly { pts: Vec<[String; 2]> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -223,6 +253,12 @@ pub struct Project {
     /// Switches and varactors across gaps, and their states (see [`crate::reconfig`]).
     #[serde(default)]
     pub reconfig: crate::reconfig::Reconfig,
+    /// What lies over and under flat metal: label paper, film, a carton (see [`crate::stack`]).
+    #[serde(default)]
+    pub stack: crate::stack::Stack,
+    /// Beams, direction finding, the receive chain and radar (see [`crate::phased`]).
+    #[serde(default)]
+    pub phased: crate::phased::PhasedDesign,
 }
 
 impl Project {
@@ -248,10 +284,20 @@ impl Project {
             drive: Vec::new(),
             states: Vec::new(),
             reconfig: Default::default(),
+            stack: Default::default(),
+            phased: Default::default(),
         };
         pr.reset_band()?;
         if let Some(rc) = crate::reconfig::for_template(id, pr.f0()) {
             pr.reconfig = rc;
+        }
+        // An array is judged at one frequency, and every port's pattern costs time.
+        if id.starts_with("array_") {
+            pr.setup.mom_samples = 7;
+            pr.setup.far_freqs = vec![pr.f0()];
+            pr.setup.far_step = 5.0;
+            pr.phased.use_ports = true;
+            pr.phased.df.use_ports = true;
         }
         // Small tabs and narrow gaps are what its surface mesh has to resolve.
         if id == "reconfig_pol_patch" {
@@ -397,11 +443,32 @@ impl Project {
                 let (min, max) = solid.shape.bounds();
                 g.hints.push(MeshHint { min, max, cell: cell.max(finest) });
             }
+            // Traces ask for cells a third of their own width.
+            if let ExtraPrim::Strip { w, .. } | ExtraPrim::Arc { w, .. } | ExtraPrim::Meander { w, .. } = &e.prim {
+                let (min, max) = solid.shape.bounds();
+                g.hints.push(MeshHint { min, max, cell: (expr::eval(w, &vars)? / 3.0).max(finest) });
+            }
+            // A drawn shape asks for a third of its narrowest feature, holes included.
+            if let ExtraPrim::Drawn { form, holes, .. } = &e.prim {
+                let mut rings = vec![form_outline(&e.name, form, &vars)?];
+                for h in holes {
+                    rings.push(eval_points(h, &vars)?);
+                }
+                let narrowest = crate::cad::narrowest_of(&rings);
+                if narrowest.is_finite() && narrowest > 0.0 {
+                    let (min, max) = solid.shape.bounds();
+                    g.hints.push(MeshHint { min, max, cell: (narrowest / 3.0).max(finest) });
+                }
+            }
             g.solids.push(solid);
         }
         for p in &self.extra_ports {
             let e3 = |a: &[String; 3]| -> Result<P3> { Ok([expr::eval(&a[0], &vars)?, expr::eval(&a[1], &vars)?, expr::eval(&a[2], &vars)?]) };
             g.ports.push(PortDef { name: p.name.clone(), a: e3(&p.a)?, b: e3(&p.b)?, width: expr::eval(&p.width, &vars)?, z0: expr::eval(&p.z0, &vars)? });
+        }
+        if !self.stack.is_empty() {
+            self.stack.check()?;
+            g.stack = Some(self.stack.clone());
         }
         check(&g)?;
         Ok(g)
@@ -416,17 +483,17 @@ impl Project {
         p.hidden.clear();
         p.extra.clear();
         p.extra_ports.clear();
-        let num = |v: f64| format!("{v:e}");
+        let num = |v: f64| crate::sketch::mm(v);
         let n3 = |q: P3| [num(q[0]), num(q[1]), num(q[2])];
         for s in &g.solids {
             let prim = match &s.shape {
-                // A flat box is a sheet, and sheets are what the drawing tools edit.
+                // A flat box is a sheet, and sheets are what the drawing tools edit: it opens
+                // with its centre and sides to change.
                 Shape::Box { min, max } => match (0..3).find(|k| max[*k] - min[*k] <= 0.0) {
                     Some(axis) => {
                         let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
-                        let pts = vec![[min[u], min[v]], [max[u], min[v]], [max[u], max[v]], [min[u], max[v]]];
-                        let cell = crate::cad::narrowest_of(std::slice::from_ref(&pts));
-                        ExtraPrim::Outline { file: "drawn".into(), axis, at: num(min[axis]), pts, thick: "0".into(), cell: if cell.is_finite() { cell / 3.0 } else { 0.0 } }
+                        let form = Form::Rect { c: [num((min[u] + max[u]) / 2.0), num((min[v] + max[v]) / 2.0)], size: [num(max[u] - min[u]), num(max[v] - min[v])] };
+                        ExtraPrim::Drawn { axis, at: num(min[axis]), thick: "0".into(), form, holes: Vec::new() }
                     }
                     None => ExtraPrim::Box { min: n3(*min), max: n3(*max) },
                 },
@@ -442,7 +509,7 @@ impl Project {
             p.extra.push(ExtraSolid { name: s.name.clone(), material: s.material.clone(), prim });
         }
         for port in &g.ports {
-            p.extra_ports.push(ExtraPort { name: port.name.clone(), a: n3(port.a), b: n3(port.b), width: num(port.width), z0: num(port.z0) });
+            p.extra_ports.push(ExtraPort { name: port.name.clone(), a: n3(port.a), b: n3(port.b), width: num(port.width), z0: format!("{}", port.z0) });
         }
         Ok(p)
     }
@@ -483,9 +550,43 @@ impl Project {
     }
 }
 
-fn extra_solid(e: &ExtraSolid, v: &Vars) -> Result<Solid> {
+fn eval_points(pts: &[[String; 2]], v: &Vars) -> Result<Vec<[f64; 2]>> {
+    pts.iter().map(|q| Ok([expr::eval(&q[0], v)?, expr::eval(&q[1], v)?])).collect()
+}
+
+/// What a drawn part's outline comes to, before any holes.
+pub(crate) fn form_outline(name: &str, form: &Form, v: &Vars) -> Result<Vec<[f64; 2]>> {
+    let ev = |s: &String| expr::eval(s, v).with_context(|| format!("part '{name}'"));
+    match form {
+        Form::Rect { c, size } => {
+            let (cu, cv, su, sv) = (ev(&c[0])?, ev(&c[1])?, ev(&size[0])?, ev(&size[1])?);
+            if !(su > 0.0 && sv > 0.0) {
+                bail!("Rectangle '{name}' needs both sides above zero.");
+            }
+            Ok(crate::sketch::rectangle([cu - su / 2.0, cv - sv / 2.0], [cu + su / 2.0, cv + sv / 2.0]))
+        }
+        Form::Circle { c, r } => {
+            let (cu, cv, r) = (ev(&c[0])?, ev(&c[1])?, ev(r)?);
+            if !(r > 0.0) {
+                bail!("Circle '{name}' needs a radius above zero.");
+            }
+            Ok(crate::sketch::circle([cu, cv], r, r * 0.003))
+        }
+        Form::Poly { pts } => {
+            let out = eval_points(pts, v).with_context(|| format!("part '{name}'"))?;
+            if out.len() < 3 {
+                bail!("Polygon '{name}' needs at least three corners.");
+            }
+            Ok(out)
+        }
+    }
+}
+
+pub(crate) fn extra_solid(e: &ExtraSolid, v: &Vars) -> Result<Solid> {
     let ev = |s: &String| expr::eval(s, v).with_context(|| format!("part '{}'", e.name));
     let e3 = |a: &[String; 3]| -> Result<P3> { Ok([ev(&a[0])?, ev(&a[1])?, ev(&a[2])?]) };
+    let pt_of = |q: &[String; 2]| -> Result<[f64; 2]> { Ok([ev(&q[0])?, ev(&q[1])?]) };
+    let pts_of = |l: &[[String; 2]]| -> Result<Vec<[f64; 2]>> { l.iter().map(pt_of).collect() };
     let shape = match &e.prim {
         ExtraPrim::Box { min, max } => Shape::Box { min: e3(min)?, max: e3(max)? },
         ExtraPrim::Cylinder { a, b, r } => Shape::Cylinder { a: e3(a)?, b: e3(b)?, r: ev(r)? },
@@ -499,8 +600,77 @@ fn extra_solid(e: &ExtraSolid, v: &Vars) -> Result<Solid> {
         },
         ExtraPrim::Imported { tris, solid, .. } => Shape::Tris { tris: tris.clone(), solid: *solid, sheet: 0.0 },
         ExtraPrim::Outline { axis, at, pts, thick, .. } => Shape::Polygon { axis: *axis, at: ev(at)?, pts: pts.clone(), thick: ev(thick)? },
+        ExtraPrim::Drawn { axis, at, thick, form, holes } => {
+            let mut pts = form_outline(&e.name, form, v)?;
+            for h in holes {
+                pts = crate::cad::cut_hole(&pts, &pts_of(h)?);
+            }
+            Shape::Polygon { axis: *axis, at: ev(at)?, pts, thick: ev(thick)? }
+        }
+        ExtraPrim::Strip { axis, at, path, w } => {
+            let path = pts_of(path)?;
+            sheet(*axis, ev(at)?, stroked(&e.name, &path, ev(w)?)?)
+        }
+        ExtraPrim::Plate { axis, at, outline, holes } => {
+            let mut pts = pts_of(outline)?;
+            for h in holes {
+                pts = crate::cad::cut_hole(&pts, &pts_of(h)?);
+            }
+            sheet(*axis, ev(at)?, pts)
+        }
+        ExtraPrim::Disc { axis, at, c, r } => {
+            let (c, r) = (pt_of(c)?, ev(r)?);
+            if !(r > 0.0) {
+                bail!("Disc '{}' needs a radius above zero.", e.name);
+            }
+            sheet(*axis, ev(at)?, crate::sketch::circle(c, r, r * 0.003))
+        }
+        ExtraPrim::Arc { axis, at, c, r, from_deg, to_deg, w } => {
+            let (c, r, a0, a1, w) = (pt_of(c)?, ev(r)?, ev(from_deg)?, ev(to_deg)?, ev(w)?);
+            if !(r > 0.0) || (a1 - a0).abs() > 720.0 {
+                bail!("Arc '{}' needs a radius above zero and a sweep of two turns at most.", e.name);
+            }
+            let n = (((a1 - a0).abs() / 10.0).ceil() as usize).clamp(3, 96);
+            let path: Vec<[f64; 2]> = (0..=n).map(|k| {
+                let t = (a0 + (a1 - a0) * k as f64 / n as f64).to_radians();
+                [c[0] + r * t.cos(), c[1] + r * t.sin()]
+            }).collect();
+            sheet(*axis, ev(at)?, stroked(&e.name, &path, w)?)
+        }
+        ExtraPrim::Meander { axis, at, start, step, height, n, w } => {
+            let (s, step, h, count, w) = (pt_of(start)?, ev(step)?, ev(height)?, ev(n)?.round().clamp(0.0, 64.0) as usize, ev(w)?);
+            if count > 0 && !(step.abs() > 2.0 * w && h.abs() > w) {
+                bail!("Meander '{}' needs steps wider than two traces and height over one.", e.name);
+            }
+            let mut path = vec![s];
+            let mut x = s[0];
+            for _ in 0..count {
+                path.push([x, s[1] + h]);
+                x += step;
+                path.push([x, s[1] + h]);
+                path.push([x, s[1] - h]);
+                x += step;
+                path.push([x, s[1] - h]);
+                path.push([x, s[1]]);
+            }
+            if count == 0 {
+                bail!("Meander '{}' has no periods: use a strip.", e.name);
+            }
+            sheet(*axis, ev(at)?, stroked(&e.name, &path, w)?)
+        }
     };
     Ok(Solid { name: e.name.clone(), material: e.material.clone(), shape })
+}
+
+fn sheet(axis: usize, at: f64, pts: Vec<[f64; 2]>) -> Shape {
+    Shape::Polygon { axis, at, pts, thick: 0.0 }
+}
+
+fn stroked(name: &str, path: &[[f64; 2]], w: f64) -> Result<Vec<[f64; 2]>> {
+    if !(w > 0.0) {
+        bail!("Trace '{name}' needs a width above zero.");
+    }
+    crate::cad::stroke(path, w, false).into_iter().next().with_context(|| format!("Trace '{name}' needs a path of two different points."))
 }
 
 /// Rejects what no solver could run, in terms a user can act on.
@@ -700,6 +870,9 @@ pub enum Goal {
     IsolationBelow { i: usize, j: usize, f_lo: f64, f_hi: f64, db: f64 },
     /// Resonance (deepest match) at `f` within `tol` (Hz).
     ResonanceAt { port: usize, f: f64, tol: f64 },
+    /// Worst share of the power collected that reaches a tag's chip over a band, at or above `at_least`.
+    /// `z` is the chip's series impedance at 915 MHz.
+    ChipPowerAbove { f_lo: f64, f_hi: f64, z: (f64, f64), at_least: f64 },
     /// Peak realised gain at or above `dbi`.
     GainAbove { f: f64, dbi: f64 },
     /// Radiation efficiency at or above (0..1).
@@ -719,6 +892,7 @@ impl Goal {
             Goal::MatchBelow { port, f_lo, f_hi, db } => format!("S{0}{0} ≤ {db:.0} dB over {1:.3}–{2:.3} GHz", port + 1, ghz(f_lo), ghz(f_hi)),
             Goal::IsolationBelow { i, j, f_lo, f_hi, db } => format!("S{}{} ≤ {db:.0} dB over {:.3}–{:.3} GHz", i + 1, j + 1, ghz(f_lo), ghz(f_hi)),
             Goal::ResonanceAt { port, f, tol } => format!("Port {} resonance at {:.3} GHz ± {:.0} MHz", port + 1, ghz(f), tol / 1e6),
+            Goal::ChipPowerAbove { f_lo, f_hi, at_least, .. } => format!("Power into the chip ≥ {at_least:.2} over {:.3}–{:.3} GHz", ghz(f_lo), ghz(f_hi)),
             Goal::GainAbove { f, dbi } => format!("Realized gain ≥ {dbi:.1} dBi at {:.3} GHz", ghz(f)),
             Goal::EfficiencyAbove { f, eff } => format!("Radiation efficiency ≥ {:.0} % at {:.3} GHz", eff * 100.0, ghz(f)),
             Goal::FrontToBackAbove { f, db } => format!("Front/back ≥ {db:.0} dB at {:.3} GHz", ghz(f)),
@@ -739,6 +913,15 @@ impl Goal {
                 let s = r.network.sij_db(*port, *port);
                 let best = r.network.f.iter().zip(&s).min_by(|a, b| a.1.total_cmp(b.1)).map(|x| *x.0);
                 best.map_or(40.0, |fr| pos(((fr - f).abs() - tol) / (tol.max(1.0)) * 3.0))
+            }
+            Goal::ChipPowerAbove { f_lo, f_hi, z, at_least } => {
+                // Across the sweep inside the band, in dB, so it weighs like the others.
+                if r.network.ports() == 0 {
+                    return 40.0;
+                }
+                let zin = r.network.zin(0);
+                let worst = r.network.f.iter().zip(&zin).filter(|(f, _)| (*f_lo..=*f_hi).contains(*f)).map(|(f, za)| crate::tag::power_transfer(*za, crate::tag::chip_at(*z, *f))).fold(f64::INFINITY, f64::min);
+                if worst.is_finite() { pos(crate::db10(*at_least) - crate::db10(worst)) } else { 40.0 }
             }
             Goal::GainAbove { f, dbi } => far(f).map_or(40.0, |m| pos(dbi - m.peak_realized_dbi)),
             Goal::EfficiencyAbove { f, eff } => far(f).map_or(40.0, |m| pos(crate::db10(*eff) - crate::db10(m.rad_efficiency))),

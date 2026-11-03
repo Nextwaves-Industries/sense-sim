@@ -309,8 +309,15 @@ fn converge_results(world: &World) -> ToolOutput {
     let st = world.resource::<Studio>();
     let job = job_json(st);
     let Some(c) = st.converge() else { return text(json!({ "job": job, "study": Value::Null })) };
-    let passes: Vec<Value> = c.steps.iter().map(|p| json!({ "density": p.density, "size": p.size, "seconds": r3(p.seconds), "resonance_ghz": r3(p.f_res / 1e9), "peak_gain_dbi": r3(p.peak_dbi), "delta_s": r3(p.delta_s), "error_left": r3(p.remaining), "gain_change_db": r3(p.gain_change_db) })).collect();
-    text(json!({ "job": job, "finished": c.finished, "converged": c.converged, "limit": c.limit, "note": c.note, "passes": passes }))
+    let passes: Vec<Value> = c.steps.iter().map(|p| {
+        if c.for_chip {
+            json!({ "density": p.density, "size": p.size, "seconds": r3(p.seconds), "best_power_at_ghz": r3(p.f_res / 1e9), "peak_gain_dbi": r3(p.peak_dbi), "power_change": r3(p.delta_s), "error_left": r3(p.remaining), "gain_change_db": r3(p.gain_change_db) })
+        } else {
+            json!({ "density": p.density, "size": p.size, "seconds": r3(p.seconds), "resonance_ghz": r3(p.f_res / 1e9), "peak_gain_dbi": r3(p.peak_dbi), "delta_s": r3(p.delta_s), "error_left": r3(p.remaining), "gain_change_db": r3(p.gain_change_db) })
+        }
+    }).collect();
+    let judged = if c.for_chip { "The share of power reaching the chip across the band, and the gain" } else { "Every S entry, and the realized gain" };
+    text(json!({ "job": job, "finished": c.finished, "converged": c.converged, "limit": c.limit, "judged_by": judged, "note": c.note, "passes": passes }))
 }
 
 fn yield_results(world: &World) -> ToolOutput {
@@ -520,11 +527,16 @@ pub fn tool(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
         }
         "antenna_sweep_results" => sweep_results(world),
         "antenna_converge" => {
+            let spec = world.get_resource::<AntennaSpec>().and_then(|s| s.0.clone());
             let mut st = world.resource_mut::<Studio>();
             if st.busy() {
                 return Some(ToolOutput::err("a job is already running"));
             }
-            st.run_converge(i["limit"].as_f64().unwrap_or(0.02).clamp(0.001, 0.3), i["max_passes"].as_u64().unwrap_or(4).clamp(3, 10) as usize);
+            // A tag is judged by what reaches its chip, as it is everywhere else. 3 % of that power
+            // is 0.13 dB, small against everything else a real label does.
+            let chip = spec.and_then(|r| r.chip_z.map(|z| (z, r.f_lo, r.f_hi)));
+            let default = if chip.is_some() { 0.03 } else { 0.02 };
+            st.run_converge_for(i["limit"].as_f64().unwrap_or(default).clamp(0.001, 0.3), i["max_passes"].as_u64().unwrap_or(4).clamp(3, 10) as usize, chip);
             text(json!({ "started": true, "next": "antenna_wait, then antenna_converge_results" }))
         }
         "antenna_converge_results" => converge_results(world),

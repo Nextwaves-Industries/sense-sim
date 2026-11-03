@@ -40,7 +40,7 @@ pub fn faces_on(study: &Study, part: &Partition, second: bool, tolerance: f64) -
                 }
             }
             if nearest > tolerance {
-                bail!("{}: a picked face has moved or changed since it was picked. The design was edited: pick the face again.", c.kind.label());
+                bail!("{}: a picked face has moved or changed since it was picked. The object was changed or moved: pick the face again.", c.kind.label());
             }
         }
     }

@@ -2,7 +2,6 @@
 //! the floating cards: project tree (library, simulations) on the
 //! left, scene tree and nav cube on the right, detail cards beside them.
 
-mod design_bar;
 mod downloads;
 mod inspector;
 mod library;
@@ -36,7 +35,7 @@ use crate::tabs::{NewTab, Request, Tabs};
 use crate::theme::{self, ACCENT, icon};
 
 pub use settings::SettingsTab;
-pub use workbench::{DesignCommand, DesignInfo, StudioDoc, StudioFile, Workbench};
+pub use workbench::{StudioDoc, StudioFile, Workbench};
 
 pub type ObjectQuery<'w, 's> = Query<'w, 's, (Entity, &'static mut PlacedObject, &'static mut Transform, &'static mut Visibility)>;
 
@@ -99,16 +98,6 @@ pub struct LeftPanelSlot {
     pub plant_toggle: bool,
     /// Antenna Studio covers the canvas; the scene's cards step aside.
     pub studio_open: bool,
-    /// The 3D Design workspace is open, in the same canvas.
-    pub design_open: bool,
-    /// Asked from the design strip, for the design workspace.
-    pub design_send: bool,
-    pub design_licences: bool,
-    pub design_commands: Vec<DesignCommand>,
-    /// How the design workspace stands, from the workspace.
-    pub design_info: DesignInfo,
-    /// Where the strip's File button is: a click there isn't a click away from its menu.
-    pub design_file_button: Option<egui::Rect>,
     /// The canvas Antenna Studio may fill this frame.
     pub studio_rect: Option<egui::Rect>,
     /// Scripted Studio steps (`--open antenna-<page>`), in order.
@@ -288,11 +277,7 @@ impl UiState {
                 continue;
             }
             if let Some(bench) = name.strip_prefix("bench-").and_then(Workbench::from_name) {
-                // The design system says it exists a frame after the UI first runs.
-                slot.design_open |= bench == Workbench::Design;
-                if bench != Workbench::Design {
-                    workbench::switch(slot, rtls, bench);
-                }
+                workbench::switch(slot, rtls, bench);
                 continue;
             }
             let tab = match name.as_str() {
@@ -410,8 +395,6 @@ fn what_is_on_screen(
     let studio_view = || "Antenna Studio".to_string();
     let view = if slot.studio_open {
         Some(studio_view())
-    } else if slot.design_open {
-        Some("the 3D Design workspace".to_string())
     } else if slot.rtls_open {
         Some(format!("the {} card", rtls.local.page().title()))
     } else {
@@ -419,8 +402,6 @@ fn what_is_on_screen(
     };
     let project = if slot.studio_open {
         Some(slot.studio_doc.name.clone()).filter(|n| !n.is_empty())
-    } else if slot.design_open {
-        slot.design_info.designs.get(slot.design_info.active).map(|(name, _)| name.clone())
     } else {
         None
     };
@@ -573,10 +554,7 @@ pub fn ui_system(
     if agent.running {
         state.closing = None;
     }
-    // Designs have tabs of their own: the scene tabs wait for the scene to come back.
-    if slot.design_open {
-        design_bar::show(&mut root, &mut slot);
-    } else if !slot.studio_open {
+    if !slot.studio_open {
         tabbar::show(&mut root, &mut tabs, &mut state, &mut flags);
     }
     workbench::route_file_commands(&mut flags, &mut slot);
@@ -591,7 +569,7 @@ pub fn ui_system(
     if state.start_open {
         let mut name = std::mem::take(&mut state.start_name);
         let mut st = std::mem::take(&mut state.start);
-        let choice = start::show(&ctx, &mut st, &mut library, &mut name, slot.shows(Workbench::Antenna), slot.bench.design_ready);
+        let choice = start::show(&ctx, &mut st, &mut library, &mut name, slot.shows(Workbench::Antenna));
         state.start = st;
         state.start_name = name;
         let typed = Some(state.start_name.trim().to_string()).filter(|t| !t.is_empty());
@@ -620,10 +598,6 @@ pub fn ui_system(
             Some(start::Choice::OpenAntenna) => {
                 workbench::switch(&mut slot, &mut rtls, Workbench::Antenna);
                 slot.studio_file.push(workbench::StudioFile::Open);
-                state.start_open = false;
-            }
-            Some(start::Choice::Design) => {
-                workbench::switch(&mut slot, &mut rtls, Workbench::Design);
                 state.start_open = false;
             }
             Some(start::Choice::Open) => flags.open = true,

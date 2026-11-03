@@ -110,7 +110,7 @@ pub fn usd_with_material(kind: Kind, size: Vec3, mat: &Mat) -> Result<PathBuf> {
         .join("SenseSim")
         .join("structures")
         .join(kind.name())
-        .join(format!("{:.2}x{:.2}x{:.2}_{tag:08x}", size.x, size.y, size.z));
+        .join(format!("{:.2}x{:.2}x{:.2}_{tag:08x}{}", size.x, size.y, size.z, assetgen::variant_suffix(mat)));
     let path = dir.join(format!("{}.usda", kind.name()));
     let part = if kind == Kind::Ceiling {
         // Same facing as the plain ceiling: visible from below only. Only faint
@@ -790,6 +790,18 @@ mod tests {
         let floor = shell.iter().find(|p| p.kind == Kind::Floor).unwrap();
         assert_eq!(floor.material, Some(Mat::from_srgb([10, 20, 30])));
         assert_eq!(ceilings(&sc)[0].material, Some(Mat::from_srgb([200, 200, 200])));
+    }
+
+    #[test]
+    fn a_glass_wall_is_glass_for_radio_and_painted_concrete_is_not() {
+        use crate::rtls::radio::{Material, obstruction_of_asset};
+        let size = Vec3::new(4.0, 3.0, 0.02);
+        let glass = usd_with_material(Kind::Wall, size, &Mat::preset("glass").unwrap()).unwrap();
+        assert_eq!(Kind::of_asset(&glass), Some(Kind::Wall), "still a wall to mount things on");
+        assert_eq!(obstruction_of_asset(&glass), (Material::Glass, Material::Glass.weight()));
+        let paint = usd_with_material(Kind::Wall, size, &Mat::preset("white_paint").unwrap()).unwrap();
+        assert_eq!(obstruction_of_asset(&paint).0, Material::Concrete);
+        assert_ne!(glass, paint);
     }
 
     #[test]

@@ -31,6 +31,51 @@ fn axis_value(ui: &mut egui::Ui, axis: usize, value: &mut f32, speed: f64, decim
     changed
 }
 
+/// What radio predictions treat the object as: a guess from its name until someone says.
+fn radio_row(ui: &mut egui::Ui, name: &str, asset: &std::path::Path) {
+    use crate::rtls::radio::{self, COATED_GLASS_WEIGHT, Material};
+    const CHOICES: [(&str, Material); 7] = [
+        ("Thin: cardboard, plastic", Material::Thin),
+        ("Wood", Material::Wood),
+        ("Glass", Material::Glass),
+        ("Typical wall", Material::Generic),
+        ("Concrete", Material::Concrete),
+        ("Metal", Material::Metal),
+        ("Liquid", Material::Liquid),
+    ];
+    const COATED: &str = "Glass, metal-coated (low-E)";
+    let is_coated = |(m, w): (Material, f32)| m == Material::Glass && w >= COATED_GLASS_WEIGHT;
+    let label = |v: (Material, f32)| {
+        if is_coated(v) { COATED } else { CHOICES.iter().find(|c| c.1 == v.0).map_or("", |c| c.0) }
+    };
+    let guess = radio::obstruction_of_asset(asset);
+    let stated = radio::object_material(name);
+    let shown = match stated {
+        Some(v) => label(v).to_string(),
+        None => format!("{} (guess)", label(guess)),
+    };
+    let tip = "What radio predictions treat this object as. Until you choose, it's a guess from the asset's name.";
+    theme::field_row(ui, "Radio", |ui| {
+        let width = ui.available_width() - 8.0;
+        egui::ComboBox::from_id_salt("object_radio_material").width(width).height(400.0).selected_text(shown).show_ui(ui, |ui| {
+            if ui.selectable_label(stated.is_none(), format!("Guess from its name: {}", label(guess))).clicked() {
+                radio::set_object_material(name, None);
+            }
+            ui.separator();
+            for (text, m) in CHOICES {
+                if ui.selectable_label(stated.is_some_and(|v| v.0 == m && !is_coated(v)), text).clicked() {
+                    // The guess knows how thick a wall is; the plain weight doesn't.
+                    let weight = if guess.0 == m { guess.1 } else { m.weight() };
+                    radio::set_object_material(name, Some((m, weight)));
+                }
+                if m == Material::Glass && ui.selectable_label(stated.is_some_and(is_coated), COATED).on_hover_text("Worth 4 typical walls, where plain glass is worth 0.5: about 24 dB against 3 dB at 6 dB a wall. A typical figure: the coating decides it").clicked() {
+                    radio::set_object_material(name, Some((m, COATED_GLASS_WEIGHT)));
+                }
+            }
+        }).response.on_hover_text(tip);
+    });
+}
+
 pub fn show(ui: &mut egui::Ui, objects: &mut ObjectQuery, selection: &Selection, handles: &HandleUi, actions: &mut Actions, base: &mut Option<EditBase>) {
     let Some((e, mut obj, mut t, _)) = selection.selected.and_then(|e| objects.get_mut(e).ok()) else {
         return;
@@ -146,6 +191,7 @@ pub fn show(ui: &mut egui::Ui, objects: &mut ObjectQuery, selection: &Selection,
             theme::field_row(ui, "Size", |ui| {
                 ui.label(format!("{:.2} × {:.2} × {:.2} m", size.x, size.y, size.z));
             });
+            radio_row(ui, &obj.name, &obj.asset);
             if proto.joints.is_empty() {
                 ui.label(RichText::new("No moving parts: this asset has no joints in its USD.").small().color(theme::WEAK));
             }

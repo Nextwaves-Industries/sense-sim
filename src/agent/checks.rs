@@ -293,11 +293,23 @@ struct AntennaCheck {
     /// The mesh reminder went out: it's advice, not a loop.
     mesh_reminded: bool,
     checks: usize,
+    /// A tag is being designed: requirements name a chip.
+    tag_job: bool,
+    /// Different structures were compared for it.
+    tag_compared: bool,
+    tag_reminded: bool,
 }
 
 impl AntennaCheck {
     fn observe(&mut self, tool: &str, input: &serde_json::Value, output: &str) {
-        let changed = matches!(tool, "antenna_new" | "antenna_set" | "antenna_import_cad" | "antenna_spec") || (tool == "antenna_optimize_status" && input["apply"].as_bool().unwrap_or(false));
+        let changed = matches!(tool, "antenna_new" | "antenna_set" | "antenna_import_cad" | "antenna_spec" | "antenna_draw" | "antenna_tag_open") || (tool == "antenna_stack" && input.as_object().is_some_and(|o| !o.is_empty())) || (tool == "antenna_optimize_status" && input["apply"].as_bool().unwrap_or(false)) || (matches!(tool, "antenna_tag_retune" | "antenna_tag_tune") && input["apply"].as_bool().unwrap_or(false));
+        if tool == "antenna_spec" && (input.get("chip").is_some() || input.get("chip_z").is_some()) {
+            self.tag_job = true;
+        }
+        if tool == "antenna_tag_design" {
+            self.tag_job = true;
+            self.tag_compared = true;
+        }
         if changed {
             self.dirty = true;
             self.problem = None;
@@ -330,6 +342,10 @@ impl AntennaCheck {
         }
         if let Some(p) = self.problem.take() {
             return Some(p);
+        }
+        if self.tag_job && !self.tag_compared && !self.tag_reminded {
+            self.tag_reminded = true;
+            return Some("A tag was designed by adjusting one structure. Run antenna_tag_design to compare different structures in the surroundings it will really be in, and give the user the options, or say plainly why one structure is all this job needs.".into());
         }
         if self.mesh_unchecked && !self.mesh_reminded {
             self.mesh_reminded = true;
@@ -408,6 +424,44 @@ mod rtls_check_tests {
         let bad = json!({ "verdict": "not_trustworthy", "trust_issues": ["Port 1 is not passive."] });
         c.observe("antenna_assess", &json!({}), &bad.to_string());
         assert!(c.pending().unwrap().contains("not passive"));
+    }
+
+    #[test]
+    fn a_tag_tuned_from_one_structure_is_sent_back_once_to_compare_others() {
+        let met = json!({ "verdict": "met_mesh_checked" }).to_string();
+        let mut c = AntennaCheck::default();
+        c.observe("antenna_spec", &json!({ "chip": "ucode9" }), "{}");
+        c.observe("antenna_assess", &json!({}), &met);
+        assert!(c.pending().unwrap().contains("antenna_tag_design"));
+        assert!(c.pending().is_none(), "advice, not a loop");
+        // Having compared them, there's nothing to say.
+        let mut d = AntennaCheck::default();
+        d.observe("antenna_spec", &json!({ "chip_z": [15, -231] }), "{}");
+        d.observe("antenna_tag_design", &json!({}), "{}");
+        d.observe("antenna_assess", &json!({}), &met);
+        assert!(d.pending().is_none());
+        // An antenna with no chip isn't a tag.
+        let mut e = AntennaCheck::default();
+        e.observe("antenna_spec", &json!({ "f_lo_ghz": 2.4 }), "{}");
+        e.observe("antenna_assess", &json!({}), &met);
+        assert!(e.pending().is_none());
+    }
+
+    #[test]
+    fn drawing_or_new_surroundings_have_to_be_judged_again() {
+        let mut c = AntennaCheck::default();
+        let met = json!({ "verdict": "met_mesh_checked" }).to_string();
+        for tool in ["antenna_draw", "antenna_stack", "antenna_tag_open"] {
+            c.observe("antenna_assess", &json!({}), &met);
+            assert!(c.pending().is_none(), "{tool}");
+            c.observe(tool, &json!({ "preset": "paper_label" }), "{}");
+            assert!(c.pending().is_some_and(|w| w.contains("antenna_assess")), "{tool}");
+        }
+        // Only asking what surroundings there are changes nothing: it sent a real run back to redo
+        // a finished answer.
+        let mut d = AntennaCheck::default();
+        d.observe("antenna_stack", &json!({}), "{}");
+        assert!(d.pending().is_none());
     }
 
     #[test]

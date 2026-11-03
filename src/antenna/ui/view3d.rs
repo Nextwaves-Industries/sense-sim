@@ -1,6 +1,7 @@
 //! The Studio's 3D canvas, software-projected and drawn with the egui painter:
 //! an antenna is millimetres big and must not share a camera with a warehouse.
-//! Triangles are sorted back to front, which is enough for these small models.
+//! With no depth buffer, solids are painted back to front, each one whole, and a solid's own
+//! triangles sorted back to front, which is enough for these small models.
 
 use antenna_core::csx::Plan;
 use antenna_core::farfield::{FarField, Pol, Quantity};
@@ -153,6 +154,132 @@ fn flush(painter: &egui::Painter, tris: &mut Vec<Tri>) {
         painter.add(EShape::mesh(mesh));
     }
     tris.clear();
+}
+
+/// One solid, for working out what is painted over what. The box is of the triangles drawn, not
+/// `Shape::bounds`, which pads a cylinder by its radius along its own axis too.
+#[derive(Clone, Copy)]
+struct Part {
+    lo: P3,
+    hi: P3,
+    dielectric: bool,
+}
+
+impl Part {
+    fn of(tris: &[[P3; 3]], dielectric: bool) -> Self {
+        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for p in tris.iter().flatten() {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        Self { lo, hi, dielectric }
+    }
+
+    fn center(&self) -> P3 {
+        std::array::from_fn(|k| (self.lo[k] + self.hi[k]) / 2.0)
+    }
+
+    fn size(&self) -> f64 {
+        antenna_core::geometry::norm(antenna_core::geometry::sub(self.hi, self.lo))
+    }
+
+    /// Where it can land on the screen.
+    fn on_screen(&self, pj: &Projector) -> Rect {
+        let corner = |i: usize| pj.screen(std::array::from_fn(|k| if i & (1 << k) == 0 { self.lo[k] } else { self.hi[k] }));
+        Rect::from_points(&std::array::from_fn::<Pos2, 8, _>(corner))
+    }
+}
+
+/// Whether `a` goes on the canvas before `b`. Sorting triangles can't answer this: a plate is two
+/// huge triangles whose centres say little about the part standing on it.
+fn painted_before(a: &Part, b: &Part, toward: [f64; 3], tolerance: f64) -> bool {
+    // A flat plane between them: the one on the viewer's side can't be hidden by the other. The view
+    // has no perspective, so this holds everywhere on the screen, and parts that touch, such as a
+    // patch on its substrate, get an answer that doesn't flicker as a depth tie would.
+    for k in 0..3 {
+        if toward[k] != 0.0 {
+            if a.hi[k] <= b.lo[k] + tolerance {
+                return toward[k] > 0.0;
+            }
+            if b.hi[k] <= a.lo[k] + tolerance {
+                return toward[k] < 0.0;
+            }
+        }
+    }
+    // Their boxes overlap. Usually one is sunk a little into the other, so the shallowest overlap
+    // stands in for that plane.
+    let overlap = |k: usize| a.hi[k].min(b.hi[k]) - a.lo[k].max(b.lo[k]);
+    let k = (0..3).min_by(|x, y| overlap(*x).total_cmp(&overlap(*y))).unwrap_or(0);
+    let nearer = (a.center()[k] - b.center()[k]) * toward[k];
+    if nearer.abs() > tolerance {
+        return nearer < 0.0;
+    }
+    // One through the middle of the other. A dielectric can be seen through, so it goes first; then
+    // the smaller part stays in sight, as a probe through a plate should.
+    if a.dielectric != b.dielectric {
+        return a.dielectric;
+    }
+    a.size() >= b.size()
+}
+
+/// More solids than this take too long to compare every frame.
+const MOST_ORDERED: usize = 800;
+
+/// The order to paint parts in, back to front.
+fn paint_order(parts: &[Part], pj: &Projector) -> Vec<usize> {
+    let depth: Vec<f32> = parts.iter().map(|p| pj.project(p.center()).1).collect();
+    let mut left: Vec<usize> = (0..parts.len()).collect();
+    left.sort_by(|a, b| depth[*a].total_cmp(&depth[*b]));
+    if parts.len() > MOST_ORDERED {
+        left.sort_by_key(|i| !parts[*i].dielectric);
+        return left;
+    }
+    let toward = pj.toward();
+    let tolerance = parts.iter().map(Part::size).fold(0.0, f64::max) * 1e-6;
+    let screen: Vec<Rect> = parts.iter().map(|p| p.on_screen(pj)).collect();
+    let mut waits = vec![0_usize; parts.len()];
+    let mut then: Vec<Vec<usize>> = vec![Vec::new(); parts.len()];
+    for a in 0..parts.len() {
+        for b in a + 1..parts.len() {
+            if screen[a].intersects(screen[b]) {
+                let (first, second) = if painted_before(&parts[a], &parts[b], toward, tolerance) { (a, b) } else { (b, a) };
+                then[first].push(second);
+                waits[second] += 1;
+            }
+        }
+    }
+    // The farthest part that nothing has to come before. Parts can overlap in a ring, with each in
+    // front of the next: then nothing is free, and the farthest one breaks the ring.
+    let mut order = Vec::with_capacity(parts.len());
+    while !left.is_empty() {
+        let i = left.remove(left.iter().position(|i| waits[*i] == 0).unwrap_or(0));
+        for j in &then[i] {
+            waits[*j] = waits[*j].saturating_sub(1);
+        }
+        order.push(i);
+    }
+    order
+}
+
+/// Paints solids back to front: each one's triangles, whether it's a dielectric, and its colour.
+fn paint_solids<'a>(painter: &egui::Painter, pj: &Projector, solids: impl Iterator<Item = (&'a [[P3; 3]], bool, Color32)>) {
+    let solids: Vec<_> = solids.filter(|s| !s.0.is_empty()).collect();
+    let parts: Vec<Part> = solids.iter().map(|s| Part::of(s.0, s.1)).collect();
+    let toward = pj.toward();
+    let mut tris = Vec::new();
+    for i in paint_order(&parts, pj) {
+        let (ts, _, base) = solids[i];
+        for t in ts {
+            let color = shade(base, normal(t), toward);
+            let (p0, d0) = pj.project(t[0]);
+            let (p1, d1) = pj.project(t[1]);
+            let (p2, d2) = pj.project(t[2]);
+            tris.push(Tri { p: [p0, p1, p2], c: [color; 3], depth: (d0 + d1 + d2) / 3.0 });
+        }
+        flush(painter, &mut tris);
+    }
 }
 
 /// One solid, as `tessellate` returns it.
@@ -331,16 +458,233 @@ fn length_label(metres: f64) -> String {
     }
 }
 
-/// The drawing plane's lines across the view, thinned until they're far enough apart
-/// to read, every fifth one heavier, and the plane's axes in their colours. Returns the
-/// spacing it drew at, or `None` when looking along the plane.
+/// How close a grid's lines may land on the screen, in points: any closer and they read as hatching.
+const GRID_MIN_GAP: f32 = 12.0;
+/// The sine of the angle under which a plane is too edge-on to show a grid at all.
+const GRID_EDGE_ON: f32 = 0.05;
+/// A grid line's colour where it shows in full.
+const GRID_INK: Color32 = Color32::from_rgb(170, 177, 188);
+/// How far a floor reaches from the middle of the model, in model radii.
+const FLOOR_REACH: f64 = 1.5;
+/// A ground plane's tint: the floor it stands on is metal.
+const GROUND_TINT: f32 = 0.24;
+
+/// The opaque colour `t` of the way from `a` to `b`. A grid is the first thing on the canvas, so
+/// it can mix with what's under it: blending would happen in linear light, where it barely shows.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// How many points apart a plane's grid lines land per metre of spacing, in whichever of its two
+/// directions they're closer. Seen at a low angle a plane squashes, which metres alone can't say.
+fn grid_gap(pj: &Projector, axis: usize) -> f32 {
+    let along = |k: usize| vec2(pj.r[0][k], pj.r[1][k]).length();
+    pj.r[2][axis].abs() / along((axis + 1) % 3).max(along((axis + 2) % 3)).max(1e-6) * pj.scale
+}
+
+/// The spacing to draw at: `step` times a power of five, the finest whose lines stay apart.
+fn grid_every(step: f64, gap: f32) -> f64 {
+    let mut every = step.max(1e-9);
+    while every * (gap.max(1e-6) as f64) < GRID_MIN_GAP as f64 {
+        every *= 5.0;
+    }
+    every
+}
+
+/// How strongly a line shows, by how far it is from the next line of its own set. Lines fade in as
+/// room opens up and out as it closes, so nothing pops when the spacing changes.
+fn grid_ink(apart: f32) -> f32 {
+    ((apart - GRID_MIN_GAP) / (GRID_MIN_GAP * 20.0)).clamp(0.0, 1.0).sqrt()
+}
+
+/// Which coarser set a line also belongs to, as a multiple of the spacing: every fifth line is
+/// stronger, every twenty-fifth stronger still. Past that, `grid_ink` has reached its full strength.
+fn grid_rank(i: i64) -> f32 {
+    if i % 25 == 0 {
+        25.0
+    } else if i % 5 == 0 {
+        5.0
+    } else {
+        1.0
+    }
+}
+
+/// How much of a floor shows this fraction of its radius out: all of it around the model, none at the rim.
+fn floor_fade(out: f32) -> f32 {
+    let t = ((1.0 - out) / 0.6).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The part of a plane a grid covers, in the plane's own two coordinates.
+enum Reach {
+    /// All of this box: a drawing can go anywhere on the canvas.
+    Whole([f64; 2], [f64; 2]),
+    /// A disc around the model, fading out to its rim. With edges, a low view reads as a floor
+    /// under the model, not as a sheet of lines the size of the canvas.
+    Disc([f64; 2], f64),
+}
+
+/// One grid line: `at` along coordinate `k`, running from `from` to `to` along the other.
+struct GridLine {
+    k: usize,
+    i: i64,
+    at: f64,
+    from: f64,
+    to: f64,
+}
+
+fn grid_lines(every: f64, reach: &Reach) -> Vec<GridLine> {
+    let (lo, hi) = match reach {
+        Reach::Whole(lo, hi) => (*lo, *hi),
+        Reach::Disc(o, r) => ([o[0] - r, o[1] - r], [o[0] + r, o[1] + r]),
+    };
+    let mut lines = Vec::new();
+    for k in 0..2 {
+        let first = (lo[k] / every).floor() as i64;
+        let last = (hi[k] / every).ceil() as i64;
+        if last - first > 600 {
+            continue;
+        }
+        for i in first..=last {
+            let at = i as f64 * every;
+            let (from, to) = match reach {
+                Reach::Whole(..) => (lo[1 - k], hi[1 - k]),
+                Reach::Disc(o, r) => {
+                    let off = at - o[k];
+                    if off.abs() >= *r {
+                        continue;
+                    }
+                    let half = (r * r - off * off).sqrt();
+                    (o[1 - k] - half, o[1 - k] + half)
+                }
+            };
+            lines.push(GridLine { k, i, at, from, to });
+        }
+    }
+    lines
+}
+
+/// A straight line in a mesh, its colour varying along it as a stroke's can't. `colors_at` gives the
+/// line's colour and the opaque colour under it, which its edges feather into. Feathering to
+/// transparent would turn any pale line the same grey: the window blends in linear light, and a
+/// vertex colour fading to nothing passes through dark on the way.
+fn ribbon(mesh: &mut Mesh, a: Pos2, b: Pos2, width: f32, feather: f32, stops: u32, colors_at: impl Fn(f32) -> (Color32, Color32)) {
+    let across = (b - a).normalized().rot90();
+    let inner = (width.max(feather) - feather) / 2.0;
+    let outer = inner + feather;
+    let first = mesh.vertices.len() as u32;
+    for s in 0..=stops {
+        let t = s as f32 / stops as f32;
+        let (p, (color, under)) = (a + (b - a) * t, colors_at(t));
+        for (off, c) in [(-outer, under), (-inner, color), (inner, color), (outer, under)] {
+            mesh.colored_vertex(p + across * off, c);
+        }
+    }
+    for s in 0..stops {
+        let row = first + s * 4;
+        for q in row..row + 3 {
+            mesh.add_triangle(q, q + 1, q + 4);
+            mesh.add_triangle(q + 1, q + 5, q + 4);
+        }
+    }
+}
+
+/// A disc of colour on a plane, `color_at` taking the fraction of the radius.
+fn disc(mesh: &mut Mesh, center: [f64; 2], radius: f64, on_plane: impl Fn([f64; 2]) -> Pos2, color_at: impl Fn(f32) -> Color32) {
+    const RINGS: [f32; 6] = [0.0, 0.4, 0.55, 0.7, 0.85, 1.0];
+    const AROUND: u32 = 64;
+    let first = mesh.vertices.len() as u32;
+    for out in RINGS {
+        for a in 0..AROUND {
+            let (s, c) = (a as f64 / AROUND as f64 * std::f64::consts::TAU).sin_cos();
+            let r = radius * out as f64;
+            mesh.colored_vertex(on_plane([center[0] + r * c, center[1] + r * s]), color_at(out));
+        }
+    }
+    for ring in 0..RINGS.len() as u32 - 1 {
+        let (inside, outside) = (first + ring * AROUND, first + (ring + 1) * AROUND);
+        for a in 0..AROUND {
+            let b = (a + 1) % AROUND;
+            mesh.add_triangle(inside + a, inside + b, outside + a);
+            mesh.add_triangle(inside + b, outside + b, outside + a);
+        }
+    }
+}
+
+/// Paints a grid on the plane `(axis, height, step)`, on a tint if it has one: lines at a spacing
+/// that stays readable on the screen, and the plane's axes in their colours. Returns the spacing to
+/// tell the user, if there's one to tell. Looking along the plane, nothing is painted.
+fn plane_grid(painter: &egui::Painter, pj: &Projector, (axis, at, step): (usize, f64, f64), reach: Reach, tint: Option<Color32>, show_lines: bool) -> Option<f64> {
+    let facing = pj.r[2][axis].abs();
+    if facing < GRID_EDGE_ON {
+        return None;
+    }
+    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+    let gap = grid_gap(pj, axis);
+    let every = grid_every(step, gap);
+    // Fades away as the plane turns edge-on, rather than vanishing all at once.
+    let shown = ((facing - GRID_EDGE_ON) / 0.2).clamp(0.0, 1.0);
+    let on_plane = |c: [f64; 2]| {
+        let mut p = [0.0; 3];
+        p[axis] = at;
+        p[u] = c[0];
+        p[v] = c[1];
+        pj.screen(p)
+    };
+    let fade = |c: [f64; 2]| match &reach {
+        Reach::Whole(..) => 1.0,
+        Reach::Disc(o, r) => floor_fade(((c[0] - o[0]).hypot(c[1] - o[1]) / r) as f32),
+    };
+    let surface = |f: f32| tint.map_or(theme::BG, |t| mix(theme::BG, t, f * shown));
+
+    let mut mesh = Mesh::default();
+    if let (Some(_), Reach::Disc(o, r)) = (tint, &reach) {
+        disc(&mut mesh, *o, *r, on_plane, |out| surface(floor_fade(out)));
+    }
+    let stops = if matches!(reach, Reach::Disc(..)) { 16 } else { 1 };
+    let feather = 1.0 / painter.ctx().pixels_per_point();
+    let axis_colors = [charts::RED, charts::GREEN, charts::BLUE];
+    // Weakest first: they're opaque, so where lines cross the strongest stays on top.
+    let mut lines = if show_lines { grid_lines(every, &reach) } else { Vec::new() };
+    lines.sort_by(|a, b| (a.i == 0, grid_rank(a.i)).partial_cmp(&(b.i == 0, grid_rank(b.i))).unwrap_or(std::cmp::Ordering::Equal));
+    for l in &lines {
+        // The line through the origin runs along the plane's other axis.
+        let (color, ink, width) = if l.i == 0 { (axis_colors[if l.k == 0 { v } else { u }], 0.7, 1.5) } else { (GRID_INK, grid_ink(grid_rank(l.i) * gap * every as f32), 0.8) };
+        if ink * shown < 0.01 {
+            continue;
+        }
+        let point = |along: f64| if l.k == 0 { [l.at, along] } else { [along, l.at] };
+        ribbon(&mut mesh, on_plane(point(l.from)), on_plane(point(l.to)), width, feather, stops, |t| {
+            let f = fade(point(l.from + (l.to - l.from) * t as f64));
+            let under = surface(f);
+            (mix(under, color, ink * shown * f), under)
+        });
+    }
+    if !mesh.is_empty() {
+        painter.add(EShape::mesh(mesh));
+    }
+    if show_lines { stated_spacing(every, gap, &reach) } else { None }
+}
+
+/// The spacing to tell the user: lines still fading in don't read as the grid yet, so the set around
+/// them does. A floor seen from far off or low down may have no such lines on it to measure by.
+fn stated_spacing(every: f64, gap: f32, reach: &Reach) -> Option<f64> {
+    let spacing = if grid_ink(gap * every as f32) < 0.25 { every * 5.0 } else { every };
+    match reach {
+        Reach::Disc(_, r) if spacing >= *r => None,
+        _ => Some(spacing),
+    }
+}
+
+/// The drawing plane's grid across the whole view.
 fn drawing_grid(painter: &egui::Painter, pj: &Projector, rect: Rect, axis: usize, at: f64, step: f64) -> Option<f64> {
     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
     let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
     let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
     for c in corners {
         let (o, d) = pj.ray(c);
-        if d[axis].abs() < 0.05 {
+        if d[axis].abs() < GRID_EDGE_ON as f64 {
             return None;
         }
         let t = (at - o[axis]) / d[axis];
@@ -350,36 +694,14 @@ fn drawing_grid(painter: &egui::Painter, pj: &Projector, rect: Rect, axis: usize
             hi[k] = hi[k].max(q);
         }
     }
-    let mut every = step.max(1e-9);
-    while every * (pj.scale as f64) < 12.0 {
-        every *= 5.0;
-    }
-    let point = |a: f64, b: f64| {
-        let mut p = [0.0; 3];
-        p[axis] = at;
-        p[u] = a;
-        p[v] = b;
-        pj.screen(p)
-    };
-    let minor = Stroke::new(1.0, Color32::from_rgb(225, 228, 232));
-    let major = Stroke::new(1.0, Color32::from_rgb(196, 201, 209));
-    let axis_colors = [charts::RED, charts::GREEN, charts::BLUE];
-    for k in 0..2 {
-        let first = (lo[k] / every).floor() as i64;
-        let last = (hi[k] / every).ceil() as i64;
-        if last - first > 600 {
-            continue;
-        }
-        // The line through the origin runs along the plane's other axis.
-        let zero = Stroke::new(1.8, axis_colors[if k == 0 { v } else { u }].gamma_multiply(0.8));
-        for i in first..=last {
-            let x = i as f64 * every;
-            let line = if k == 0 { [point(x, lo[1]), point(x, hi[1])] } else { [point(lo[0], x), point(hi[0], x)] };
-            let stroke = if i == 0 { zero } else if i % 5 == 0 { major } else { minor };
-            painter.line_segment(line, stroke);
-        }
-    }
-    Some(every)
+    plane_grid(painter, pj, (axis, at, step), Reach::Whole(lo, hi), None, true)
+}
+
+/// A floor under the model, its grid finer than `floor_step` so it has lines to show zoomed in.
+/// An infinite ground plane is the floor, tinted to say it's metal.
+fn floor_grid(painter: &egui::Painter, pj: &Projector, center: P3, radius: f64, (at, step): (f64, f64), ground: bool, show_lines: bool) -> Option<f64> {
+    let tint = ground.then(|| mix(theme::BG, METAL, GROUND_TINT));
+    plane_grid(painter, pj, (2, at, step / 25.0), Reach::Disc([center[0], center[1]], radius), tint, show_lines)
 }
 
 /// Draws the scene over all of `canvas`, framed on `rect`, the part the cards leave
@@ -429,7 +751,6 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
     let pattern = scene.far.filter(|_| scene.mode == ViewMode::Pattern);
     let view_extent = if pattern.is_some() { extent * 1.6 } else { extent };
     let pj = Projector::new(cam, rect, center, view_extent);
-    let toward = pj.toward();
     let mut tris: Vec<Tri> = Vec::new();
 
     // A drawing plane, or else a floor under the model: what the eye judges it against.
@@ -437,34 +758,18 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
         drawing_grid(&painter, &pj, canvas, axis, at, step)
     } else if let Some(g) = scene.geometry.filter(|g| !g.solids.is_empty()) {
         let floor = floor_of(g, extent);
-        let step = drawing_grid(&painter, &pj, canvas, 2, floor, floor_step(extent));
-        if step.is_some() {
+        // Over the FDTD mesh, the solver's own lines are the ones to read.
+        let fdtd_mesh = scene.mode == ViewMode::Mesh && scene.mom_mesh.is_none() && scene.plan.is_some();
+        let spacing = floor_grid(&painter, &pj, center, view_extent * FLOOR_REACH, (floor, floor_step(extent)), g.ground, !fdtd_mesh);
+        if pj.r[2][2].abs() >= GRID_EDGE_ON {
             shadow(&painter, &pj, scene.tess, floor);
         }
-        step
+        spacing
     } else {
         None
     };
     if let Some(step) = drawn_step {
         painter.text(rect.left_bottom() + vec2(120.0, -16.0), Align2::LEFT_CENTER, format!("Lines every {}", length_label(step)), FontId::proportional(12.5), theme::WEAK);
-    }
-
-    // Ground plane: a tinted grid at z = 0.
-    if let Some(g) = scene.geometry.filter(|g| g.ground) {
-        let r = extent * 1.4;
-        let (cx, cy) = (center[0], center[1]);
-        let n = 10;
-        let grid = Stroke::new(1.0, Color32::from_rgb(208, 212, 218));
-        let _ = g;
-        for k in 0..=n {
-            let t = -r + 2.0 * r * k as f64 / n as f64;
-            let (a, _) = pj.project([cx + t, cy - r, 0.0]);
-            let (b, _) = pj.project([cx + t, cy + r, 0.0]);
-            painter.line_segment([a, b], grid);
-            let (a, _) = pj.project([cx - r, cy + t, 0.0]);
-            let (b, _) = pj.project([cx + r, cy + t, 0.0]);
-            painter.line_segment([a, b], grid);
-        }
     }
 
     // Field plane, under the model.
@@ -514,27 +819,14 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
 
     // The model.
     if let Some(g) = scene.geometry.filter(|_| cur.is_none()) {
-        // Dielectrics first: a patch lies exactly on its substrate, and a depth
-        // sort of coplanar faces would flicker between them.
-        for pass_dielectric in [true, false] {
-            for (s, (ts, _)) in g.solids.iter().zip(scene.tess) {
-                if is_dielectric(&s.material) != pass_dielectric {
-                    continue;
-                }
-                let mut base = solid_color(&s.material);
-                if scene.transparent {
-                    base = see_through(base);
-                }
-                for t in ts {
-                    let color = shade(base, normal(t), toward);
-                    let (p0, d0) = pj.project(t[0]);
-                    let (p1, d1) = pj.project(t[1]);
-                    let (p2, d2) = pj.project(t[2]);
-                    tris.push(Tri { p: [p0, p1, p2], c: [color; 3], depth: (d0 + d1 + d2) / 3.0 });
-                }
-            }
-            flush(&painter, &mut tris);
-        }
+        paint_solids(
+            &painter,
+            &pj,
+            g.solids.iter().zip(scene.tess).map(|(s, (ts, _))| {
+                let base = solid_color(&s.material);
+                (ts.as_slice(), is_dielectric(&s.material), if scene.transparent { see_through(base) } else { base })
+            }),
+        );
         for (s, (_, ls)) in g.solids.iter().zip(scene.tess) {
             if let Shape::Wire { r, .. } = &s.shape {
                 let w = (*r as f32 * pj.scale * 2.0).clamp(2.5, 10.0);
@@ -705,26 +997,10 @@ pub fn thumbnail(ui: &mut egui::Ui, rect: Rect, geom: &Geometry) {
     let cam = Camera { yaw: 0.7, pitch: 0.45, zoom: 1.0, pan: egui::Vec2::ZERO };
     let (c, e) = frame(Some(geom), None);
     let pj = Projector::new(&cam, rect, c, e);
-    let toward = pj.toward();
-    let mut tris = Vec::new();
-    let mut lines: Vec<(Pos2, Pos2, f32)> = Vec::new();
-    for s in &geom.solids {
-        let (ts, ls) = tessellate(&s.shape);
-        let base = solid_color(&s.material);
-        for t in ts.iter().take(1500) {
-            let color = shade(base, normal(t), toward);
-            let (p0, d0) = pj.project(t[0]);
-            let (p1, d1) = pj.project(t[1]);
-            let (p2, d2) = pj.project(t[2]);
-            tris.push(Tri { p: [p0, p1, p2], c: [color; 3], depth: (d0 + d1 + d2) / 3.0 });
-        }
-        for l in &ls {
-            lines.push((pj.project(l[0]).0, pj.project(l[1]).0, 1.6));
-        }
-    }
-    flush(&painter, &mut tris);
-    for (a, b, w) in lines {
-        painter.line_segment([a, b], Stroke::new(w, WIRE));
+    let tess: Vec<Tessellated> = geom.solids.iter().map(|s| tessellate(&s.shape)).collect();
+    paint_solids(&painter, &pj, geom.solids.iter().zip(&tess).map(|(s, (ts, _))| (&ts[..ts.len().min(1500)], is_dielectric(&s.material), solid_color(&s.material))));
+    for l in tess.iter().flat_map(|(_, ls)| ls) {
+        painter.line_segment([pj.project(l[0]).0, pj.project(l[1]).0], Stroke::new(1.6, WIRE));
     }
     for port in &geom.ports {
         let m = pj.project(port.center()).0;
@@ -749,6 +1025,127 @@ mod tests {
         assert_eq!(length_label(0.0005), "0.5 mm");
         assert_eq!(length_label(0.00005), "50 µm");
         assert_eq!(length_label(1.5), "1.5 m");
+    }
+
+    /// A view from this angle, at this many points to the millimetre.
+    fn view_from(yaw: f32, pitch: f32, points_per_mm: f32) -> Projector {
+        Projector::new(&Camera { yaw, pitch, zoom: points_per_mm, pan: egui::Vec2::ZERO }, Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 1000.0)), [0.0; 3], 0.42)
+    }
+
+    /// How far apart neighbouring lines of the floor land on the screen, measured from where
+    /// they're drawn: (lines of constant x, lines of constant y).
+    fn measured_gaps(pj: &Projector, every: f64) -> (f32, f32) {
+        let apart = |a: P3, b: P3, start: P3| {
+            let (a, b, s) = (pj.screen(a), pj.screen(b), pj.screen(start));
+            let along = (b - a).normalized();
+            let off = s - a;
+            (off.x * along.y - off.y * along.x).abs()
+        };
+        (apart([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [every, 0.0, 0.0]), apart([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, every, 0.0]))
+    }
+
+    /// The reported view: orbited to 9° above the floor, 4.9 points to the millimetre. Spacing was
+    /// judged in metres, so the 5 mm lines landed under 4 points apart, a hatching over the canvas.
+    #[test]
+    fn a_low_view_thins_the_grid_by_what_lands_on_the_screen() {
+        let pj = view_from(-0.14, 0.154, 4.9);
+        let every = grid_every(0.005 / 25.0, grid_gap(&pj, 2));
+        let (x, y) = measured_gaps(&pj, every);
+        assert!(x.min(y) >= GRID_MIN_GAP, "{every} m lands {x} and {y} points apart");
+        let (x, y) = measured_gaps(&pj, 0.005);
+        assert!(x.min(y) < GRID_MIN_GAP, "the old spacing was too close here: {x} and {y}");
+    }
+
+    #[test]
+    fn the_gap_is_what_the_lines_measure_on_the_screen() {
+        for (yaw, pitch) in [(0.65, 0.42), (-0.14, 0.154), (0.0, std::f32::consts::FRAC_PI_2), (1.1, -0.8), (2.5, 1.2)] {
+            let pj = view_from(yaw, pitch, 10.0);
+            let (x, y) = measured_gaps(&pj, 1.0);
+            let gap = grid_gap(&pj, 2);
+            assert!((x.min(y) - gap).abs() < gap * 1e-3, "yaw {yaw}, pitch {pitch}: {x}, {y} against {gap}");
+        }
+    }
+
+    /// Looking along the plane, no spacing is far enough apart: it must still return.
+    #[test]
+    fn looking_along_the_plane_does_not_hang_the_spacing() {
+        assert_eq!(grid_gap(&view_from(0.0, 0.0, 1.0), 2), 0.0);
+        assert!(grid_every(0.001, 0.0).is_finite());
+    }
+
+    /// When the spacing changes, every line that stays must keep its strength, and those that go
+    /// must already have faded out.
+    #[test]
+    fn nothing_pops_when_the_spacing_changes() {
+        let gap = GRID_MIN_GAP;
+        assert_eq!(grid_ink(gap), 0.0, "the lines about to go");
+        for i in -130..130_i64 {
+            let (before, after) = (grid_ink(grid_rank(i * 5) * gap), grid_ink(grid_rank(i) * gap * 5.0));
+            assert!((before - after).abs() < 1e-5, "line {i}: {before} then {after}");
+        }
+        assert!(grid_ink(5.0 * gap) < grid_ink(25.0 * gap), "a coarser set is stronger");
+    }
+
+    /// The canvas said "Lines every 125 mm" under a floor 44 mm across.
+    #[test]
+    fn the_canvas_only_states_a_spacing_it_has_lines_for() {
+        let floor = Reach::Disc([0.0, 0.0], 0.022);
+        assert_eq!(stated_spacing(0.025, GRID_MIN_GAP * 40.0, &floor), None, "wider than the floor");
+        assert_eq!(stated_spacing(0.004, GRID_MIN_GAP * 500.0, &floor), Some(0.02), "lines still fading in: the coarser set");
+        assert_eq!(stated_spacing(0.004, GRID_MIN_GAP * 2500.0, &floor), Some(0.004), "lines that show");
+        let whole = Reach::Whole([-0.01, -0.01], [0.01, 0.01]);
+        assert_eq!(stated_spacing(0.025, GRID_MIN_GAP * 40.0, &whole), Some(0.125), "a drawing plane goes on past its box");
+    }
+
+    #[test]
+    fn a_floor_is_full_around_the_model_and_gone_at_its_rim() {
+        assert_eq!(floor_fade(0.0), 1.0);
+        assert_eq!(floor_fade(0.4), 1.0);
+        assert_eq!(floor_fade(1.0), 0.0);
+        assert!(floor_fade(0.6) > floor_fade(0.8));
+    }
+
+    #[test]
+    fn a_floors_lines_stay_on_it() {
+        let (o, r) = ([0.012, -0.004], 0.03);
+        let lines = grid_lines(0.005, &Reach::Disc(o, r));
+        assert!(!lines.is_empty());
+        for l in &lines {
+            for along in [l.from, l.to] {
+                let p = if l.k == 0 { [l.at, along] } else { [along, l.at] };
+                assert!((p[0] - o[0]).hypot(p[1] - o[1]) <= r * (1.0 + 1e-9), "{p:?}");
+            }
+        }
+        // Both directions, and only the lines that cross the disc.
+        for k in 0..2 {
+            let count = lines.iter().filter(|l| l.k == k).count();
+            assert!(count > 0 && count <= (2.0 * r / 0.005) as usize + 1, "{count} lines of direction {k}");
+        }
+    }
+
+    #[test]
+    fn a_drawing_grid_covers_its_whole_box() {
+        let (lo, hi) = ([-0.02, -0.01], [0.02, 0.01]);
+        let lines = grid_lines(0.005, &Reach::Whole(lo, hi));
+        assert!(lines.iter().all(|l| l.from == lo[1 - l.k] && l.to == hi[1 - l.k]));
+        assert_eq!(lines.iter().filter(|l| l.k == 0).count(), 9);
+        assert_eq!(lines.iter().filter(|l| l.k == 1).count(), 5);
+    }
+
+    /// Edges that fade to transparent turned every pale line the same grey in the window, so the
+    /// floor's fade didn't show and it ended in a hard, stepped rim.
+    #[test]
+    fn a_ribbon_feathers_into_the_opaque_colour_under_it() {
+        let mut mesh = Mesh::default();
+        ribbon(&mut mesh, pos2(0.0, 0.0), pos2(100.0, 0.0), 1.0, 0.5, 4, |_| (Color32::RED, Color32::WHITE));
+        ribbon(&mut mesh, pos2(0.0, 5.0), pos2(100.0, 5.0), 1.0, 0.5, 1, |_| (Color32::BLUE, Color32::WHITE));
+        assert!(mesh.is_valid());
+        assert_eq!(mesh.vertices.len(), 5 * 4 + 2 * 4);
+        assert_eq!(mesh.indices.len(), (4 + 1) * 3 * 2 * 3);
+        assert_eq!(mesh.vertices[0].color, Color32::WHITE);
+        assert_eq!(mesh.vertices[1].color, Color32::RED);
+        assert_eq!(mesh.vertices[3].color, Color32::WHITE);
+        assert!(mesh.vertices.iter().all(|v| v.color.a() == 255));
     }
 
     /// A floor under a model, unless it has a ground plane to stand on.
@@ -793,6 +1190,72 @@ mod tests {
         assert_eq!(shade(METAL, facing, facing).a(), 255);
         let (away, front) = (shade(METAL, [1.0, 0.0, 0.0], facing), shade(METAL, facing, facing));
         assert!(away.r() < front.r() && away.g() < front.g());
+    }
+
+    /// A view at this pitch: positive is from above, negative from below.
+    fn looking(pitch: f32) -> Projector {
+        Projector::new(&Camera { yaw: 0.65, pitch, zoom: 1.0, pan: egui::Vec2::ZERO }, Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 800.0)), [0.0; 3], 0.1)
+    }
+
+    fn part(lo: P3, hi: P3, dielectric: bool) -> Part {
+        Part { lo, hi, dielectric }
+    }
+
+    /// A ceramic puck on its ground plate was always painted first, so the plate hid it. The plate
+    /// is listed second in that template, and metal or not must not decide it.
+    #[test]
+    fn a_part_on_a_plate_is_painted_over_it_only_from_its_own_side() {
+        let plate = part([-0.05, -0.05, 0.0], [0.05, 0.05, 0.0], false);
+        let puck = part([-0.01, -0.01, 0.0], [0.01, 0.01, 0.02], true);
+        assert_eq!(paint_order(&[puck, plate], &looking(0.42)), [1, 0], "from above, the plate first");
+        assert_eq!(paint_order(&[plate, puck], &looking(0.42)), [0, 1], "listed the other way round");
+        assert_eq!(paint_order(&[puck, plate], &looking(-0.42)), [0, 1], "from below, the puck first");
+    }
+
+    /// Faces that touch must get an answer from the geometry: a depth tie would flicker.
+    #[test]
+    fn a_stack_of_layers_paints_in_stack_order_from_either_side() {
+        let ground = part([-0.04, -0.04, 0.0], [0.04, 0.04, 0.0], false);
+        let substrate = part([-0.04, -0.04, 0.0], [0.04, 0.04, 0.0016], true);
+        let patch = part([-0.02, -0.02, 0.0016], [0.02, 0.02, 0.0016], false);
+        let layers = [patch, ground, substrate];
+        assert_eq!(paint_order(&layers, &looking(0.42)), [1, 2, 0], "ground, substrate, patch");
+        assert_eq!(paint_order(&layers, &looking(-0.42)), [0, 2, 1], "patch, substrate, ground");
+    }
+
+    #[test]
+    fn a_part_sunk_into_a_thick_plate_still_stands_in_front_of_it() {
+        let plate = part([-0.05, -0.05, -0.002], [0.05, 0.05, 0.0], false);
+        let puck = part([-0.01, -0.01, -0.001], [0.01, 0.01, 0.02], true);
+        assert_eq!(paint_order(&[puck, plate], &looking(0.42)), [1, 0]);
+    }
+
+    /// Through the middle of a plate, nothing says which is nearer: the small part stays in sight.
+    #[test]
+    fn a_probe_through_a_plate_stays_in_sight() {
+        let plate = part([-0.05, -0.05, -0.001], [0.05, 0.05, 0.001], false);
+        let probe = part([-0.001, -0.001, -0.01], [0.001, 0.001, 0.01], false);
+        assert_eq!(paint_order(&[probe, plate], &looking(0.42)), [1, 0]);
+    }
+
+    /// Whatever the arrangement, rings included, every part is painted exactly once.
+    #[test]
+    fn every_part_is_painted_once() {
+        let at = |i: usize, m: usize| (i * m % 97) as f64 / 97.0 * 0.05;
+        let parts: Vec<Part> = (0..200).map(|i| part([at(i, 13), at(i, 29), at(i, 53)], [at(i, 13) + 0.03, at(i, 29) + 0.002, at(i, 53) + 0.01], i % 3 == 0)).collect();
+        let mut order = paint_order(&parts, &looking(0.42));
+        order.sort_unstable();
+        assert_eq!(order, (0..200).collect::<Vec<_>>());
+    }
+
+    /// Too many to compare every frame: it falls back to dielectrics first, and doesn't stall.
+    #[test]
+    fn a_huge_model_paints_its_dielectrics_first() {
+        let parts: Vec<Part> = (0..MOST_ORDERED + 1).map(|i| part([i as f64 * 0.01, 0.0, 0.0], [i as f64 * 0.01 + 0.005, 0.01, 0.0], i % 2 == 1)).collect();
+        let order = paint_order(&parts, &looking(0.42));
+        let dielectrics = order.iter().take_while(|i| parts[**i].dielectric).count();
+        assert_eq!(dielectrics, parts.iter().filter(|p| p.dielectric).count());
+        assert_eq!(order.len(), parts.len());
     }
 
     /// The named views really look along what they say.

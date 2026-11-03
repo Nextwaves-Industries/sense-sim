@@ -64,7 +64,7 @@ fn need_result(ui: &mut egui::Ui, st: &mut Studio) -> bool {
     true
 }
 
-fn taper_ui(ui: &mut egui::Ui, id: &str, t: &mut Taper) {
+pub(crate) fn taper_ui(ui: &mut egui::Ui, id: &str, t: &mut Taper) {
     let label = |t: &Taper| match t {
         Taper::Uniform => "Uniform".to_string(),
         Taper::Binomial => "Binomial".to_string(),

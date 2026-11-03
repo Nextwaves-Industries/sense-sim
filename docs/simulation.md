@@ -1,65 +1,25 @@
-# 3D design and simulation
+# Simulation
 
-Sense Sim has a parametric CAD workspace (SolidCraft's, embedded) and runs the 17 analysis types of
-its Create Simulation dialog on open-source solvers and a built-in GPU solver. Studies run on design
-bodies or on USD objects from the scene, from the Simulations panel or from the assistant's tools.
+Sense Sim runs the 17 analysis types of its Create Simulation dialog on open-source solvers and a
+built-in GPU solver. Studies run on USD objects from the scene, from the Simulations panel or from the
+assistant's tools.
 
 ## Layout
 
 | Where | What |
 |---|---|
-| `third_party/solidcraft` | SolidCraft, at upstream 176c22ac with two local changes: `SolveApp::host_chrome` and the workspace menu (see below). Plain source, not a submodule. Path dependencies; its build scripts need the whole tree. |
-| `src/design/` | The Design workspace. `host.rs` runs SolidCraft's UI off-screen with no Bevy in it; `mod.rs` shows the picture and passes input. |
 | `crates/sim-core/` | Solvers' input, output and running, and looking inside results (`post.rs`). No Bevy or egui, so its tests need no window. |
 | `src/sim/` | The dialog, panel, result view, scene objects as bodies (`scene_body.rs`), saving (`persist.rs`), the assistant's tools (`tools.rs`). |
 
-## How the design workspace is hosted
-
-SolidCraft replaces fonts, theme and zoom on its egui context, and draws its viewport through
-`egui_wgpu` paint callbacks, which `bevy_egui` skips. So it has an egui context, a renderer and a GPU
-device of its own, renders off-screen, and its frames are read back and shown as an image. The cost
-is a frame or two of latency. In exchange, a SolidCraft GPU error can't reach Bevy's error handler,
-and egui and wgpu needn't stay in step between the two.
-
-It should read as part of Sense Sim, not as a second program in the window. `host.rs` turns SolidCraft
-to its light theme on the workbench's canvas colour, and sets `host_chrome`, the local change: no
-application bar (name, version, Report a bug, its own tabs and menus), while the modelling ribbon stays.
-SolidCraft's `embedded` flag won't do, because it takes the ribbon too. Its File menu is still SolidCraft's,
-opened from the shell's design strip (`src/ui/design_bar.rs`), which replaces the scene tabs and has the
-design tabs, Save, Undo, Redo, Send to scene, settings and Licences. The strip and the workspace talk
-through `shell.rs`, as it needs the workbench shell's types.
-
-The workspace menu is the second local change. Before adding to a row, check what upstream has by then, since
-duplicating its work would fork both the code and users' files:
-
-| Row | What it does | Why it stops there, at upstream 176c22ac |
-|---|---|---|
-| Design, Render | SolidCraft's own | |
-| Animation | Motion tools, exploded views and storyboards | Upstream only has an RFC (#8330), so storyboards are built here. They live in design metadata under `com.sensesim.storyboards`, so the file format doesn't change. |
-| Simulation | `host_workspace_request` asks the shell for Sense Sim's Simulation workbench, through `Benches::request` | Upstream's #4356 is airflow only and stale |
-| Manufacture | Sending to a slicer, no toolpaths | The CAM PRs (#5751, #2881, #2620, #4158) are unmerged, and upstream hasn't assigned their format number |
-| Drawing | Shown as Planned | Upstream is building it on its `drawings` branch (#5349, #4895). Take theirs. |
-
-Keyboard input is taken from the host context before its UI runs (`steal_input`), so Ctrl+S in a
-design doesn't also save the layout.
-
-Unsaved work is written to `%LOCALAPPDATA%\SenseSim\design\autosave.sc` on the way out, and brought
-back the next time the workspace opens, instead of asking on the way out. File > Quit must go through
-`crate::quit()`, not `process::exit`, or this is skipped. Test runs use an autosave file of their own
-(`use_test_autosave`): a test's parts must never come back as someone's unsaved work.
-
-The CAD kernel runs in this process. `catch_unwind` around its frame turns a panic into a disabled workspace,
-but nothing holds an abort or a bad access, so the scene is saved to `scene-before-design.json`, in the same
-folder, each time the workspace opens. It opens like any saved layout.
-
-Saving a layout writes the studies into it under `simulation`, and the design beside it as a `.sc` file
-of the same name. Loading doesn't replace a design with unsaved changes; it says so.
+Saving a layout writes the studies into it under `simulation`. A layout from a version that had 3D
+Design may name a `.sc` file beside it: the file is left alone, the name is kept, and loading says it
+wasn't opened. A study on a body from that workspace, with a second body for contact, or with a coil says so when
+it's run.
 
 ## Solvers
 
 They run as separate processes and are never linked. They're fetched from their own projects, with
-pinned SHA-256 hashes, only after the user agrees. Licences are shown from the panel and the design
-strip (`src/sim/notices.rs`).
+pinned SHA-256 hashes, only after the user agrees. Licences are shown from the panel (`src/sim/notices.rs`).
 
 | Solver | Where | Used for |
 |---|---|---|
@@ -82,26 +42,24 @@ GPU solvers refuse a grid the card has no room for (`lbm/gpu.rs`).
 
 A load on the wrong face gives a plausible, wrong answer. So:
 
-- The truth is SolidCraft's `3mf-tagged` export: every triangle of a watertight mesh names its B-rep
-  face. STEP face order isn't used, because export merges and rewrites faces.
+- A USD object has no faces, so `geometry/regions.rs` makes them: it welds the mesh, makes the windings
+  agree, turns it outside out if need be, and grows faces up to a 30 degree crease. Those are only as
+  meaningful as the mesh's creases.
 - `geometry/classify.rs` matches each mesh surface to those faces, then matches every tagged triangle
   back to the mesh. Disagreement, a wrong area or a missing face stops the run.
-- A picked face stores a point on it. If an edit to the design moves the face, the run stops and asks
-  for it to be picked again. There is no fallback that guesses. `check.rs` does this for every solver
-  route, and `tests/moved_faces.rs` makes sure each one really stops.
+- A picked face stores a point on it. If the object moves, the run stops and asks for the face to be
+  picked again. There is no fallback that guesses. `check.rs` does this for every solver route, and
+  `tests/moved_faces.rs` makes sure each one really stops.
 - **Check faces** in the panel (`sim_check_faces` for the assistant) colours the body by condition and
   gives each one's area, before anything is solved.
-- OpenFOAM meshes are audited the same way: patch areas from the mesh's own files against the design
+- OpenFOAM meshes are audited the same way: patch areas from the mesh's own files against the body
   (`foam/mesh_audit.rs`), and a leak stops the run. `sim_the_audit_catches_a_real_leak` runs the real mesher
   on a closed cube and on the same cube with a wall gone.
 - A flow refuses one face under two conditions: the mesher would get the same facets twice.
-- Two bodies in contact are meshed apart, because where they touch, two faces lie on top of each other.
 - A scene object doesn't say what it's made of, so analyses that depend on that ask for it to be confirmed.
 
-A USD object has no faces, so `geometry/regions.rs` makes them: it welds the mesh, makes the windings
-agree, turns it outside out if need be, and grows faces up to a 30 degree crease. Those are only as
-meaningful as the mesh's creases. Structural analyses and Elmer need one closed shell, and say so
-otherwise; the voxel solvers take anything. Gmsh remeshes such a surface, split along the same creases.
+Structural analyses and Elmer need one closed shell, and say so otherwise; the voxel solvers take
+anything. Gmsh remeshes such a surface, split along the same creases.
 
 ## Verification
 
@@ -116,16 +74,15 @@ cargo test --release --test elmer      -- --ignored --nocapture --test-threads=1
 cargo test --release --test lbm        -- --ignored --nocapture --test-threads=1
 ```
 
-The whole path through the real app, on real CAD and USD:
+The whole path through the real app, on USD objects it places itself:
 
 ```
-SenseSim --no-mcp --design-test out/design                   # the workspace, through real window events
-SenseSim --no-mcp --sim-test-all --sim-test out/all          # every solver family on modelled parts
+SenseSim --no-mcp --sim-test out/sim                         # a beam, through Gmsh and CalculiX
+SenseSim --no-mcp --sim-test-all --sim-test out/all          # every solver family
 ```
 
 `SENSESIM_TEST_FROM=<step>` starts that second one partway, and `SENSESIM_TEST_USD=1` runs just the USD
-object and its face picking. `SENSESIM_SOAK_HOURS=<hours>` makes the first one repeat ordinary work for that
-long in one process, with a row per cycle in `OUT_soak.csv`.
+object and its face picking.
 
 This desktop is shared, so test runs shouldn't get in anyone's way. `SENSESIM_TEST_HIDDEN=1` never shows the
 window: everything still renders, including its screenshots, and tests use `TestPointer` so the real pointer
@@ -136,6 +93,8 @@ its stderr and no failed check was closed from outside.
 ### What the benchmarks gave
 
 Error against the known answer, and what the plan allowed.
+
+The rows that say "in the app" or "on a design body" were measured on CAD bodies, before 3D Design was removed. The same checks now run on USD objects, and those figures haven't all been measured again.
 
 | Analysis | Benchmark | Result | Allowed |
 |---|---|---|---|
@@ -242,10 +201,10 @@ Things these tests found, worth knowing before changing the code near them:
   shape as AIJ's Case A, not its data) and other CFD gave 2.10 to 2.89 D, and it shows no reverse flow on the
   roof at 32 cells across D. The inlet has no turbulence, the likely cause, not isolated. AIJ's own data
   couldn't be fetched: its site returned nothing.
-- Contact is between two design bodies of one material, each held by a support or a displacement. The
-  element size is global, so a small contact patch needs a fine mesh everywhere.
-- Electromagnetics in the panel is electrostatics and a coil's steady field, in air. Eddy currents and
-  time-varying fields are checked at solver level, through Elmer decks, but aren't offered in the panel.
+- Contact isn't offered: it needs two CAD bodies, and there's no CAD workspace now. The solver route and
+  its Hertz benchmark are still in sim-core.
+- Electromagnetics in the panel is electrostatics, in air. A coil's steady field needs a CAD body, so it
+  isn't offered any more. Eddy currents and time-varying fields are checked at solver level, through Elmer decks, but aren't offered in the panel.
 - Conjugate Heat Transfer (body-fitted) is one closed body in forced air, with its heat released evenly
   through it. Temperatures on faces aren't offered, and it's slow to settle. Its hottest rise came out 14
   to 21% below the voxel route's on one coarse block, and neither has a known answer there; the benchmark
@@ -254,6 +213,5 @@ Things these tests found, worth knowing before changing the code near them:
 - Compressible is inviscid: walls slip, so no boundary layers or skin friction.
 - The voxel solvers' walls follow the voxels, so drag converges slowly with cell size.
 
-Licences: SolidCraft is MIT OR Apache-2.0; its `NOTICE` and `THIRD-PARTY-LICENSES.txt` are shown in the
-app. The GPL solvers stay separate processes fetched from upstream. Get this confirmed before a
+Licences: the GPL solvers stay separate processes fetched from upstream. Get this confirmed before a
 commercial release.

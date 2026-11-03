@@ -63,6 +63,11 @@ pub fn solids() -> Vec<Solid> {
         s("Titanium Ti-6Al-4V", 113.8e9, 0.342, 4430.0, 6.7, 526.0, 8.6e-6, 880e6, 5.6e5, 1.0),
         s("ABS plastic", 2.3e9, 0.35, 1050.0, 0.17, 1400.0, 90e-6, 40e6, 1e-14, 1.0),
         s("FR-4 circuit board", 22e9, 0.14, 1850.0, 0.3, 1100.0, 15e-6, 0.0, 1e-13, 1.0),
+        // Door and window glass. Density, E and ν are EN 572-1 as a paper quotes it, not read from
+        // the standard; the rest are handbook figures, conductivity only to its order. It breaks
+        // rather than yields, so it has no yield stress, and no analysis here says when it breaks:
+        // compare the stress with the product's rated strength.
+        s("Soda-lime glass", 70e9, 0.22, 2500.0, 1.0, 720.0, 9e-6, 0.0, 1e-11, 1.0),
     ]
 }
 
@@ -81,6 +86,14 @@ pub fn vacuum_like() -> Solid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glass_is_on_offer_and_new_studies_still_start_on_steel() {
+        let all = solids();
+        assert_eq!(all[0].name, "Structural steel");
+        let glass = all.iter().find(|s| s.name.to_lowercase().contains("glass")).expect("no glass in the list");
+        assert_eq!(glass.yield_stress, 0.0, "glass breaks, it doesn't yield: nonlinear runs must keep it elastic");
+    }
 
     #[test]
     fn the_library_is_physically_plausible() {

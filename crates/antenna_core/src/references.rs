@@ -43,7 +43,7 @@ pub static REFERENCES: [Reference; 5] = [
         ],
         targets: &["Power transfer into the chip of 0.7 or more across the band", "About 1 to 2 dBi: a label this size has little more", "Read range is limited by the chip: compare the free-space figure with the data sheet's"],
         limits: &[
-            "The model is metal in free space. A real inlay sits on PET, is stuck to a product and has a chip with some assembly capacitance, so expect the band to move down. Tune on the real material, and measure.",
+            "This sample is metal in free space, and only one of several structures. A real inlay sits on PET under paper, on a product, so its band moves down: antenna_tag_design designs for the real surroundings across different structures, antenna_tag_retune moves an existing design into them, and antenna_tag_tune lands one on an exact frequency by its loop and its line.",
             "Bandwidth is set by the chip's Q, about 15 for UCODE 9, so a global 860-960 MHz tag gives up peak power transfer for coverage.",
             "Quanray Qstar-7U and the Impinj chips have no published impedance here: get it from the vendor, or measure an assembled tag, and give it as chip_z.",
         ],

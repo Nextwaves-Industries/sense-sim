@@ -317,20 +317,26 @@ impl DeployReport {
     }
 }
 
-const VEHICLES: [&str; 8] = ["forklift", "cart", "trolley", "agv", "robot", "vehicle", "truck", "jack"];
+pub(super) const VEHICLES: [&str; 8] = ["forklift", "cart", "trolley", "agv", "robot", "vehicle", "truck", "jack"];
 const GOODS: [&str; 12] = ["pallet", "box", "crate", "tote", "container", "bin", "package", "carton", "drum", "barrel", "case", "bag"];
 
 /// Whole-word match on name tokens (`pallet_rackable_blue_a01_1`), so "cabinet" is not a "bin".
-fn matches(name: &str, words: &[&str]) -> bool {
+pub(super) fn matches(name: &str, words: &[&str]) -> bool {
     let n = name.to_ascii_lowercase();
     n.split(|c: char| !c.is_ascii_alphabetic()).any(|tok| words.iter().any(|w| tok == *w || tok.strip_suffix('s') == Some(w) || tok.strip_suffix("es") == Some(w)))
 }
 
-const DOORS: [&str; 7] = ["door", "doorway", "dock", "gate", "portal", "entrance", "shutter"];
+pub(super) const DOORS: [&str; 9] = ["door", "doorway", "dock", "gate", "portal", "entrance", "entry", "exit", "shutter"];
+
+/// A way through, going by its name. An `exit_sign` only hangs over one.
+pub(super) fn door_like(name: &str) -> bool {
+    matches(name, &DOORS) && !matches(name, &["sign"])
+}
+
 const RACKS: [&str; 12] = ["shelf", "shelves", "shelving", "rack", "racking", "cabinet", "locker", "storage", "bookcase", "bookshelf", "gondola", "cupboard"];
 
 /// Shelving that holds stock (by name, or simply tall and deep enough).
-fn is_rack(o: &Obj) -> bool {
+pub(super) fn is_rack(o: &Obj) -> bool {
     !o.structure && rack_like(&o.name, o.max - o.min)
 }
 
@@ -348,7 +354,7 @@ pub fn fixture_of(name: &str, asset: &std::path::Path, size: Vec3) -> sim::Fixtu
     match Kind::of_asset(asset) {
         Some(Kind::Floor) => sim::Fixture::None,
         Some(_) => sim::Fixture::Solid,
-        None if matches(name, &DOORS) || rack_like(name, size) => sim::Fixture::Frame,
+        None if door_like(name) || rack_like(name, size) => sim::Fixture::Frame,
         None => sim::Fixture::None,
     }
 }
@@ -421,18 +427,18 @@ fn rack_mounts(racks: &[&Obj], mount_h: f32) -> Vec<(Vec3, Vec3)> {
     v
 }
 
-struct Obj {
-    name: String,
-    min: Vec3,
-    max: Vec3,
+pub(super) struct Obj {
+    pub name: String,
+    pub min: Vec3,
+    pub max: Vec3,
     /// Building shell piece (floor, wall, column…), never a rack or goods.
-    structure: bool,
+    pub structure: bool,
     /// The building floor slab: bounds the area to deploy in.
-    floor: bool,
-    wall: bool,
+    pub floor: bool,
+    pub wall: bool,
 }
 
-fn objects(world: &mut World) -> Vec<Obj> {
+pub(super) fn objects(world: &mut World) -> Vec<Obj> {
     let mut q = world.query::<(&PlacedObject, &GlobalTransform)>();
     let mut list: Vec<Obj> = q
         .iter(world)
@@ -459,7 +465,7 @@ fn objects(world: &mut World) -> Vec<Obj> {
     list
 }
 
-fn spawn(world: &mut World, prof: &Profile, at: Transform, motion: Motion, address: Option<String>) -> String {
+pub(super) fn spawn(world: &mut World, prof: &Profile, at: Transform, motion: Motion, address: Option<String>) -> String {
     let ids: Vec<String> = {
         let mut q = world.query::<&Device>();
         q.iter(world).map(|d| d.id.clone()).collect()
@@ -474,10 +480,33 @@ fn spawn(world: &mut World, prof: &Profile, at: Transform, motion: Motion, addre
     id
 }
 
-fn facing(pos: Vec3, dir: Vec3) -> Transform {
+pub(super) fn facing(pos: Vec3, dir: Vec3) -> Transform {
     let dir = dir.normalize_or(Vec3::NEG_Z);
     let up = if dir.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y };
     Transform::from_translation(pos).looking_to(dir, up)
+}
+
+/// A tag on each vehicle, on the surface under its center (a cart's tray), not on top of the
+/// bounding box (its handles), which would leave it floating. Returns how many.
+pub(super) fn tag_vehicles(world: &mut World, objs: &[Obj], tag: &Profile) -> usize {
+    let occ = {
+        let mut ss = bevy::ecs::system::SystemState::<(sim::OccluderParts, Query<(Entity, &PlacedObject, &Transform)>)>::new(world);
+        match ss.get(world) {
+            Ok((parts, q)) => Some(sim::Occluders::build(&parts, &q)),
+            Err(_) => None,
+        }
+    };
+    let mut n = 0;
+    for o in objs.iter().filter(|o| matches(&o.name, &VEHICLES)) {
+        let h = o.max.y - o.min.y;
+        let c = Vec3::new((o.min.x + o.max.x) * 0.5, o.max.y + 0.5, (o.min.z + o.max.z) * 0.5);
+        let top = occ.as_ref().and_then(|occ| occ.nearest(Ray3d::new(c, Dir3::NEG_Y), h + 0.5)).map_or(o.max.y, |(d, _)| c.y - d);
+        let lift = top - o.min.y + 0.03;
+        let at = Transform::from_translation(Vec3::new(c.x, o.min.y + lift, c.z));
+        spawn(world, tag, at, Motion::Follow { object: o.name.clone(), offset: [0.0, lift, 0.0] }, None);
+        n += 1;
+    }
+    n
 }
 
 /// Walkable grid over the area.
@@ -745,7 +774,7 @@ pub fn auto_deploy(world: &mut World, req: &DeployRequest) -> DeployReport {
     let mut all = structure.clone();
     all.extend(on_racks.iter().copied());
     // Doorways are enough for RFID portals, which hang on the door frame.
-    if all.is_empty() && !(req.rfid && objs.iter().any(|o| matches(&o.name, &DOORS))) {
+    if all.is_empty() && !(req.rfid && objs.iter().any(|o| door_like(&o.name))) {
         report.no_mounts = true;
         report.notes.push(NO_MOUNTS.into());
         return report;
@@ -967,7 +996,7 @@ pub fn auto_deploy(world: &mut World, req: &DeployRequest) -> DeployReport {
     if req.rfid
         && let Some(reader) = prof_id("rfid-reader", DeviceKind::RfidReader)
     {
-        let doors: Vec<(Vec3, Vec3)> = objs.iter().filter(|o| matches(&o.name, &DOORS)).map(|o| (o.min, o.max)).collect();
+        let doors: Vec<(Vec3, Vec3)> = objs.iter().filter(|o| door_like(&o.name)).map(|o| (o.min, o.max)).collect();
         let walls: Vec<(Vec3, Vec3)> = objs.iter().filter(|o| o.wall).map(|o| (o.min, o.max)).collect();
         let portal = prof_id("rfid-portal", DeviceKind::RfidReader).unwrap_or_else(|| reader.clone());
         for o in placement::find_openings(&doors, &walls).into_iter().take(8) {
@@ -1148,28 +1177,18 @@ pub fn auto_deploy(world: &mut World, req: &DeployRequest) -> DeployReport {
     // ---- Tags on vehicles and goods.
     let uwb_tag = prof_id("uwb-tag", DeviceKind::UwbTag);
     let mut goods = 0;
-    let occ = {
-        let mut ss = bevy::ecs::system::SystemState::<(sim::OccluderParts, Query<(Entity, &PlacedObject, &Transform)>)>::new(world);
-        match ss.get(world) {
-            Ok((parts, q)) => Some(sim::Occluders::build(&parts, &q)),
-            Err(_) => None,
-        }
-    };
+    if req.uwb
+        && let Some(t) = &uwb_tag
+    {
+        report.tags += tag_vehicles(world, &objs, t);
+    }
     for o in &objs {
         let h = o.max.y - o.min.y;
-        if matches(&o.name, &VEHICLES)
-            && req.uwb
-            && let Some(t) = &uwb_tag
-        {
-            // On the surface under the center (a cart's tray), not on top of
-            // the bounding box (its handles), which would leave it floating.
-            let c = Vec3::new((o.min.x + o.max.x) * 0.5, o.max.y + 0.5, (o.min.z + o.max.z) * 0.5);
-            let top = occ.as_ref().and_then(|occ| occ.nearest(Ray3d::new(c, Dir3::NEG_Y), h + 0.5)).map_or(o.max.y, |(d, _)| c.y - d);
-            let lift = top - o.min.y + 0.03;
-            let at = Transform::from_translation(Vec3::new(c.x, o.min.y + lift, c.z));
-            spawn(world, t, at, Motion::Follow { object: o.name.clone(), offset: [0.0, lift, 0.0] }, None);
-            report.tags += 1;
-        } else if matches(&o.name, &GOODS)
+        // Those got a UWB tag above. With no UWB, a pallet jack still counts as goods.
+        if matches(&o.name, &VEHICLES) && req.uwb && uwb_tag.is_some() {
+            continue;
+        }
+        if matches(&o.name, &GOODS)
             && req.rfid
             && goods < 80
             && let Some(t) = &rfid_tag
@@ -1369,6 +1388,19 @@ mod tests {
         for corner in c {
             assert!(s.contains(&corner), "{corner} lost from {s:?}");
         }
+    }
+
+    #[test]
+    fn entrances_and_exits_are_doorways_and_their_signs_are_not() {
+        for name in ["main_exit", "Exit_2", "entrance_1", "shop_entry", "glass_door_1800x2100_1", "dock_door_3"] {
+            assert!(door_like(name), "{name}");
+        }
+        for name in ["exit_sign_1", "entry_signs", "exited_box", "sm_rack_storage_a01_01_1"] {
+            assert!(!door_like(name), "{name}");
+        }
+        // Devices can hang on the frame of a door placed from the library.
+        let door = std::path::Path::new("C:/SenseSim/custom_assets/glass_door_1800x2100/usd/glass_door_1800x2100.usda");
+        assert_eq!(fixture_of("main_exit", door, Vec3::new(1.8, 2.1, 0.09)), sim::Fixture::Frame);
     }
 
     #[test]

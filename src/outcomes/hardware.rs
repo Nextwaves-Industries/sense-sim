@@ -170,8 +170,15 @@ pub fn uwb_bias_job(i: &Value) -> Result<impl FnOnce() -> Result<JobResult> + Se
         }
     }
     project.geometry()?;
-    let region = match i["region"].as_str() {
-        Some("all") => uwb_bias::Region::ALL,
+    // A site's own cone, in degrees from the antenna's axis, outranks the stock regions.
+    let region = match (i["theta_min"].as_f64(), i["theta_max"].as_f64(), i["region"].as_str()) {
+        (Some(lo), Some(hi), _) => {
+            if !(0.0..=180.0).contains(&lo) || !(0.0..=180.0).contains(&hi) || lo > hi {
+                bail!("theta_min and theta_max must be degrees from 0 to 180, the smaller first");
+            }
+            uwb_bias::Region { theta_min: lo, theta_max: hi }
+        }
+        (_, _, Some("all")) => uwb_bias::Region::ALL,
         _ => uwb_bias::Region::HORIZON,
     };
     let (n, step, edges) = (num(i, "frequencies", 5.0) as usize, num(i, "angle_step", 15.0), num(i, "edges_per_lambda", 16.0));

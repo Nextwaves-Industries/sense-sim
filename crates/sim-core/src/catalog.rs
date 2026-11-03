@@ -261,7 +261,7 @@ pub const ANALYSES: &[Analysis] = &[
         id: AnalysisId::Electromagnetics,
         group: Group::Electromagnetic,
         label: "Electromagnetics",
-        summary: "Low-frequency fields on a body: the electric field between faces at set potentials, or the magnetic field of a coil carrying a steady current. Radio frequencies stay with the RF solver (openEMS).",
+        summary: "Low-frequency fields on a body: the electric field between faces at set potentials. Radio frequencies stay with the RF solver (openEMS).",
         engine: "Elmer StatElecSolver and MagnetoDynamics (Whitney elements)",
         tags: &["Electrostatics", "Magnetostatics", "Coils"],
         limits: "Coils carry a uniform current round one axis, in air, with no magnetic materials. Eddy currents and time-varying fields are checked at solver level but aren't offered in the panel yet.",

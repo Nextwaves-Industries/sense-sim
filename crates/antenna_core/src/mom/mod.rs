@@ -8,6 +8,7 @@
 
 mod far;
 mod fill;
+mod layered;
 pub mod mesher;
 mod quad;
 mod surface;
@@ -136,10 +137,13 @@ trait Model: Send + Sync {
     fn warnings(&self, lambda: f64) -> Vec<String>;
 }
 
-/// Nothing in this model can lose power in the method of moments: every part is PEC.
+/// Nothing in this model can lose power in the method of moments: every part is PEC, and no
+/// layer around it has a loss tangent.
 pub fn models_no_loss(geom: &Geometry) -> bool {
-    geom.solids.iter().all(|s| material::by_name(&s.material).is_none_or(|m| matches!(m.kind, material::MatKind::Pec)))
+    let lossy_layer = geom.stack.as_ref().is_some_and(|s| s.layers().any(|l| material::by_name(&l.material).is_some_and(|m| matches!(m.kind, material::MatKind::Dielectric { tan_d, .. } if tan_d > 0.0))));
+    !lossy_layer && geom.solids.iter().all(|s| material::by_name(&s.material).is_none_or(|m| matches!(m.kind, material::MatKind::Pec)))
 }
+
 
 /// Below these a dipole's resonance is more than 1 % high and a sphere's RCS more than 10 % low.
 const FEW_SEGMENTS: f64 = 10.0;
@@ -156,6 +160,8 @@ pub struct MomProblem {
     opts: MomOptions,
     ground: bool,
     f_max: f64,
+    /// Layers around the metal, if any.
+    stack: Option<crate::stack::Stack>,
     /// The last factorisation, so `solve` then `rcs` at one frequency, or a
     /// monostatic sweep, factorise only once.
     last: Mutex<Option<(f64, Arc<Lu>)>>,
@@ -192,6 +198,16 @@ impl MomProblem {
                 bail!("port '{}' needs a reference impedance above zero (it has {} Ω)", p.name, p.z0);
             }
         }
+        let stack = geom.stack.clone().filter(|s| !s.is_empty());
+        if let Some(s) = &stack {
+            s.check()?;
+            if geom.flat_height().is_none() {
+                bail!("Layers around a model need all its metal in one flat plane of constant z here. Use FDTD for metal on several layers, or anything that isn't flat.");
+            }
+            if geom.ground {
+                bail!("A model with layers can't also have the infinite ground plane: use metal_behind in its layers.");
+            }
+        }
         let wires = geom.solids.iter().filter(|s| s.shape.is_wire()).count();
         if wires > 0 && wires < geom.solids.len() {
             bail!("the model mixes wires and surfaces, which the method of moments here can't join: draw the wires as thin strips, or use FDTD");
@@ -205,12 +221,12 @@ impl MomProblem {
         let (model, formulation): (Box<dyn Model>, _) = if wires > 0 {
             (Box::new(wire::WireModel::build(geom, lambda / opts.segments_per_lambda)?), Formulation::Wire)
         } else {
-            (Box::new(surface::SurfaceModel::build(geom, lambda / opts.edges_per_lambda, lambda)?), Formulation::Surface)
+            (Box::new(surface::SurfaceModel::build(geom, lambda / opts.edges_per_lambda, lambda, stack.clone())?), Formulation::Surface)
         };
         if model.unknowns() == 0 {
             bail!("the model has no paths for current: a wire or sheet needs to carry current across at least one edge");
         }
-        Ok(Self { model, formulation, ports: geom.ports.clone(), opts, ground: geom.ground, f_max, last: Mutex::new(None), worst_rcond: Mutex::new(None) })
+        Ok(Self { model, formulation, ports: geom.ports.clone(), opts, ground: geom.ground, f_max, stack, last: Mutex::new(None), worst_rcond: Mutex::new(None) })
     }
 
     pub fn formulation(&self) -> Formulation {
@@ -319,7 +335,11 @@ impl MomProblem {
         if want_far {
             for k in 0..np {
                 let (x, accepted) = excitation(k);
-                let mut ff = far::far_field(&self.model.moments(&x), f, self.opts.theta_step, self.opts.phi_step, self.ground);
+                let moments = self.model.moments(&x);
+                let mut ff = match &self.stack {
+                    Some(stack) => layered::far_field(&moments, f, self.opts.theta_step, self.opts.phi_step, stack),
+                    None => far::far_field(&moments, f, self.opts.theta_step, self.opts.phi_step, self.ground),
+                };
                 ff.p_accepted = accepted;
                 ff.p_incident = 1.0;
                 far.push(ff);
@@ -380,6 +400,9 @@ impl MomProblem {
     }
 
     fn fields_of(&self, f: f64, driven: &[usize], points: &[crate::geometry::P3]) -> Result<Vec<Vec<[C64; 3]>>> {
+        if self.stack.is_some() {
+            bail!("Near fields aren't worked out for a model in layers: use FDTD for those.");
+        }
         let lu = self.factored(f)?;
         let np = self.ports.len();
         let mut sol: Vec<Vec<C64>> = (0..np).map(|p| self.model.port_rhs(p)).collect();
@@ -414,6 +437,9 @@ impl MomProblem {
     /// observed in the given `(theta, phi)` directions. Port gaps count as shorted.
     /// The specular return of an infinite ground plane itself is not included.
     pub fn rcs(&self, f: f64, theta_inc: f64, phi_inc: f64, pol_theta: C64, pol_phi: C64, observe: &[(f64, f64)]) -> Result<Vec<f64>> {
+        if self.stack.is_some() {
+            bail!("Radar cross section isn't worked out for a model in layers: use FDTD for that.");
+        }
         let lu = self.factored(f)?;
         let power = pol_theta.norm_sqr() + pol_phi.norm_sqr();
         if !(power > 0.0) {

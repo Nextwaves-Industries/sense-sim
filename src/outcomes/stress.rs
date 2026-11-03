@@ -128,7 +128,7 @@ fn scenario_notes(scenarios: &[ScenarioResult], target_m: f32) -> Vec<String> {
 
 /// Sets a worse-than-assumed scale on every obstructing material, on top of whatever is
 /// in force in each band, returning the what-ifs it replaced.
-pub(super) fn scale_materials(k: f32) -> Vec<(Material, Option<MaterialCal>)> {
+pub(crate) fn scale_materials(k: f32) -> Vec<(Material, Option<MaterialCal>)> {
     Material::ALL
         .iter()
         .map(|m| {
@@ -140,7 +140,7 @@ pub(super) fn scale_materials(k: f32) -> Vec<(Material, Option<MaterialCal>)> {
         .collect()
 }
 
-pub(super) fn restore_materials(saved: Vec<(Material, Option<MaterialCal>)>) {
+pub(crate) fn restore_materials(saved: Vec<(Material, Option<MaterialCal>)>) {
     for (m, c) in saved {
         MaterialCal::set(m, c);
     }

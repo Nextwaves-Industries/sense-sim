@@ -7,7 +7,7 @@ Written 2026-11-02, after a four-part audit and a round of fixes. The audit repo
 **Not at sign-off level.** Nobody should commit to a contract, a deployment or a product on these numbers yet. The audit found 31 blockers and 53 major defects. Nearly all are now fixed or flagged, but no amount of fixing code gets past these three:
 
 1. **Nothing has been compared with real hardware.** Every test compares the code with theory or with itself. A simulation can pass all of them and still be wrong about a real building.
-2. **Results can't be traced.** Everything since the first commit is uncommitted (116 files on 2026-11-02), so no result can name the code that made it. A sign-off record must be able to.
+2. **Results can't be traced.** The code is now committed (main at 711d58d), but nothing stamps a result with the commit, solver versions or inputs behind it. A sign-off record must name them.
 3. **Ranges don't include model error.** "About 90 % of runs" means runs of the model with assumed inputs. In a test with an unmodelled error added, a range built that way held only about 76 % of the time, even at 200 runs. So a range can't yet promise to contain a measurement.
 
 **Fine to use today:** comparing layouts or designs, pre-tuning an antenna before building it, finding coverage holes, and deciding what to measure.
@@ -62,7 +62,7 @@ Sign-off means L4. Each level needs a record: commit, solver versions, inputs, s
 
 ### Where each area is today
 
-Levels below reflect the code in this tree, and it's uncommitted, so strictly nothing can claim L1 until Phase 1 is done.
+Levels below are what the code can reach. Strictly, no result can claim one until Phase 1 stamps it with the commit that made it.
 
 | Area | Level reached | Why it stops there |
 |---|---|---|
@@ -73,7 +73,7 @@ Levels below reflect the code in this tree, and it's uncommitted, so strictly no
 | RTLS planner and simulator | Below L1 | The two agree with each other, but neither is checked against an outside answer |
 | Predictions and recipes | L0 to L1 | Labels are honest now. No model-error term except the assumed one on tag and tunnel |
 | Plant | Below L1 | Hand calculations only. Pump curves are invented defaults, now labelled. No torque or power |
-| 17 analysis types (`sense-sim-spike` worktree, not in this tree) | L1 where re-run | Structural and Elmer benchmarks re-ran and passed, 19 of 19. OpenFOAM and LBM were not re-run. Its code wasn't audited |
+| 17 analysis types (`crates/sim-core`) | L1 where re-run | Structural and Elmer benchmarks are in the gate. OpenFOAM and LBM need `--full`. Its code wasn't audited |
 
 ## What this round fixed
 
@@ -142,7 +142,7 @@ These were chosen during the fixes because the model needed a value. Each one ne
 
 - **Recipes added while the audit ran:** `src/outcomes/{acceptance,anchors,battery,compare,erces,esl,proximity,route}.rs`, `crates/antenna_core/src/recipes/{tunnel,medical,sar,gate}.rs`, `src/antenna/reconfig.rs` and `crates/antenna_core/src/reconfig.rs`. The session that wrote the recipes checked them against the rules and reports fixing every known gap, including a list from this audit. No independent review, and those last fixes aren't in the gate run above.
 - **SAR:** `fdtd_sar_reference_dipole` and `fdtd_sar_reference_dipole_2450` are left out of the gate because, per the session that wrote them, their targets are "from memory". SAR is a safety figure, so it needs a published reference (IEEE 1528 or IEC/IEEE 62209 validation dipole values, for example) and shouldn't be relied on until then.
-- **`crates/sim-core` in the spike worktree:** benchmarks partly re-run, code not read. Its "Verified" badges mean L1 at best: the benchmarks test the solver, not a user's model.
+- **`crates/sim-core`:** benchmarks partly re-run, code not read. The "Verified" badges mean L1 at best: the benchmarks test the solver, not a user's model.
 - **The UI:** changed text and buttons were compiled and only spot-checked, not reviewed screen by screen.
 - **Regulatory rows** in `crates/knowledge/SIMULATOR_FINDINGS.md`: from reproduced copies, not gazettes.
 
@@ -154,7 +154,7 @@ Effort figures are rough, for one engineer. Phase 4 depends on hardware and site
 
 Nothing later counts until this is done.
 
-1. **Commit the work.** Blocked on the owner: dozens of sessions share the tree. Branch it, split it sensibly, and get it reviewed.
+1. **Commit the work.** Done: main at 711d58d. It landed as large commits without review, so a code review is still worth doing.
 2. **Stamp every result** with commit, solver version, inputs hash, seed, mesh and stop level, on claims, on reports and in the ledger.
 3. **Run the gate in CI.** A nightly runner with openEMS, CalculiX and Elmer installed, plus the quick gate on every push. `tools/simulation_gate.sh` is the entry point.
 4. **Keep golden results.** Store the benchmark figures, and fail on an unexplained move even inside the tolerance.
@@ -205,7 +205,7 @@ Then use what's measured:
 
 1. **Sign-off report:** refuses to generate unless the result is at L4. It names the commit, evidence, assumptions, measured points and uncertainty, and says what it doesn't cover.
 2. **Outside review** of the validation by someone who didn't build it.
-3. **Regulatory limits** confirmed against official texts, and the **GPL solver licences** confirmed before a commercial release (`docs/design-and-simulation.md` in the spike already says this).
+3. **Regulatory limits** confirmed against official texts, and the **GPL solver licences** confirmed before a commercial release (`docs/simulation.md` already says this).
 4. **Say what's validated in the app,** per recipe, including where it isn't.
 
 ## Defaults taken, and what only the owner can do
@@ -216,8 +216,4 @@ These stand unless the owner says otherwise.
 2. **Pass lines:** the ones proposed in Phase 4, fixed before measuring so results can't move the goalposts.
 3. **The `uwb_warehouse` sample:** left as it is, a known failure, until a measurement says whether 24 anchors is right. Changing it now would hide the question. The README still says 13 anchors.
 
-Only the owner can do these:
-
-1. **Ask for the tree to be committed.** Phase 1 can't start without it, and many sessions have work in it.
-2. **Say builds may run again,** so the gate can finish on one tree.
-3. **Provide hardware and site access** for Phase 4. Without it, the work stops at L2.
+Only the owner can do this: **provide hardware and site access** for Phase 4. Without it, the work stops at L2.

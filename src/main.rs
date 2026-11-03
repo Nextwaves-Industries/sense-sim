@@ -13,8 +13,6 @@ mod agent;
 mod antenna;
 mod bvh;
 mod context_menu;
-#[cfg(feature = "design")]
-mod design;
 #[cfg(debug_assertions)]
 mod drive;
 mod gpu;
@@ -30,7 +28,6 @@ mod rtls;
 mod samples;
 mod project_file;
 mod scene;
-#[cfg(feature = "design")]
 mod sim;
 mod tabs;
 mod twin;
@@ -56,12 +53,18 @@ use scene::*;
 
 pub const APP_NAME: &str = "Sense Sim";
 
-/// File > Quit: with a design workspace, through its protection of unsaved work.
+/// Set by File > Quit, which runs where it can't reach the app's exit event.
+static QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// File > Quit: ends the app the orderly way, so that what runs on exit does run.
 pub fn quit() {
-    #[cfg(feature = "design")]
-    design::request_quit();
-    #[cfg(not(feature = "design"))]
-    std::process::exit(0);
+    QUIT.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn quit_when_asked(mut exit: MessageWriter<AppExit>) {
+    if QUIT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        exit.write(AppExit::Success);
+    }
 }
 
 const UPLOAD_BYTES_PER_FRAME: usize = 48 * 1024 * 1024;
@@ -94,11 +97,9 @@ fn main() {
     let mut sample: Option<usize> = None;
     let mut plant_test: Option<String> = None;
     let mut probe_ports: Vec<String> = Vec::new();
-    let mut design_test: Option<String> = None;
     let mut sim_test: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--design-test" => design_test = args.next(),
             "--sim-test" => sim_test = args.next(),
             "--sim-test-all" => {}
             "--plant-test" => plant_test = args.next(),
@@ -257,22 +258,11 @@ fn main() {
     #[cfg(feature = "antenna-studio")]
     app.add_plugins(antenna::AntennaPlugin).add_systems(EguiPrimaryContextPass, antenna::ui::studio_ui.after(ui::ui_system).before(ime::sync_ime));
 
-    #[cfg(feature = "design")]
-    {
-        app.add_plugins((design::DesignPlugin, sim::SimPlugin));
-        if let Some(out) = &sim_test {
-            design::use_test_autosave();
-            app.insert_resource(sim::autotest::SimTest::new(out.clone())).add_systems(Update, (sim::autotest::run.before(sim::persist::peek_actions), sim::autotest::tools_step));
-            app.world_mut().resource_mut::<ui::UiState>().skip_start(None);
-        }
-        if let Some(out) = &design_test {
-            design::use_test_autosave();
-            app.insert_resource(design::autotest::DesignTest::new(out.clone())).add_systems(Update, design::autotest::run);
-            app.world_mut().resource_mut::<ui::UiState>().skip_start(None);
-        }
+    app.add_plugins(sim::SimPlugin).add_systems(Update, quit_when_asked);
+    if let Some(out) = &sim_test {
+        app.insert_resource(sim::autotest::SimTest::new(out.clone())).add_systems(Update, (sim::autotest::run.before(sim::persist::peek_actions), sim::autotest::tools_step));
+        app.world_mut().resource_mut::<ui::UiState>().skip_start(None);
     }
-    #[cfg(not(feature = "design"))]
-    let _ = (&design_test, &sim_test);
     app.world_mut().resource_mut::<Library>().search = search;
     if let Some(out) = shot {
         app.insert_resource(AutoShot { out: out.into(), frames_ready: 0, taken: false, export: export.map(Into::into), pose, preview, no_select, delay: shot_delay })

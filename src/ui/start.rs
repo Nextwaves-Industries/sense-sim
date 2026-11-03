@@ -1,5 +1,5 @@
-//! The start dialog: shown at launch and from File → New. What to work on: an antenna
-//! or a part, which need no scene, or a scene. Kinds on the left, every choice of that
+//! The start dialog: shown at launch and from File → New. What to work on: an antenna,
+//! which needs no scene, or a scene. Kinds on the left, every choice of that
 //! kind in the middle, the highlighted one described on the right. Hovering previews; a
 //! click selects, and the button (or a double click) goes ahead. It can always be
 //! closed: a blank scene is there to fall back on.
@@ -15,7 +15,6 @@ use crate::theme::{self, ACCENT, icon};
 pub enum Choice {
     Antenna,
     OpenAntenna,
-    Design,
     Empty,
     Sample(usize),
     /// A sample antenna project, by its place in `antenna_core::samples::all`.
@@ -27,7 +26,6 @@ pub enum Choice {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Item {
     Antenna,
-    Part,
     Empty,
     Sample(usize),
     AntennaSample(usize),
@@ -108,7 +106,7 @@ fn tags(index: usize) -> &'static [&'static str] {
 }
 
 /// Draws the dialog; returns what the user picked, if anything.
-pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, name: &mut String, antenna: bool, part: bool) -> Option<Choice> {
+pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, name: &mut String, antenna: bool) -> Option<Choice> {
     let mut choice = None;
     let screen = ctx.content_rect();
     let size = vec2(1040.0f32.min(screen.width() - 48.0), 830.0f32.min(screen.height() - 40.0));
@@ -158,7 +156,6 @@ pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, nam
                 for &item in items {
                     let (glyph, text, online) = match item {
                         Item::Antenna => (icon::TARGET, "Antenna", false),
-                        Item::Part => (icon::CUBE_TRANSPARENT, "3D part", false),
                         Item::Empty => (icon::FILE_DASHED, "Empty scene", false),
                         Item::AntennaSample(i) => (icon::BROADCAST, antenna_samples::all()[i].title, false),
                         Item::Sample(i) => {
@@ -192,11 +189,8 @@ pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, nam
                     r.on_hover_cursor(egui::CursorIcon::PointingHand);
                 }
             };
-            let designs: Vec<Item> = [antenna.then_some(Item::Antenna), part.then_some(Item::Part)].into_iter().flatten().collect();
-            if !designs.is_empty() {
-                section(ui, "Design, no scene needed", Kind::Design, &designs);
-            }
             if antenna {
+                section(ui, "Design, no scene needed", Kind::Design, &[Item::Antenna]);
                 for g in antenna_samples::Group::ALL {
                     let items: Vec<Item> = antenna_samples::all().iter().enumerate().filter(|(_, s)| s.group == g).map(|(i, _)| Item::AntennaSample(i)).collect();
                     section(ui, &format!("Antennas: {}", g.label()), Kind::Antennas, &items);
@@ -222,7 +216,6 @@ pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, nam
                     }
                 });
             }
-            Some(Item::Part) => design_detail(&mut child, detail, icon::CUBE_TRANSPARENT, "3D part", "Model a part on its own: sketches, solids and assemblies. You can send it to a scene later.", &["Sketches", "Solids", "Assemblies"], |_| {}),
             Some(Item::Empty) => empty_detail(&mut child, detail),
             Some(Item::Sample(i)) => sample_detail(&mut child, detail, library, i),
             Some(Item::AntennaSample(i)) => antenna_sample_detail(&mut child, detail, i),
@@ -245,9 +238,9 @@ pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, nam
         p.hline(cta.x_range(), cta.top(), Stroke::new(1.0, theme::STROKE));
         let mut child = ui.new_child(UiBuilder::new().max_rect(cta.shrink2(vec2(14.0, 0.0))).layout(Layout::left_to_right(Align::Center)));
         child.spacing_mut().item_spacing = vec2(10.0, 0.0);
-        // Only a scene is named here: an antenna or a design gets its name in its own workspace.
+        // Only a scene is named here: an antenna gets its name in its own workspace.
         let mut enter = false;
-        if !matches!(st.selected, Some(Item::Antenna | Item::Part | Item::AntennaSample(_))) {
+        if !matches!(st.selected, Some(Item::Antenna | Item::AntennaSample(_))) {
             child.label("Scene name");
             let hint = match st.selected {
                 Some(Item::Sample(i)) => SAMPLES[i].title,
@@ -261,7 +254,6 @@ pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, nam
             let can = st.selected.is_some();
             let text = match st.selected {
                 Some(Item::Antenna) => "Design Antenna",
-                Some(Item::Part) => "Model Part",
                 Some(Item::AntennaSample(_)) => "Open Sample",
                 Some(_) => "Create Scene",
                 None => "Create",
@@ -280,7 +272,6 @@ pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, nam
 fn choice_of(item: Item) -> Choice {
     match item {
         Item::Antenna => Choice::Antenna,
-        Item::Part => Choice::Design,
         Item::Empty => Choice::Empty,
         Item::Sample(i) => Choice::Sample(i),
         Item::AntennaSample(i) => Choice::AntennaSample(i),

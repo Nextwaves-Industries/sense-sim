@@ -17,7 +17,7 @@ fn def(name: &str, description: &str, schema: Value) -> ToolDef {
 
 pub fn defs() -> Vec<ToolDef> {
     let mut all = vec![
-        def("antenna_references", "Find the reference design for a job: the structure real products use, why, the order to tune it in, target numbers, limits and sources. Start here before choosing a template: a bare dipole or plain patch is the wrong answer for most real jobs. Also lists RFID tag chips with their impedance and sensitivity. Open one with antenna_open_sample, then adapt it.", json!({ "type": "object", "properties": { "job": { "type": "string", "description": "What it's for, in words: 'RFID tag on cartons', 'circular reader panel for the US band'" } } })),
+        def("antenna_references", "What's known about a job: the structure real products use, why, the order to tune it in, target numbers, limits and sources. Read it to learn the job, not as the answer: it's one structure among several, and it was solved in free space. Also lists RFID tag chips with their impedance and sensitivity. For a tag, design with antenna_tag_design. antenna_open_sample opens a reference to study.", json!({ "type": "object", "properties": { "job": { "type": "string", "description": "What it's for, in words: 'RFID tag on cartons', 'circular reader panel for the US band'" } } })),
         def("antenna_list_samples", "List the sample antenna projects: real uses like a UHF RFID reader panel, a Wi-Fi PCB antenna or a GPS helix, each in its band and checked against a solver, with what they are for. Ready to open and study, or to start a design from.", json!({ "type": "object", "properties": {} })),
         def("antenna_open_sample", "Open a sample project in Antenna Studio on its results, replacing the current design. Those that are slow to solve come with results stored; the rest solve when opened, so poll antenna_results until the job is idle. id: from antenna_list_samples.", json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] })),
         def("antenna_list_templates", "List the antenna templates of Antenna Studio (dipole, Yagi, helix, patch, horn, Vivaldi, ...), with what they are and which solvers apply.", json!({ "type": "object", "properties": {} })),
@@ -40,7 +40,7 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "antenna_optimize",
-            "Optimise variables of the current design in the background. vars: [{name,min,max}] with SI values. goals: objects {type:'match_below',port,f_lo,f_hi,db} | {type:'resonance_at',port,f,tol} | {type:'gain_above',f,dbi} | {type:'efficiency_above',f,eff} | {type:'front_to_back_above',f,db} | {type:'axial_ratio_below',f,db} | {type:'side_lobes_below',f,db} | {type:'isolation_below',i,j,f_lo,f_hi,db}, frequencies in Hz. method: nelder_mead (default), surrogate, particle_swarm, differential_evolution.",
+            "Optimise variables of the current design in the background. vars: [{name,min,max}] with SI values. goals: objects {type:'match_below',port,f_lo,f_hi,db} | {type:'resonance_at',port,f,tol} | {type:'gain_above',f,dbi} | {type:'efficiency_above',f,eff} | {type:'front_to_back_above',f,db} | {type:'axial_ratio_below',f,db} | {type:'side_lobes_below',f,db} | {type:'isolation_below',i,j,f_lo,f_hi,db} | {type:'chip_power_above',f_lo,f_hi,z:[r,x],at_least} for a tag, frequencies in Hz. method: nelder_mead (default), surrogate, particle_swarm, differential_evolution.",
             json!({ "type": "object", "properties": { "vars": { "type": "array" }, "goals": { "type": "array" }, "method": { "type": "string" }, "max_runs": { "type": "integer" }, "parallel": { "type": "integer" }, "apply": { "type": "boolean" } }, "required": ["vars", "goals"] }),
         ),
         def("antenna_optimize_status", "Progress of the optimiser. With apply=true the best values found go into the variable table.", json!({ "type": "object", "properties": { "apply": { "type": "boolean" } } })),
@@ -48,7 +48,9 @@ pub fn defs() -> Vec<ToolDef> {
     ];
     all.extend(super::gate::defs());
     all.extend(super::reconfig::defs());
+    all.extend(super::phased::defs());
     all.extend(super::assist::defs());
+    all.extend(super::tagjob::defs());
     all
 }
 
@@ -137,7 +139,13 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
     if let Some(out) = super::reconfig::tool(world, name, i) {
         return Some(out);
     }
+    if let Some(out) = super::phased::tool(world, name, i) {
+        return Some(out);
+    }
     if let Some(out) = super::assist::tool(world, name, i) {
+        return Some(out);
+    }
+    if let Some(out) = super::tagjob::tool(world, name, i) {
         return Some(out);
     }
     let mut st = world.resource_mut::<Studio>();
@@ -153,7 +161,7 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             text(json!({ "references": found, "tag_chips": chips, "other_samples": others, "evidence": "Simulated, not measured: metal in free space unless a sample says otherwise" }))
         }
         "antenna_list_samples" => {
-            let list: Vec<Value> = antenna_core::samples::all().iter().map(|s| json!({ "id": s.id, "title": s.title, "use": s.group.label(), "band": s.band_text(), "about": s.about, "template": s.template, "opening": super::ui::samples::opening_words(s) })).collect();
+            let list: Vec<Value> = antenna_core::samples::all().iter().map(|s| json!({ "id": s.id, "title": s.title, "use": s.group.label(), "band": s.band_text(), "about": s.about, "template": s.template, "held_to": s.held_to(), "opening": super::ui::samples::opening_words(s) })).collect();
             text(json!({ "samples": list, "evidence": "Simulated, not measured" }))
         }
         "antenna_open_sample" => {
@@ -337,7 +345,12 @@ fn describe(p: &Project) -> Value {
         "sweep_ghz": [p.setup.f_lo / 1e9, p.setup.f_hi / 1e9],
         "far_ghz": p.setup.far_freqs.iter().map(|f| f / 1e9).collect::<Vec<_>>(),
         "solver": p.setup.solver.label(),
+        // Higher is finer. Saying so stops anyone "refining" a mesh downwards.
+        "mesh": { "edges_per_lambda": p.setup.edges_per_lambda, "cells_per_lambda": p.setup.cells_per_lambda },
     });
+    if !p.stack.is_empty() {
+        d["surroundings"] = json!(p.stack.describe());
+    }
     match g {
         Ok(g) => {
             let (lo, hi) = g.bounds();

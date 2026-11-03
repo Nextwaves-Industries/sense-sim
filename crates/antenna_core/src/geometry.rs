@@ -181,6 +181,9 @@ pub struct Geometry {
     /// Where the main beam is meant to point: +z (true) or broadside to a
     /// vertical axis (false). Used when the antenna is mounted on a device.
     pub axis_forward: bool,
+    /// Layers of paper, film or product around flat metal, as wide as the world.
+    #[serde(default)]
+    pub stack: Option<crate::stack::Stack>,
 }
 
 /// Triangulates a simple polygon (concave and keyhole outlines included) by ear
@@ -372,6 +375,16 @@ pub fn read_stl(bytes: &[u8], scale_to_m: f64) -> anyhow::Result<Vec<[P3; 3]>> {
 }
 
 impl Geometry {
+    /// With its layers built as parts, to size, for a solver that meshes everything.
+    pub fn with_stack_built(&self) -> Self {
+        let mut g = self.clone();
+        if let Some(stack) = g.stack.take() {
+            let metal = g.bounds();
+            g.solids.extend(stack.solids(metal));
+        }
+        g
+    }
+
     /// Metal as a binary STL (millimetres), wires left out.
     pub fn to_stl(&self) -> Vec<u8> {
         let lib = crate::material::library();
@@ -497,11 +510,30 @@ impl Geometry {
         let conductor = |n: &str| crate::material::by_name(n).is_some_and(|m| m.is_conductor());
         let all_conductors = self.solids.iter().all(|s| conductor(&s.material));
         let all_wires = !self.solids.is_empty() && self.solids.iter().all(|s| s.shape.is_wire());
+        // With layers, the method of moments needs all the metal in one flat plane: FDTD builds them.
+        let in_layers = self.stack.as_ref().is_some_and(|s| !s.is_empty());
         SolverFit {
-            wire_mom: all_wires && all_conductors,
-            surface_mom: all_conductors && !self.solids.is_empty() && !self.solids.iter().any(|s| s.shape.is_wire()),
+            wire_mom: all_wires && all_conductors && !in_layers,
+            surface_mom: all_conductors && !self.solids.is_empty() && !self.solids.iter().any(|s| s.shape.is_wire()) && (!in_layers || self.flat_height().is_some()),
             fdtd: !self.solids.is_empty(),
         }
+    }
+
+    /// The height all the metal lies at, if it's flat metal in one plane of constant z.
+    pub fn flat_height(&self) -> Option<f64> {
+        let mut height = None;
+        for s in &self.solids {
+            let z = match &s.shape {
+                Shape::Polygon { axis: 2, at, thick, .. } if *thick <= 0.0 => *at,
+                Shape::Box { min, max } if max[2] <= min[2] => min[2],
+                _ => return None,
+            };
+            if height.is_some_and(|h: f64| (h - z).abs() > 1e-9) {
+                return None;
+            }
+            height = Some(z);
+        }
+        height
     }
 }
 

@@ -93,6 +93,16 @@ enum Event {
     PlanApproved,
 }
 
+/// A message waiting for the running turn to end.
+pub struct Queued {
+    pub text: String,
+    pub images: Vec<String>,
+}
+
+/// Goes with a message that cut a turn short, or the model reads it as an addition to a request
+/// it still has to finish.
+const INTERRUPTED_NOTE: &str = "[The user interrupted the previous step to send this message. What was already done stays done. Follow this message; carry on with the earlier request only if it still applies.]";
+
 #[derive(Resource)]
 pub struct Agent {
     pub config: AgentConfig,
@@ -105,6 +115,10 @@ pub struct Agent {
     pub attachments: Vec<String>,
     pub history: Vec<Message>,
     pub running: bool,
+    /// Sent while a turn was running; these go out in order when it ends.
+    pub queued: Vec<Queued>,
+    /// "Send now" was pressed: the first queued message goes as soon as this turn has stopped.
+    pub interrupting: bool,
     pub mcp: Arc<McpHub>,
     pub mcp_server_status: String,
     /// egui textures for chat images, by image id.
@@ -160,6 +174,8 @@ impl Agent {
             attachments: Vec::new(),
             history: Vec::new(),
             running: false,
+            queued: Vec::new(),
+            interrupting: false,
             mcp,
             mcp_server_status: String::new(),
             textures: Default::default(),
@@ -341,25 +357,87 @@ impl Agent {
         }
     }
 
-    /// Sends the composed message and starts a worker for this turn.
+    /// Sends the composed message, or queues it if a turn is running.
     pub fn send(&mut self, bridge: &ToolBridge) {
-        if self.running {
-            return;
-        }
         let text = self.input.trim().to_string();
-        let attachments = std::mem::take(&mut self.attachments);
-        if text.is_empty() && attachments.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() {
             return;
         }
+        let images = std::mem::take(&mut self.attachments);
+        if self.running {
+            self.queued.push(Queued { text, images });
+            self.input.clear();
+            return;
+        }
+        match self.start_turn(text, images, false, bridge) {
+            Ok(()) => self.input.clear(),
+            Err(images) => self.attachments = images,
+        }
+    }
+
+    /// Cuts the running turn short and sends this queued message next. What's done stays done.
+    pub fn send_now(&mut self, index: usize) {
+        if !self.running || index >= self.queued.len() {
+            return;
+        }
+        let message = self.queued.remove(index);
+        self.queued.insert(0, message);
+        self.interrupting = true;
+        self.cancel_run();
+    }
+
+    /// Puts queued messages back in the box, ahead of whatever is being typed. Nothing is lost,
+    /// and nothing goes out that the user didn't just decide to send.
+    fn unqueue(&mut self) {
+        if self.queued.is_empty() {
+            return;
+        }
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        for q in self.queued.drain(..) {
+            texts.push(q.text);
+            images.extend(q.images);
+        }
+        texts.push(std::mem::take(&mut self.input));
+        texts.retain(|t| !t.trim().is_empty());
+        self.input = texts.join("\n\n");
+        images.append(&mut self.attachments);
+        self.attachments = images;
+    }
+
+    /// A turn ended: what goes next, and whether it cut that turn short. A turn that failed by
+    /// itself holds the queue back, since the next would likely fail too, and spend money doing it.
+    fn next_queued(&mut self, failed: bool) -> Option<(Queued, bool)> {
+        let interrupted = std::mem::take(&mut self.interrupting);
+        if self.queued.is_empty() {
+            return None;
+        }
+        if failed && !interrupted {
+            self.unqueue();
+            self.transcript.push(ChatItem::Info("Your queued messages weren't sent because of this. They're back in the box.".into()));
+            return None;
+        }
+        Some((self.queued.remove(0), interrupted))
+    }
+
+    fn after_turn(&mut self, failed: bool, bridge: &ToolBridge) {
+        let Some((next, interrupted)) = self.next_queued(failed) else { return };
+        if let Err(images) = self.start_turn(next.text.clone(), next.images, interrupted, bridge) {
+            self.queued.insert(0, Queued { text: next.text, images });
+            self.unqueue();
+        }
+    }
+
+    /// Starts a worker for this message. A message that can't start comes back as its images;
+    /// the error is in the chat.
+    fn start_turn(&mut self, text: String, attachments: Vec<String>, interrupted: bool, bridge: &ToolBridge) -> Result<(), Vec<String>> {
         let provider: Arc<dyn llm::Provider> = match llm::make_provider(self.config.provider(), &self.config.effort) {
             Ok(p) => Arc::from(p),
             Err(e) => {
                 self.transcript.push(ChatItem::Error(format!("{e:#}")));
-                self.attachments = attachments;
-                return;
+                return Err(attachments);
             }
         };
-        self.input.clear();
         // A finished checklist has done its job; one with open steps may still be wanted.
         if self.plan.iter().all(|(_, status)| !matches!(status.as_str(), "pending" | "in_progress")) {
             self.plan.clear();
@@ -373,6 +451,9 @@ impl Agent {
         }
         let shown = if text.is_empty() { "Rebuild this scene with SimReady assets.".to_string() } else { text };
         content.push(Block::Text(shown.clone()));
+        if interrupted {
+            content.push(Block::Text(INTERRUPTED_NOTE.to_string()));
+        }
         // "This", "here" and "the selected one" mean nothing to the model without it.
         if let Some(note) = self.screen_note() {
             content.push(Block::Text(note));
@@ -432,9 +513,17 @@ impl Agent {
                 let _ = done.send(Event::Finished { history: before, error: Some(format!("The assistant stopped on an internal error, and this turn's work isn't in its memory: {why}")) });
             }
         });
+        Ok(())
     }
 
+    /// Stop means stop: anything queued waits in the box instead of going out by itself.
     pub fn stop(&mut self) {
+        self.cancel_run();
+        self.interrupting = false;
+        self.unqueue();
+    }
+
+    fn cancel_run(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         // Unblock questions the worker is waiting on.
         for q in &mut self.questions {
@@ -496,9 +585,11 @@ struct RunOptions {
     planning: bool,
 }
 
-fn pump_events(mut agent: ResMut<Agent>) {
+fn pump_events(mut agent: ResMut<Agent>, bridge: Res<ToolBridge>) {
     agent.poll_background();
     let Some(rx) = agent.events.clone() else { return };
+    // Set when the turn ended: whether it failed by itself.
+    let mut ended = None;
     for e in rx.try_iter() {
         // New chat was pressed: only the end of that run matters, so Send works again.
         if agent.discard_run {
@@ -506,6 +597,7 @@ fn pump_events(mut agent: ResMut<Agent>) {
                 agent.discard_run = false;
                 agent.running = false;
                 agent.events = None;
+                ended = Some(false);
             }
             continue;
         }
@@ -541,11 +633,19 @@ fn pump_events(mut agent: ResMut<Agent>) {
                 agent.history = history;
                 agent.running = false;
                 agent.events = None;
-                if let Some(e) = error {
-                    agent.transcript.push(ChatItem::Error(e));
+                let stopped = error.as_deref() == Some(harness::STOPPED);
+                ended = Some(error.is_some() && !stopped);
+                match error {
+                    // The user asked for this, and their message is about to show why.
+                    Some(_) if stopped && agent.interrupting => agent.transcript.push(ChatItem::Info("Interrupted. What was already done is kept.".into())),
+                    Some(e) => agent.transcript.push(ChatItem::Error(e)),
+                    None => {}
                 }
             }
         }
+    }
+    if let Some(failed) = ended {
+        agent.after_turn(failed, &bridge);
     }
 }
 
@@ -715,6 +815,7 @@ mod lifecycle_tests {
         tx.send(Event::Finished { history: vec![Message::user(vec![Block::Text("old".into())])], error: Some("stopped".into()) }).unwrap();
         let mut world = World::new();
         world.insert_resource(agent);
+        world.insert_resource(ToolBridge::default());
         world.run_system_once(pump_events).unwrap();
 
         let agent = world.resource::<Agent>();
@@ -764,7 +865,123 @@ mod lifecycle_tests {
         tx.send(Event::Finished { history: vec![Message::user(vec![Block::Text("kept".into())])], error: None }).unwrap();
         let mut world = World::new();
         world.insert_resource(agent);
+        world.insert_resource(ToolBridge::default());
         world.run_system_once(pump_events).unwrap();
         assert_eq!(world.resource::<Agent>().history.len(), 1);
+    }
+
+    fn running_with_queue(messages: &[&str]) -> Agent {
+        let mut agent = Agent::new(AgentConfig::default());
+        agent.running = true;
+        for m in messages {
+            agent.input = m.to_string();
+            agent.send(&ToolBridge::default());
+        }
+        agent
+    }
+
+    #[test]
+    fn a_message_sent_during_a_turn_waits_in_order() {
+        let mut agent = running_with_queue(&["first", "second"]);
+        agent.attachments = vec!["img1".into()];
+        agent.send(&ToolBridge::default());
+        assert_eq!(agent.queued.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(), ["first", "second", ""]);
+        assert_eq!(agent.queued[2].images, ["img1"], "a photo with no words can wait too");
+        assert!(agent.input.is_empty() && agent.attachments.is_empty(), "the box is free for the next one");
+        assert!(agent.transcript.is_empty(), "not in the chat until the model gets it");
+    }
+
+    #[test]
+    fn stop_puts_the_queue_back_in_the_box_and_sends_nothing() {
+        let mut agent = running_with_queue(&["first", "second"]);
+        agent.queued[1].images = vec!["img1".into()];
+        agent.input = "still typing".into();
+        agent.attachments = vec!["img2".into()];
+        agent.stop();
+        assert!(agent.queued.is_empty());
+        assert_eq!(agent.input, "first\n\nsecond\n\nstill typing");
+        assert_eq!(agent.attachments, ["img1", "img2"]);
+        assert!(agent.cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_message_queued_after_stop_still_goes() {
+        let mut agent = running_with_queue(&["old"]);
+        agent.stop();
+        agent.input = "new".into();
+        agent.send(&ToolBridge::default());
+        let (next, interrupted) = agent.next_queued(false).expect("sent on purpose after Stop");
+        assert_eq!(next.text, "new");
+        assert!(!interrupted);
+    }
+
+    #[test]
+    fn send_now_stops_the_turn_and_goes_first() {
+        let mut agent = running_with_queue(&["first", "second"]);
+        let (reply, answered) = unbounded();
+        agent.questions.push(Question { text: "?".into(), options: Vec::new(), candidates: Vec::new(), allow_text: true, input: String::new(), answer: None, reply: Some(reply), approval: false });
+        agent.send_now(1);
+        assert!(agent.cancel.load(Ordering::Relaxed));
+        assert!(answered.try_recv().is_ok(), "a turn waiting on a question has to let go");
+
+        let (next, interrupted) = agent.next_queued(false).unwrap();
+        assert_eq!(next.text, "second");
+        assert!(interrupted, "the model is told");
+        assert!(!agent.interrupting);
+        let (next, interrupted) = agent.next_queued(false).unwrap();
+        assert_eq!(next.text, "first");
+        assert!(!interrupted, "only the one that cut in");
+        assert!(agent.next_queued(false).is_none());
+    }
+
+    #[test]
+    fn stop_after_send_now_wins() {
+        let mut agent = running_with_queue(&["first"]);
+        agent.send_now(0);
+        agent.stop();
+        assert!(!agent.interrupting);
+        assert!(agent.next_queued(false).is_none());
+        assert_eq!(agent.input, "first");
+    }
+
+    #[test]
+    fn send_now_after_the_turn_ended_does_nothing() {
+        let mut agent = running_with_queue(&["first"]);
+        agent.running = false;
+        agent.send_now(0);
+        assert!(!agent.interrupting);
+        assert!(!agent.cancel.load(Ordering::Relaxed));
+    }
+
+    /// Runs the real event pump over the end of a turn.
+    fn finish(mut agent: Agent, error: &str) -> Agent {
+        let (tx, rx) = unbounded();
+        agent.events = Some(rx);
+        tx.send(Event::Finished { history: Vec::new(), error: Some(error.into()) }).unwrap();
+        let mut world = World::new();
+        world.insert_resource(agent);
+        world.insert_resource(ToolBridge::default());
+        world.run_system_once(pump_events).unwrap();
+        world.remove_resource::<Agent>().unwrap()
+    }
+
+    #[test]
+    fn a_failed_turn_holds_the_queue_back() {
+        let agent = finish(running_with_queue(&["first", "second"]), "HTTP 500");
+        assert!(!agent.running, "and no new turn started");
+        assert!(agent.queued.is_empty());
+        assert_eq!(agent.input, "first\n\nsecond");
+        assert!(matches!(&agent.transcript[0], ChatItem::Error(e) if e == "HTTP 500"));
+        assert!(matches!(&agent.transcript[1], ChatItem::Info(t) if t.contains("back in the box")));
+    }
+
+    #[test]
+    fn an_interrupted_turn_is_no_error() {
+        // Nothing queued: with a message waiting this would start a real turn on the stored key.
+        let mut agent = running_with_queue(&[]);
+        agent.interrupting = true;
+        let agent = finish(agent, harness::STOPPED);
+        assert!(matches!(&agent.transcript[0], ChatItem::Info(t) if t.contains("Interrupted")));
+        assert!(!agent.transcript.iter().any(|c| matches!(c, ChatItem::Error(e) if e == harness::STOPPED)));
     }
 }

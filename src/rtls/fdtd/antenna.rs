@@ -162,7 +162,8 @@ impl Design {
     /// Antenna geometry, ports, NF2FF and field-slice dumps and the mesh.
     pub fn sim(&self) -> Sim {
         let (fa, fb) = self.band.sweep();
-        let mut sim = Sim { f0: (fa + fb) / 2.0, fc: (fb - fa) / 2.0, end_criteria: 1e-4, max_timesteps: 200_000, ..Default::default() };
+        // -50 dB, as Antenna Studio: at -40 dB the energy left alone is enough to blur a deep match.
+        let mut sim = Sim { f0: (fa + fb) / 2.0, fc: (fb - fa) / 2.0, end_criteria: 1e-5, max_timesteps: 200_000, ..Default::default() };
         let lambda_min = C0 / fb;
         let max_cell = lambda_min / self.quality.cells_per_lambda() / self.eps_r.sqrt();
         let (w, g) = (self.width, self.gap);

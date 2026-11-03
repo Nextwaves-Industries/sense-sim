@@ -1,5 +1,4 @@
-//! Assistant and MCP tools for 3D design (`design_*`) and simulation (`sim_*`), hooked into
-//! `agent::tools`. A study made here is the same study the panel shows: the user can see it, change it
+//! Assistant and MCP tools for simulation (`sim_*`), hooked into `agent::tools`. A study made here is the same study the panel shows: the user can see it, change it
 //! and run it. Installing solvers and opening or saving files stay with the user.
 
 use std::sync::Arc;
@@ -13,12 +12,19 @@ use sim_core::materials;
 use sim_core::post;
 use sim_core::results::{ResultSet, StepKind};
 use sim_core::study::{BcKind, Condition, FaceRef, Settings, Study};
-use solidcraft_engine::io::MeshQuality;
 
 use super::{SimState, panel};
 use crate::agent::llm::ToolDef;
 use crate::agent::tools::ToolOutput;
-use crate::design::{self, Slot, Workspace, bridge};
+
+/// Said of a study on a design body, saved by an older version.
+pub(super) const NOT_ON_SCENE: &str = "This study's body came from 3D Design, which this version doesn't have. Choose an object from the scene as its body.";
+/// Said of a coil study, saved by an older version. Its region is cut out of the air around it, which
+/// takes CAD geometry, not a mesh.
+pub(super) const NO_COIL: &str = "A coil's field needs a CAD body, and this version has no CAD workspace. Electromagnetics here is the electric field between faces with potentials.";
+/// Said of a study with a second body, saved by an older version. Contact needs two CAD bodies.
+pub(super) const NO_CONTACT: &str = "Contact needs two CAD bodies, and this version has no CAD workspace. Take the second body off the study, or use an older version for this one.";
+
 
 fn def(name: &str, description: &str, schema: Value) -> ToolDef {
     ToolDef { name: name.into(), description: description.into(), schema }
@@ -27,36 +33,9 @@ fn def(name: &str, description: &str, schema: Value) -> ToolDef {
 pub fn defs() -> Vec<ToolDef> {
     vec![
         def(
-            "design_commands",
-            "List the parametric CAD commands that design_run can run: sketches, extrudes, fillets, booleans and hundreds more. Each has an id, a label and its parameters. Filter by a word, such as 'extrude' or 'sketch.circle'.",
-            json!({ "type": "object", "properties": { "filter": { "type": "string" }, "limit": { "type": "integer", "description": "default 40" } } }),
-        ),
-        def(
-            "design_run",
-            "Run CAD commands in the design workspace, in order, stopping at the first error. Lengths are in millimetres unless a unit is given. Each step can be undone by the user. A typical part: sketch.create {plane:'XY'}, sketch.rectangle.two_point {p0:[0,0],p1:[100,50]}, sketch.finish, solid.extrude {distance:'20 mm',body_name:'Plate'}. Commands that open or write files are refused: files are the user's.",
-            json!({ "type": "object", "properties": {
-                "commands": { "type": "array", "items": { "type": "object", "properties": { "command": { "type": "string" }, "params": { "type": "object" } }, "required": ["command"] } }
-            }, "required": ["commands"] }),
-        ),
-        def(
-            "design_bodies",
-            "The design's bodies, each with its size in metres and whether it's a closed solid.",
-            json!({ "type": "object", "properties": {} }),
-        ),
-        def(
-            "design_faces",
-            "A body's faces, with area, centre and outward direction, in metres. A body can be a design body's name, or 'scene:NAME' for an object in the scene. Use these to choose which faces a simulation's conditions apply to.",
+            "sim_faces",
+            "An object's faces, with area, centre and outward direction, in metres. The body is 'scene:NAME' for an object in the scene. Use these to choose which faces a simulation's conditions apply to.",
             json!({ "type": "object", "properties": { "body": { "type": "string" } }, "required": ["body"] }),
-        ),
-        def(
-            "design_show",
-            "Show the design workspace to the user, or go back to the 3D scene.",
-            json!({ "type": "object", "properties": { "show": { "type": "boolean" } }, "required": ["show"] }),
-        ),
-        def(
-            "design_send_to_scene",
-            "Place every design body in the 3D scene as a USD object, side by side, so it can be moved, used for radio occlusion or simulated.",
-            json!({ "type": "object", "properties": {} }),
         ),
         def(
             "sim_catalog",
@@ -78,16 +57,15 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "sim_study_set",
-            "Change a study. Anything left out stays as it is. conditions replaces all of them. Each has a kind and the face numbers it applies to, from design_faces. Kinds: {type:'fixed'}, {type:'force',force:[x,y,z]} in N, {type:'pressure',pressure} in Pa, {type:'temperature',value} in C, {type:'heat_flux',flux} in W/m2, {type:'convection',coefficient,ambient}, {type:'velocity_inlet',speed} in m/s, {type:'pressure_outlet',pressure}, {type:'wall'}, {type:'potential',value} in V, {type:'displacement',displacement:[x,y,z]} in m, {type:'contact',friction}. For contact, set second_body too, and give the touching faces on each body: faces on the first, second_faces on the second. Each body needs a fixed support or a displacement, because a force alone leaves it floating. settings are given by name: element_size (share of the body's diagonal), modes, f_min, f_max, points, damping, dt, duration, transient, initial_temperature, reference_temperature, load_increment, free_stream, resolution, directions, fill_fraction.",
+            "Change a study. Anything left out stays as it is. conditions replaces all of them. Each has a kind and the face numbers it applies to, from sim_faces. Kinds: {type:'fixed'}, {type:'force',force:[x,y,z]} in N, {type:'pressure',pressure} in Pa, {type:'temperature',value} in C, {type:'heat_flux',flux} in W/m2, {type:'convection',coefficient,ambient}, {type:'velocity_inlet',speed} in m/s, {type:'pressure_outlet',pressure}, {type:'wall'}, {type:'potential',value} in V, {type:'displacement',displacement:[x,y,z]} in m. Contact between two bodies isn't available. settings are given by name: element_size (share of the body's diagonal), modes, f_min, f_max, points, damping, dt, duration, transient, initial_temperature, reference_temperature, load_increment, free_stream, resolution, directions, fill_fraction.",
             json!({ "type": "object", "properties": {
                 "study": { "type": "integer" },
                 "name": { "type": "string" },
-                "body": { "type": "string", "description": "a design body's name, or 'scene:NAME' for an object in the scene" },
-                "second_body": { "type": "string", "description": "Nonlinear only: a second design body, touching the first" },
+                "body": { "type": "string", "description": "'scene:NAME' for an object in the scene" },
                 "material": { "type": "string" },
                 "fluid": { "type": "string" },
                 "settings": { "type": "object" },
-                "conditions": { "type": "array", "items": { "type": "object", "properties": { "kind": { "type": "object" }, "faces": { "type": "array", "items": { "type": "integer" } }, "second_faces": { "type": "array", "items": { "type": "integer" } } }, "required": ["kind", "faces"] } }
+                "conditions": { "type": "array", "items": { "type": "object", "properties": { "kind": { "type": "object" }, "faces": { "type": "array", "items": { "type": "integer" } } }, "required": ["kind", "faces"] } }
             }, "required": ["study"] }),
         ),
         def(
@@ -107,7 +85,7 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "sim_check_faces",
-            "Before running: what each condition really lands on, as its number of faces and its area in m², and the faces with no condition. Compare the areas with what was meant. It's an error if a pick has gone stale after an edit to the design. show:true also colours the body by condition in the 3D view, for the user and for screenshots.",
+            "Before running: what each condition really lands on, as its number of faces and its area in m², and the faces with no condition. Compare the areas with what was meant. It's an error if a pick has gone stale because the object moved. show:true also colours the body by condition in the 3D view, for the user and for screenshots.",
             json!({ "type": "object", "properties": { "study": { "type": "integer" }, "show": { "type": "boolean" } }, "required": ["study"] }),
         ),
         def(
@@ -126,11 +104,6 @@ pub fn defs() -> Vec<ToolDef> {
     ]
 }
 
-/// Commands that read or write files. Those stay with the user: a tool call shouldn't overwrite their
-/// work, or read whatever it's pointed at.
-fn touches_files(id: &str) -> bool {
-    id.starts_with("file.") || id == "doc.open"
-}
 
 fn readiness_word(r: Readiness) -> &'static str {
     match r {
@@ -149,15 +122,12 @@ fn missing(needs: Needs, installed: super::dialog::Installed) -> Option<&'static
     }
 }
 
-pub(super) fn partition_of(state: &SimState, slot: &mut Slot, body: &str) -> Result<Partition, String> {
-    if let Some(object) = body.strip_prefix(sim_core::study::SCENE_PREFIX) {
-        return match state.scene.bodies.get(object) {
-            Some(b) => Ok(b.regions.partition.clone()),
-            None => Err(state.scene.errors.get(object).cloned().unwrap_or_else(|| format!("{object} hasn't been read from the scene yet: set it as a study's body first, and try again in a moment."))),
-        };
+pub(super) fn partition_of(state: &SimState, body: &str) -> Result<Partition, String> {
+    let object = body.strip_prefix(sim_core::study::SCENE_PREFIX).ok_or(NOT_ON_SCENE)?;
+    match state.scene.bodies.get(object) {
+        Some(b) => Ok(b.regions.partition.clone()),
+        None => Err(state.scene.errors.get(object).cloned().unwrap_or_else(|| format!("{object} hasn't been read from the scene yet: set it as a study's body first, and try again in a moment."))),
     }
-    let host = design::ensure_host(slot)?;
-    bridge::partition(&host.app.session, body, MeshQuality::Fine).map_err(|e| format!("{e:#}"))
 }
 
 /// A face's numbers, for choosing it.
@@ -236,6 +206,9 @@ fn merge_settings(current: &Settings, given: &Value) -> Result<Settings, String>
             let known: Vec<&String> = v.as_object().map(|o| o.keys().collect()).unwrap_or_default();
             return Err(format!("no setting called '{k}'. They are: {known:?}"));
         }
+        if k == "coil_ampere_turns" && value.as_f64() != Some(0.0) {
+            return Err(NO_COIL.to_string());
+        }
         v[k] = value.clone();
     }
     serde_json::from_value(v).map_err(|e| format!("settings: {e}"))
@@ -308,13 +281,12 @@ fn probe(set: &ResultSet, step: usize, field: &str, p: [f64; 3]) -> Result<Value
     Ok(json!({ "field": f.name, "unit": f.unit, "components": f.components, "values": f.at(i), "how": "nearest node: the point is outside the volume", "node_m": n, "distance_m": distance }))
 }
 
-/// Whether a tool is handled here. The `design_` prefix is shared with the outcome recipes,
-/// so these are named rather than matched by prefix.
+/// Whether a tool is handled here.
 pub fn is_tool(name: &str) -> bool {
-    name.starts_with("sim_") || matches!(name, "design_commands" | "design_run" | "design_bodies" | "design_faces" | "design_show" | "design_send_to_scene")
+    name.starts_with("sim_")
 }
 
-/// Runs a `design_*` or `sim_*` tool on the world.
+/// Runs a `sim_*` tool on the world.
 pub fn start(world: &mut World, name: &str, i: &Value) -> ToolOutput {
     match run(world, name, i) {
         Ok(v) => ToolOutput::ok(v),
@@ -328,77 +300,11 @@ fn number(i: &Value, key: &str) -> Result<usize, String> {
 
 fn run(world: &mut World, name: &str, i: &Value) -> Result<Value, String> {
     match name {
-        "design_commands" => {
-            let filter = i["filter"].as_str().unwrap_or("").to_lowercase();
-            let limit = i["limit"].as_u64().unwrap_or(40) as usize;
-            let matching: Vec<_> = solidcraft_engine::cmd::command_specs()
-                .into_iter()
-                .filter(|c| c.planned.is_none() && !touches_files(c.id))
-                .filter(|c| filter.is_empty() || c.id.to_lowercase().contains(&filter) || c.label.to_lowercase().contains(&filter))
-                .collect();
-            let total = matching.len();
-            let list: Vec<Value> = matching.iter().take(limit).map(|c| json!({ "id": c.id, "label": c.label, "params": c.params })).collect();
-            Ok(json!({ "total": total, "shown": list.len(), "commands": list }))
-        }
-        "design_run" => {
-            let commands = i["commands"].as_array().ok_or("'commands' must be a list")?.clone();
-            for c in &commands {
-                let id = c["command"].as_str().ok_or("each step needs a 'command'")?;
-                if touches_files(id) {
-                    return Err(format!("'{id}' works on files, which this tool leaves to the user. Nothing was run."));
-                }
-            }
-            let mut slot = world.non_send_mut::<Slot>();
-            let host = design::ensure_host(&mut slot)?;
-            host.app.home.open = false;
-            let session = &mut host.app.session;
-            let mut done = 0usize;
-            let outcome = session.run_script_each(&json!({ "commands": commands }), &mut |_, _| done += 1);
-            let bodies = bridge::bodies(&host.app.session);
-            match outcome {
-                Ok(results) => Ok(json!({ "ran": results.len(), "results": results, "bodies": bodies })),
-                Err(e) => Err(format!("{e}. {done} steps before it succeeded and stayed in the design. Bodies now: {bodies:?}")),
-            }
-        }
-        "design_bodies" => {
-            let mut slot = world.non_send_mut::<Slot>();
-            let host = design::ensure_host(&mut slot)?;
-            let session = &host.app.session;
-            let mut out = Vec::new();
-            for b in bridge::bodies(session) {
-                let part = bridge::partition(session, &b, MeshQuality::Standard).map_err(|e| format!("{e:#}"))?;
-                let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-                for p in &part.positions {
-                    for k in 0..3 {
-                        lo[k] = lo[k].min(p[k]);
-                        hi[k] = hi[k].max(p[k]);
-                    }
-                }
-                out.push(json!({ "name": b, "faces": part.faces, "closed": part.is_closed(), "size_m": [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], "lowest_corner_m": lo }));
-            }
-            Ok(json!({ "bodies": out }))
-        }
-        "design_faces" => {
+        "sim_faces" => {
             let body = i["body"].as_str().ok_or("'body' is needed")?.to_string();
-            let part = world.resource_scope(|world, state: Mut<SimState>| {
-                let mut slot = world.non_send_mut::<Slot>();
-                partition_of(&state, &mut slot, &body)
-            })?;
+            let part = partition_of(world.resource::<SimState>(), &body)?;
             let faces: Vec<Value> = (0..part.faces).filter_map(|f| face_summary(&part, f)).take(300).collect();
             Ok(json!({ "body": body, "face_count": part.faces, "closed": part.is_closed(), "faces": faces }))
-        }
-        "design_show" => {
-            let show = i["show"].as_bool().ok_or("'show' must be true or false")?;
-            *world.resource_mut::<Workspace>() = if show { Workspace::Design } else { Workspace::Scene };
-            Ok(json!({ "showing": if show { "design" } else { "scene" } }))
-        }
-        "design_send_to_scene" => {
-            let bodies = world.resource_scope(|world, mut pending: Mut<crate::scene::PendingSpawns>| {
-                let mut slot = world.non_send_mut::<Slot>();
-                let host = design::ensure_host(&mut slot)?;
-                design::bridge_send(host, &mut pending).map_err(|e| format!("{e:#}"))
-            })?;
-            Ok(json!({ "placed": bodies, "note": "They appear when loaded. They're named after their bodies." }))
         }
         "sim_catalog" => {
             let installed = world.resource::<SimState>().installed;
@@ -439,7 +345,7 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Value, String> {
         }
         "sim_study_set" => {
             let index = number(i, "study")?;
-            world.resource_scope(|world, mut state: Mut<SimState>| {
+            world.resource_scope(|_, mut state: Mut<SimState>| {
                 let current = state.studies.get(index).cloned().ok_or_else(|| format!("no study {index}: there are {}", state.studies.len()))?;
                 // Everything is worked out first: a mistake leaves the study as it was.
                 let mut study = current;
@@ -449,8 +355,8 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Value, String> {
                 if let Some(v) = i["body"].as_str() {
                     study.body = Some(v.to_string());
                 }
-                if let Some(v) = i["second_body"].as_str() {
-                    study.second_body = Some(v.to_string());
+                if !i["second_body"].is_null() {
+                    return Err(NO_CONTACT.to_string());
                 }
                 if let Some(v) = i["material"].as_str() {
                     study.material = materials::solids().into_iter().find(|m| m.name == v).ok_or_else(|| format!("no material '{v}': see sim_catalog"))?;
@@ -465,28 +371,16 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Value, String> {
                 }
                 if let Some(list) = i["conditions"].as_array() {
                     let body = study.body.clone().ok_or("Set the study's body first: conditions are on its faces.")?;
-                    let part = {
-                        let mut slot = world.non_send_mut::<Slot>();
-                        partition_of(&state, &mut slot, &body)?
-                    };
+                    let part = partition_of(&state, &body)?;
                     let mut conditions = Vec::with_capacity(list.len());
                     for c in list {
                         let kind: BcKind = serde_json::from_value(c["kind"].clone()).map_err(|e| format!("a condition's kind: {e}"))?;
+                        if matches!(kind, BcKind::Contact { .. }) {
+                            return Err(NO_CONTACT.to_string());
+                        }
                         let mut faces = Vec::new();
                         for f in c["faces"].as_array().ok_or("each condition needs a list of faces")? {
                             faces.push(face_ref(&part, f.as_u64().ok_or("face numbers are whole numbers")? as u32)?);
-                        }
-                        if let Some(list) = c["second_faces"].as_array() {
-                            let other = study.second_body.clone().ok_or("second_faces needs a second_body.")?;
-                            let other_part = {
-                                let mut slot = world.non_send_mut::<Slot>();
-                                partition_of(&state, &mut slot, &other)?
-                            };
-                            for f in list {
-                                let mut face = face_ref(&other_part, f.as_u64().ok_or("face numbers are whole numbers")? as u32)?;
-                                face.second = true;
-                                faces.push(face);
-                            }
                         }
                         conditions.push(Condition { kind, faces });
                     }
@@ -499,10 +393,9 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Value, String> {
         "sim_check_faces" => {
             let index = number(i, "study")?;
             let show = i["show"].as_bool().unwrap_or(false);
-            world.resource_scope(|world, mut state: Mut<SimState>| {
+            world.resource_scope(|_, mut state: Mut<SimState>| {
                 let before = state.view.take();
-                let mut slot = world.non_send_mut::<Slot>();
-                let rows = panel::preview_faces(&mut state, &mut slot, index);
+                let rows = panel::preview_faces(&mut state, index);
                 if !show || rows.is_err() {
                     state.view = before;
                 }
@@ -512,7 +405,7 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Value, String> {
         }
         "sim_run" => {
             let index = number(i, "study")?;
-            world.resource_scope(|world, mut state: Mut<SimState>| {
+            world.resource_scope(|_, mut state: Mut<SimState>| {
                 let study = state.studies.get(index).ok_or_else(|| format!("no study {index}: there are {}", state.studies.len()))?;
                 let a = catalog::analysis(study.analysis);
                 if let Some(m) = missing(a.needs, state.installed) {
@@ -522,8 +415,7 @@ fn run(world: &mut World, name: &str, i: &Value) -> Result<Value, String> {
                 if !problems.is_empty() {
                     return Err(format!("Not ready: {}", problems.join(" ")));
                 }
-                let mut slot = world.non_send_mut::<Slot>();
-                let job = panel::start_run(&mut state, &mut slot, index)?;
+                let job = panel::start_run(&mut state, index)?;
                 state.active = Some(index);
                 Ok(json!({ "job": job, "note": "Running in the background: follow it with sim_jobs." }))
             })
@@ -615,13 +507,6 @@ mod tests {
         assert!(face_ref(&p, 7).unwrap_err().contains("no face 7"));
     }
 
-    #[test]
-    fn files_stay_with_the_user() {
-        for id in ["file.save_as", "file.export", "file.new", "doc.open"] {
-            assert!(touches_files(id), "{id}");
-        }
-        assert!(!touches_files("solid.extrude"));
-    }
 
     #[test]
     fn every_analysis_can_be_named_and_a_wrong_one_lists_them() {
@@ -679,7 +564,7 @@ mod tests {
     #[test]
     fn the_tool_list_is_well_formed_and_its_names_route_here() {
         for d in defs() {
-            assert!(d.name.starts_with("design_") || d.name.starts_with("sim_"), "{}", d.name);
+            assert!(d.name.starts_with("sim_"), "{}", d.name);
             assert_eq!(d.schema["type"], "object", "{}", d.name);
         }
     }

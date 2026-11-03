@@ -19,6 +19,7 @@ use crate::{C64, EPS0, MU0};
 
 use super::far::{Moment, PlaneWave, wavenumber};
 use super::fill::{Dof, fill_symmetric};
+use super::layered::{self, Kernels};
 use super::mesher::{SurfaceMesh, mesh_geometry};
 use super::quad::{TRI3, TRI6, TRI7, TRI16, TriPoint};
 use super::wire::smooth_kernel;
@@ -231,6 +232,111 @@ fn efie_block(p: &Tri, q: &Tri, k: f64, jwmu: C64, over_jwe: C64) -> [[C64; 3]; 
     b
 }
 
+/// The four integrals of the vector potential's kernel and the scalar potential's `∬G`, inside
+/// layers: `exp(-jkρ)/ρ` plus what the layers add.
+fn layered_rule(p: &Tri, q: &Tri, k: f64, kn: &Kernels, pp: &[TriPoint], qp: &[TriPoint]) -> (PairIntegrals, C64) {
+    let mut out = PairIntegrals::default();
+    let mut phi = C64::new(0.0, 0.0);
+    for (wi, ai) in pp {
+        let r = p.at(wi);
+        let rp = sub(r, p.c);
+        for (wj, aj) in qp {
+            let s = q.at(wj);
+            let rq = sub(s, q.c);
+            let d = sub(r, s);
+            let rr = dot(d, d).sqrt();
+            let (sn, cs) = (k * rr).sin_cos();
+            let free = C64::new(cs, -sn) / rr;
+            let w = ai * aj;
+            let g = (free + kn.a.whole_at(rr)) * w;
+            phi += (free + kn.phi.whole_at(rr)) * w;
+            out.g += g;
+            for m in 0..3 {
+                out.gr[m] += g * rp[m];
+                out.gs[m] += g * rq[m];
+            }
+            out.grs += g * dot(rp, rq);
+        }
+    }
+    let f = p.area * q.area / (4.0 * PI);
+    (scale_integrals(out, f), phi * f)
+}
+
+/// The closed forms of the free-space `1/R` and of every image, the rest by quadrature.
+fn layered_near(p: &Tri, q: &Tri, k: f64, kn: &Kernels) -> (PairIntegrals, C64) {
+    let mut out = PairIntegrals::default();
+    let mut phi = C64::new(0.0, 0.0);
+    for (wi, ai) in TRI16.iter() {
+        let r = p.at(wi);
+        let rp = sub(r, p.c);
+        let (i0, iv) = potentials(q, r);
+        let mut inner = C64::new(i0, 0.0);
+        let mut inner_v = [C64::new(iv[0], 0.0), C64::new(iv[1], 0.0), C64::new(iv[2], 0.0)];
+        let mut inner_phi = C64::new(i0, 0.0);
+        let at_depth = |b: f64| if b == 0.0 { (i0, iv) } else { potentials(q, [r[0], r[1], r[2] + b]) };
+        for (a, b) in &kn.a.images {
+            let (i, v) = at_depth(*b);
+            inner += *a * i;
+            for m in 0..3 {
+                inner_v[m] += *a * v[m];
+            }
+        }
+        for (a, b) in &kn.phi.images {
+            inner_phi += *a * at_depth(*b).0;
+        }
+        for (wj, aj) in TRI7.iter() {
+            let s = q.at(wj);
+            let rq = sub(s, q.c);
+            let d = sub(r, s);
+            let rr = dot(d, d).sqrt();
+            let free = smooth_kernel(k, rr);
+            let w = aj * q.area;
+            let g = (free + kn.a.smooth_at(rr)) * w;
+            inner += g;
+            for m in 0..3 {
+                inner_v[m] += g * rq[m];
+            }
+            inner_phi += (free + kn.phi.smooth_at(rr)) * w;
+        }
+        out.g += inner * *ai;
+        phi += inner_phi * *ai;
+        for m in 0..3 {
+            out.gr[m] += inner * (*ai * rp[m]);
+            out.gs[m] += inner_v[m] * *ai;
+            out.grs += inner_v[m] * (*ai * rp[m]);
+        }
+    }
+    let f = p.area / (4.0 * PI);
+    (scale_integrals(out, f), phi * f)
+}
+
+/// [`efie_block`] inside layers, where the two potentials have kernels of their own.
+fn layered_block(p: &Tri, q: &Tri, k: f64, jwmu: C64, over_jwe: C64, kn: &Kernels) -> [[C64; 3]; 3] {
+    let d = norm(sub(p.c, q.c));
+    let reach = p.radius + q.radius;
+    let (a, phi) = if d < NEAR * reach {
+        layered_near(p, q, k, kn)
+    } else if d < MID * reach {
+        layered_rule(p, q, k, kn, &TRI6, &TRI6)
+    } else {
+        layered_rule(p, q, k, kn, &TRI3, &TRI3)
+    };
+    let mut b = [[C64::new(0.0, 0.0); 3]; 3];
+    let scalar = phi * over_jwe * (1.0 / (p.area * q.area));
+    let vector = jwmu * (0.25 / (p.area * q.area));
+    let dotc = |u: &[C64; 3], v: P3| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    for i in 0..3 {
+        let di = sub(p.c, p.v[i]);
+        let gs_i = dotc(&a.gs, di);
+        for j in 0..3 {
+            let dj = sub(q.c, q.v[j]);
+            let term = a.grs + dotc(&a.gr, dj) + gs_i + a.g * dot(di, dj);
+            b[i][j] = vector * term + scalar;
+        }
+    }
+    b
+}
+
 pub struct SurfaceModel {
     mesh: SurfaceMesh,
     tris: Vec<Tri>,
@@ -243,6 +349,8 @@ pub struct SurfaceModel {
     /// net current sees; `None` for PEC.
     materials: Vec<Option<(Material, f64)>>,
     ground: bool,
+    /// Layers around the metal, and how far the metal spans for their tables.
+    stack: Option<(crate::stack::Stack, f64)>,
     /// What the mesh check found.
     notes: Vec<String>,
 }
@@ -285,8 +393,10 @@ type Wing = (usize, u8);
 
 impl SurfaceModel {
     /// Meshes `geom` with edges no longer than `h`, then numbers the RWG functions.
-    pub fn build(geom: &Geometry, h: f64, lambda: f64) -> Result<Self> {
+    pub fn build(geom: &Geometry, h: f64, lambda: f64, stack: Option<crate::stack::Stack>) -> Result<Self> {
         let mesh = mesh_geometry(geom, h, lambda)?;
+        let (lo, hi) = geom.bounds();
+        let stack = stack.map(|s| (s, norm(sub(hi, lo))));
         let tris: Vec<Tri> = mesh.tris.iter().map(|t| Tri::new(t.map(|i| mesh.verts[i as usize]))).collect();
         let images = if geom.ground { tris.iter().map(Tri::reflected).collect() } else { Vec::new() };
         // A sheet's net current is shared by its two faces, so Zs/2 for what it loses. A
@@ -368,7 +478,7 @@ impl SurfaceModel {
             }
             feeds.push(list);
         }
-        Ok(Self { mesh, tris, images, dofs, nbasis, feeds, materials, ground: geom.ground, notes })
+        Ok(Self { mesh, tris, images, dofs, nbasis, feeds, materials, ground: geom.ground, stack, notes })
     }
 
     /// Current density at a point of a triangle.
@@ -396,9 +506,13 @@ impl Model for SurfaceModel {
         let k = wavenumber(f);
         let jwmu = C64::new(0.0, w * MU0);
         let over_jwe = C64::new(0.0, -1.0 / (w * EPS0));
+        let tables = self.stack.as_ref().map(|(s, span)| layered::kernels(s, f, *span));
         fill_symmetric::<3>(self.nbasis, &self.dofs, |p, q| {
             let tp = &self.tris[p];
-            let mut b = efie_block(tp, &self.tris[q], k, jwmu, over_jwe);
+            let mut b = match &tables {
+                Some(kn) => layered_block(tp, &self.tris[q], k, jwmu, over_jwe, kn),
+                None => efie_block(tp, &self.tris[q], k, jwmu, over_jwe),
+            };
             if self.ground {
                 // The image of an RWG function is minus its reflection.
                 let img = efie_block(tp, &self.images[q], k, jwmu, over_jwe);

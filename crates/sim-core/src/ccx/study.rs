@@ -73,7 +73,7 @@ fn mesh_body(geometry: &FeaGeometry, study: &Study, dir: &std::path::Path, secon
     let assignment = classify(&mesh, part, diagonal * 2e-3, Limits::default());
     if !assignment.issues.is_empty() {
         let list: Vec<String> = assignment.issues.iter().take(5).map(|i| i.to_string()).collect();
-        bail!("The mesh doesn't match the design's faces, so loads can't be placed reliably:\n{}", list.join("\n"));
+        bail!("The mesh doesn't match the body's faces, so loads can't be placed reliably:\n{}", list.join("\n"));
     }
     for c in &study.conditions {
         for f in c.faces.iter().filter(|f| f.second == second) {
