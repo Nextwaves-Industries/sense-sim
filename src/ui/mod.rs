@@ -11,6 +11,7 @@ mod ribbon;
 mod settings;
 mod start;
 mod statusbar;
+mod switcher;
 mod tabbar;
 mod topbar;
 mod tree;
@@ -35,7 +36,7 @@ use crate::tabs::{NewTab, Request, Tabs};
 use crate::theme::{self, ACCENT, icon};
 
 pub use settings::SettingsTab;
-pub use workbench::{StudioDoc, StudioFile, Workbench};
+pub use workbench::{ProjectView, StudioDoc, StudioFile, Workbench};
 
 pub type ObjectQuery<'w, 's> = Query<'w, 's, (Entity, &'static mut PlacedObject, &'static mut Transform, &'static mut Visibility)>;
 
@@ -106,6 +107,8 @@ pub struct LeftPanelSlot {
     pub studio_file: Vec<workbench::StudioFile>,
     /// A new name for the antenna project, typed in the top bar.
     pub studio_rename: Option<String>,
+    /// An antenna project file to open, chosen from the scene's File menu.
+    pub studio_open_file: Option<PathBuf>,
     /// The open antenna project, for the top bar.
     pub studio_doc: workbench::StudioDoc,
     /// The Factory workbench's card.
@@ -113,6 +116,21 @@ pub struct LeftPanelSlot {
     /// The page Antenna Studio shows, for the ribbon.
     #[cfg(feature = "antenna-studio")]
     pub studio_page: crate::antenna::ui::Page,
+    /// The page the ribbon last went to the tab of.
+    #[cfg(feature = "antenna-studio")]
+    pub ribbon_studio_page: Option<crate::antenna::ui::Page>,
+    /// The 3D modeler, for the ribbon's tools.
+    #[cfg(feature = "antenna-studio")]
+    pub model_bar: crate::antenna::ui::model3d::ModelBar,
+    /// Tools clicked on the ribbon.
+    #[cfg(feature = "antenna-studio")]
+    pub model_asks: Vec<crate::antenna::ui::model3d::Cmd>,
+    /// The Studio's panels, from the View tab.
+    pub studio_hide_left: bool,
+    pub studio_hide_bottom: bool,
+    /// `ModelBar::tab_asked` when the ribbon last went to the tab it asked for.
+    #[cfg(feature = "antenna-studio")]
+    pub ribbon_tab_asked: u32,
 }
 
 /// Which parts of the project trees are expanded.
@@ -150,6 +168,12 @@ pub struct UiState {
     settings_open: bool,
     settings_tab: SettingsTab,
     ribbon_tab: ribbon::RibbonTab,
+    /// The ribbon tab each workspace last showed of its own tools.
+    tool_tabs: [usize; Workbench::ALL.len()],
+    /// The "Change workspace" list is showing.
+    workspace_open: bool,
+    /// Where the workspace tile is, for the list to hang from.
+    workspace_anchor: Option<egui::Rect>,
     /// The workbench the last frame drew, to notice a change.
     shown_bench: Workbench,
     /// 0: nothing applied, 1: fonts loaded, 2: style applied.
@@ -192,6 +216,9 @@ impl Default for UiState {
             settings_open: false,
             settings_tab: SettingsTab::General,
             ribbon_tab: ribbon::RibbonTab::default(),
+            tool_tabs: [0; Workbench::ALL.len()],
+            workspace_open: false,
+            workspace_anchor: None,
             shown_bench: Workbench::default(),
             theme_stage: 0,
             logo: None,
@@ -240,6 +267,7 @@ impl UiState {
         self.start_open = true;
         self.start_name.clear();
         self.start = start::StartState::default();
+        self.start.select_empty();
     }
 
     /// Goes straight to the editor (scripted runs), optionally loading a sample.
@@ -355,14 +383,34 @@ fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     Some(ctx.load_texture("logo", ci, egui::TextureOptions::LINEAR))
 }
 
-/// Opens the file the app was started with, such as a double-clicked project. Saving goes back to it.
-pub(crate) fn open_at_launch(world: &mut World, path: PathBuf) {
+/// Opens an antenna project in Antenna, whichever workspace is showing.
+pub(crate) fn open_antenna(world: &mut World, path: PathBuf) {
+    world.resource_scope(|world, mut slot: Mut<LeftPanelSlot>| {
+        slot.studio_open_file = Some(path);
+        workbench::switch(&mut slot, &mut world.resource_mut::<crate::rtls::ui::RtlsUiState>(), Workbench::Antenna);
+    });
+}
+
+/// Opens the file the app was started with, such as a double-clicked project. Saving goes back to
+/// it. True if that's a scene, which is still on its way; an antenna project is simply open.
+pub(crate) fn open_at_launch(world: &mut World, path: PathBuf) -> bool {
+    if workbench::is_antenna_file(&path) {
+        open_antenna(world, path);
+        return false;
+    }
     let mut state = world.resource_mut::<UiState>();
     state.name_scene(crate::tabs::title_of(&path));
     state.layout_path = Some(path.clone());
     state.frame_on_load();
     world.resource_mut::<crate::undo::UndoStack>().rebase();
     world.resource_mut::<Actions>().0.push(Action::LoadLayout(path));
+    true
+}
+
+/// The project opened at launch was the user's choice, not a scripted run's: it goes to
+/// the workspace it is for once it has loaded.
+pub(crate) fn settle_when_loaded(world: &mut World) {
+    world.resource_mut::<LeftPanelSlot>().bench.settle_on_load = true;
 }
 
 fn pick_layout_save(scene_name: &str) -> Option<PathBuf> {
@@ -511,6 +559,7 @@ pub fn ui_system(
         if n > 3 && pending.0.is_empty() && cache.loading_count() == 0 {
             actions.0.push(Action::FrameAll);
             state.frame_after_load = None;
+            workbench::settle_loaded_project(&mut slot, &mut rtls);
         } else {
             state.frame_after_load = Some(n + 1);
         }
@@ -565,6 +614,8 @@ pub fn ui_system(
         state.start_open = true;
         state.start_name.clear();
         state.start = start::StartState::default();
+        // Asked from a scene, so another scene is the likely answer.
+        state.start.select_empty();
     }
     if state.start_open {
         let mut name = std::mem::take(&mut state.start_name);
@@ -576,10 +627,12 @@ pub fn ui_system(
         match choice {
             Some(start::Choice::Empty) => {
                 let title = typed.unwrap_or_else(|| "Untitled scene".into());
+                slot.bench.opening = true;
                 tabs.request(Request::Open(vec![NewTab { title, path: None, load: None }]));
                 state.start_open = false;
             }
             Some(start::Choice::Sample(i)) => {
+                slot.bench.opening = true;
                 state.open_sample(i, typed, &library, &mut tabs, &mut status);
                 state.start_open = false;
             }
@@ -609,10 +662,21 @@ pub fn ui_system(
         flags.save_as = false;
     }
 
-    if flags.open && let Some(files) = rfd::FileDialog::new().add_filter("Sense Sim project", &[crate::project_file::EXTENSION]).add_filter("Older layout", &["json"]).pick_files() {
-        let new = files.into_iter().map(|p| NewTab { title: crate::tabs::title_of(&p), path: Some(p.clone()), load: Some(p) }).collect();
-        tabs.request(Request::Open(new));
-        state.start_open = false;
+    if flags.open {
+        let dialog = rfd::FileDialog::new().add_filter("Sense Sim project", &[crate::project_file::EXTENSION]);
+        if let Some(files) = dialog.add_filter("Older layout or antenna project", &["json"]).pick_files() {
+            // The kind of project decides where it opens.
+            let (antennas, scenes): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|p| workbench::is_antenna_file(p));
+            if !scenes.is_empty() {
+                slot.bench.opening = true;
+                tabs.request(Request::Open(scenes.into_iter().map(|p| NewTab { title: crate::tabs::title_of(&p), path: Some(p.clone()), load: Some(p) }).collect()));
+            }
+            if let Some(p) = antennas.into_iter().last() {
+                slot.studio_open_file = Some(p);
+                workbench::switch(&mut slot, &mut rtls, Workbench::Antenna);
+            }
+            state.start_open = false;
+        }
     }
     if flags.save || flags.save_as {
         let name = state.scene_name.clone();
@@ -882,12 +946,13 @@ pub fn ui_system(
     tabbar::confirm_close(&ctx, &mut tabs, &mut state, &mut actions);
 
     downloads::dropdown(&ctx, &mut state, &mut library, slot.bench.current.has_library());
+    switcher::dropdown(&ctx, &mut state, &mut slot, &mut rtls);
 
     let over_ui = ctx.pointer_latest_pos().map(|p| !central.contains(p) || ctx.layer_id_at(p).is_some_and(|l| l.order != egui::Order::Background)).unwrap_or(true);
     // The Studio's canvas is on the background order, but the scene isn't what's under it.
     block.pointer = over_ui || ctx.egui_is_using_pointer() || state.start_open || slot.studio_open;
     // A full-canvas workspace has its own keys: Delete there mustn't reach the scene.
-    block.keyboard = ctx.egui_wants_keyboard_input() || state.start_open || slot.canvas_taken();
+    block.keyboard = ctx.egui_wants_keyboard_input() || state.start_open || state.workspace_open || slot.canvas_taken();
     Ok(())
 }
 

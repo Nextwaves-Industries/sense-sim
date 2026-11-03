@@ -78,6 +78,18 @@ impl Message {
             .join("\n")
     }
 
+    /// What the model reasoned on the way to this reply, as far as its provider shows it.
+    pub fn thinking(&self) -> String {
+        let Some((kind, raw)) = &self.raw else { return String::new() };
+        let parts: Vec<&str> = if *kind == ProviderKind::Anthropic {
+            raw.as_array().into_iter().flatten().filter(|b| b["type"] == "thinking").filter_map(|b| b["thinking"].as_str()).collect()
+        } else {
+            // Gateways may fill in both names with the same words.
+            ["reasoning_content", "reasoning"].iter().filter_map(|k| raw[*k].as_str()).take(1).collect()
+        };
+        parts.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n")
+    }
+
     pub fn tool_uses(&self) -> Vec<(String, String, Value)> {
         self.content
             .iter()
@@ -96,8 +108,22 @@ pub struct ToolDef {
     pub schema: Value,
 }
 
+/// What a model call reports while it runs.
+pub enum Live {
+    /// More of what the model is thinking.
+    Thinking(String),
+    /// The call failed part way and is being sent again, so what it reported so far is void.
+    Restart,
+}
+
 pub trait Provider: Send + Sync {
     fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message>;
+    /// The same, reporting to `live` as it goes where the provider can. `live` returns false once
+    /// nobody is waiting for the reply, which ends the call at that point.
+    fn complete_live(&self, system: &str, messages: &[Message], tools: &[ToolDef], live: &mut dyn FnMut(Live) -> bool) -> Result<Message> {
+        let _ = live;
+        self.complete(system, messages, tools)
+    }
     /// The model it talks to, for accounting.
     fn model(&self) -> String {
         String::new()
@@ -191,19 +217,191 @@ fn request_json(url: &str, headers: &[(&str, String)], body: Option<&Value>) -> 
             std::thread::sleep(backoff(attempt, retry_after));
             continue;
         }
-        if !(200..300).contains(&status) {
-            let msg = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v["error"]["message"].as_str().map(str::to_string).or_else(|| v["error"].as_str().map(str::to_string)))
-                .unwrap_or_else(|| text.chars().take(600).collect());
-            bail!("HTTP {status} from {url}: {msg}");
-        }
-        return serde_json::from_str(&text).with_context(|| format!("bad JSON from {url}"));
+        return json_reply(url, status, &text);
     }
+}
+
+/// A whole response: its JSON, or the error it carries.
+fn json_reply(url: &str, status: u16, text: &str) -> Result<Value> {
+    if !(200..300).contains(&status) {
+        let msg = serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|v| v["error"]["message"].as_str().map(str::to_string).or_else(|| v["error"].as_str().map(str::to_string)))
+            .unwrap_or_else(|| text.chars().take(600).collect());
+        bail!("HTTP {status} from {url}: {msg}");
+    }
+    serde_json::from_str(text).with_context(|| format!("bad JSON from {url}"))
 }
 
 fn post_json(url: &str, headers: &[(&str, String)], body: &Value) -> Result<Value> {
     request_json(url, headers, Some(body))
+}
+
+/// How long a stream may stay silent before it counts as dead. The server sends pings while the
+/// model works, so this is far longer than a healthy gap.
+const STREAM_SILENCE: Duration = Duration::from_secs(300);
+
+/// A streamed reply being put back together into what a whole one would have been.
+#[derive(Default)]
+struct Assembler {
+    message: Value,
+    blocks: Vec<Value>,
+    /// Tool input as it arrives, by block.
+    tool_json: std::collections::HashMap<usize, String>,
+    /// The block whose thinking was reported last.
+    thought: Option<usize>,
+    finished: bool,
+}
+
+/// Why a stream gave no reply.
+#[derive(Debug, PartialEq)]
+enum StreamFail {
+    /// Nobody is waiting for it any more.
+    Abandoned,
+    /// Worth sending again.
+    Transient(String),
+    Fatal(String),
+}
+
+fn push_str(block: &mut Value, key: &str, more: &str) {
+    match &mut block[key] {
+        Value::String(so_far) => so_far.push_str(more),
+        other => *other = json!(more),
+    }
+}
+
+impl Assembler {
+    fn feed(&mut self, event: &Value, live: &mut dyn FnMut(Live) -> bool) -> Result<(), StreamFail> {
+        let index = event["index"].as_u64().unwrap_or(0) as usize;
+        match event["type"].as_str().unwrap_or("") {
+            "message_start" => self.message = event["message"].clone(),
+            "content_block_start" => {
+                if self.blocks.len() <= index {
+                    self.blocks.resize(index + 1, Value::Null);
+                }
+                self.blocks[index] = event["content_block"].clone();
+            }
+            "content_block_delta" => {
+                let delta = &event["delta"];
+                let Some(block) = self.blocks.get_mut(index) else { return Ok(()) };
+                let said = |key: &str| delta[key].as_str().unwrap_or("");
+                match delta["type"].as_str().unwrap_or("") {
+                    "text_delta" => push_str(block, "text", said("text")),
+                    "signature_delta" => push_str(block, "signature", said("signature")),
+                    "input_json_delta" => self.tool_json.entry(index).or_default().push_str(said("partial_json")),
+                    "thinking_delta" => {
+                        let text = said("thinking");
+                        push_str(block, "thinking", text);
+                        if !text.is_empty() {
+                            let next_block = self.thought.is_some_and(|t| t != index);
+                            self.thought = Some(index);
+                            let shown = if next_block { format!("\n\n{text}") } else { text.to_string() };
+                            if !live(Live::Thinking(shown)) {
+                                return Err(StreamFail::Abandoned);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                if let (Some(json), Some(block)) = (self.tool_json.remove(&index), self.blocks.get_mut(index)) {
+                    // A reply cut off by its token limit can leave this unfinished: the tool then
+                    // says what's wrong and the model tries again.
+                    block["input"] = if json.trim().is_empty() { json!({}) } else { serde_json::from_str(&json).unwrap_or_else(|_| json!({ "_invalid_json": json })) };
+                }
+            }
+            "message_delta" => {
+                for (k, v) in event["delta"].as_object().into_iter().flatten() {
+                    self.message[k] = v.clone();
+                }
+                for (k, v) in event["usage"].as_object().into_iter().flatten() {
+                    self.message["usage"][k] = v.clone();
+                }
+            }
+            "message_stop" => self.finished = true,
+            "error" => {
+                let why = event["error"]["message"].as_str().unwrap_or("the model's server reported an error").to_string();
+                return Err(match event["error"]["type"].as_str().unwrap_or("") {
+                    "overloaded_error" | "api_error" | "rate_limit_error" | "timeout_error" => StreamFail::Transient(why),
+                    _ => StreamFail::Fatal(why),
+                });
+            }
+            _ => {} // pings, and whatever is added later
+        }
+        Ok(())
+    }
+
+    fn reply(mut self) -> Value {
+        self.message["content"] = Value::Array(self.blocks.into_iter().filter(|b| !b.is_null()).collect());
+        self.message
+    }
+}
+
+/// Reads server-sent events until the reply is complete.
+fn read_stream(reader: impl std::io::BufRead, live: &mut dyn FnMut(Live) -> bool) -> Result<Value, StreamFail> {
+    let mut assembler = Assembler::default();
+    for line in reader.lines() {
+        let line = line.map_err(|e| StreamFail::Transient(format!("the connection dropped: {e}")))?;
+        let Some(data) = line.strip_prefix("data:") else { continue };
+        let event = serde_json::from_str(data.trim()).map_err(|e| StreamFail::Transient(format!("a garbled reply: {e}")))?;
+        assembler.feed(&event, live)?;
+        if assembler.finished {
+            return Ok(assembler.reply());
+        }
+    }
+    Err(StreamFail::Transient("the reply stopped part way".into()))
+}
+
+/// A streaming request with up to 3 retries on transient failures. There's no limit on the whole
+/// call, since one that keeps talking is working. A server that answers with a whole reply instead
+/// of a stream, as a gateway may, is fine too.
+fn post_stream(url: &str, headers: &[(&str, String)], body: &Value, live: &mut dyn FnMut(Live) -> bool) -> Result<Value> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_per_read(Some(STREAM_SILENCE))
+        .build()
+        .into();
+    let bytes = serde_json::to_vec(body)?;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let mut req = agent.post(url).header("content-type", "application/json");
+        for (k, v) in headers {
+            req = req.header(*k, v.as_str());
+        }
+        let (why, retry_after) = match req.send(&bytes[..]) {
+            Err(e) => (e.to_string(), None),
+            Ok(mut resp) => {
+                let status = resp.status().as_u16();
+                let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
+                let streaming = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.contains("event-stream"));
+                if (200..300).contains(&status) && streaming {
+                    match read_stream(std::io::BufReader::new(resp.into_body().into_reader()), live) {
+                        Ok(reply) => return Ok(reply),
+                        Err(StreamFail::Abandoned) => bail!("nobody is waiting for this reply"),
+                        Err(StreamFail::Fatal(why)) => bail!("{why}"),
+                        Err(StreamFail::Transient(why)) => (why, None),
+                    }
+                } else {
+                    let text = resp.body_mut().with_config().limit(64 * 1024 * 1024).read_to_string()?;
+                    if !retryable(status) || attempt > 3 {
+                        return json_reply(url, status, &text);
+                    }
+                    (format!("HTTP {status}"), retry_after)
+                }
+            }
+        };
+        if attempt > 3 {
+            bail!("request to {url} failed: {why}");
+        }
+        eprintln!("[assistant] {url}: {why}, retrying");
+        if !live(Live::Restart) {
+            bail!("nobody is waiting for this reply");
+        }
+        std::thread::sleep(backoff(attempt, retry_after));
+    }
 }
 
 /// Whether a model on a vendor's list can hold a chat. The lists also carry embedding,
@@ -284,6 +482,40 @@ fn supports_fallbacks(model: &str) -> bool {
     ["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"].contains(&model)
 }
 
+/// Thinking counts towards this even when it isn't shown, so it has to leave room for the reply.
+/// Every model still served takes this much, and a stream can't time out on a long reply.
+const MAX_OUTPUT: u64 = 64_000;
+/// For the models that take a fixed amount of thinking.
+const THINKING_BUDGET: u64 = 16_000;
+/// These think only within a fixed budget.
+const BUDGET_MODELS: [&str; 3] = ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5"];
+/// These answer 400 to an `effort`.
+const NO_EFFORT_MODELS: [&str; 2] = ["claude-haiku-4-5", "claude-sonnet-4-5"];
+
+/// Left alone, the newest models think without saying what, and 4.6 to 4.8 don't think at all. Any
+/// other name is a gateway's, which may not know the field.
+fn anthropic_thinking(model: &str) -> Option<Value> {
+    if !model.starts_with("claude-") {
+        return None;
+    }
+    if BUDGET_MODELS.iter().any(|m| model.starts_with(m)) {
+        return Some(json!({ "type": "enabled", "budget_tokens": THINKING_BUDGET }));
+    }
+    // A thinking block is only good for the conversation it was written in, byte for byte, and the
+    // app changes that on purpose: compaction edits old messages, Plan mode changes the system
+    // prompt and the tools. Unset, the next request after any of those fails with a 400. This way
+    // the old blocks go and the work carries on.
+    Some(json!({ "type": "adaptive", "display": "summarized", "block_binding": { "prefix_mismatch_behavior": "drop_block" } }))
+}
+
+/// What's before a model taking over part way can't be replayed, and those tool calls must not run.
+/// Its words stay, since the new model carried on from them.
+fn past_the_fallback(content: &Value) -> Value {
+    let Some(blocks) = content.as_array() else { return content.clone() };
+    let Some(last) = blocks.iter().rposition(|b| b["type"] == "fallback") else { return content.clone() };
+    Value::Array(blocks.iter().enumerate().filter(|(i, b)| *i >= last || b["type"] == "text").map(|(_, b)| b.clone()).collect())
+}
+
 fn anthropic_block(b: &Block) -> Value {
     match b {
         Block::Text(t) => json!({ "type": "text", "text": t }),
@@ -316,7 +548,7 @@ pub fn anthropic_request(model: &str, effort: &str, fallbacks: bool, system: &st
         .collect();
     let mut body = json!({
         "model": model,
-        "max_tokens": 16000,
+        "max_tokens": MAX_OUTPUT,
         "system": [{ "type": "text", "text": system }],
         "messages": msgs,
         // Automatic caching: the breakpoint follows the end of the conversation.
@@ -326,8 +558,11 @@ pub fn anthropic_request(model: &str, effort: &str, fallbacks: bool, system: &st
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
-    if !effort.is_empty() {
+    if !effort.is_empty() && !NO_EFFORT_MODELS.iter().any(|m| model.starts_with(m)) {
         body["output_config"] = json!({ "effort": effort });
+    }
+    if let Some(thinking) = anthropic_thinking(model) {
+        body["thinking"] = thinking;
     }
     if fallbacks && supports_fallbacks(model) {
         body["fallbacks"] = json!("default");
@@ -341,7 +576,7 @@ pub fn parse_anthropic(v: &Value) -> Result<Message> {
         let why = v["stop_details"]["explanation"].as_str().unwrap_or("declined by the model's safety filter");
         bail!("the model declined this request: {why}");
     }
-    let raw = v["content"].clone();
+    let raw = past_the_fallback(&v["content"]);
     let mut content = Vec::new();
     for b in raw.as_array().into_iter().flatten() {
         match b["type"].as_str() {
@@ -366,14 +601,32 @@ impl Provider for Anthropic {
     }
 
     fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message> {
-        let body = anthropic_request(&self.model, &self.effort, self.fallbacks, system, messages, tools);
+        self.complete_live(system, messages, tools, &mut |_| true)
+    }
+
+    fn complete_live(&self, system: &str, messages: &[Message], tools: &[ToolDef], live: &mut dyn FnMut(Live) -> bool) -> Result<Message> {
+        let mut body = anthropic_request(&self.model, &self.effort, self.fallbacks, system, messages, tools);
+        body["stream"] = json!(true);
         let mut headers = vec![("x-api-key", self.key.clone()), ("anthropic-version", "2026-10-21".to_string())];
-        if body.get("fallbacks").is_some() {
-            headers.push(("anthropic-beta", "server-side-fallback-2026-07-01".to_string()));
+        let betas = anthropic_betas(&body);
+        if !betas.is_empty() {
+            headers.push(("anthropic-beta", betas.join(",")));
         }
-        let v = post_json(&format!("{}/v1/messages", self.base_url), &headers, &body)?;
+        let v = post_stream(&format!("{}/v1/messages", self.base_url), &headers, &body, live)?;
         parse_anthropic(&v)
     }
+}
+
+/// What a request has to announce for the optional fields it uses.
+fn anthropic_betas(body: &Value) -> Vec<&'static str> {
+    let mut betas = Vec::new();
+    if body.get("fallbacks").is_some() {
+        betas.push("server-side-fallback-2026-07-01");
+    }
+    if body["thinking"].get("block_binding").is_some() {
+        betas.push("thinking-binding-controls-2026-08-01");
+    }
+    betas
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +873,251 @@ mod tests {
         let body = anthropic_request("claude-opus-5-5", "", false, "s", &[msg], &[]);
         assert_eq!(body["messages"][0]["content"][0]["type"], "thinking");
         assert!(body.get("fallbacks").is_none());
+    }
+
+    #[test]
+    fn every_claude_model_is_asked_to_think_in_a_way_it_accepts() {
+        let body = |model: &str| anthropic_request(model, "high", false, "s", &[], &[]);
+        // The newest think regardless and hide it unless asked; the 4.6 to 4.8 models don't think unless asked.
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-4-8", "claude-sonnet-4-6"] {
+            let b = body(model);
+            assert_eq!(b["thinking"]["type"], "adaptive", "{model}");
+            assert_eq!(b["thinking"]["display"], "summarized", "{model}");
+            assert_eq!(b["output_config"]["effort"], "high", "{model}");
+            assert_eq!(b["max_tokens"], 64_000, "{model}");
+        }
+        // Measured: Haiku 4.5 answers 400 to an effort, and takes a budget below max_tokens.
+        let old = body("claude-haiku-4-5");
+        assert_eq!(old["thinking"]["type"], "enabled");
+        assert!(old["thinking"]["budget_tokens"].as_u64().unwrap() < old["max_tokens"].as_u64().unwrap());
+        assert!(old.get("output_config").is_none());
+        assert!(body("claude-haiku-4-5-20251001").get("output_config").is_none());
+        // A gateway's own model name gets nothing it may not know.
+        assert!(body("my-gateway-model").get("thinking").is_none());
+    }
+
+    #[test]
+    fn a_chat_the_app_edited_on_purpose_keeps_going() {
+        let body = anthropic_request("claude-opus-5-5", "high", true, "s", &[], &[]);
+        assert_eq!(body["thinking"]["block_binding"]["prefix_mismatch_behavior"], "drop_block");
+        assert_eq!(anthropic_betas(&body), ["server-side-fallback-2026-07-01", "thinking-binding-controls-2026-08-01"]);
+        assert!(anthropic_betas(&anthropic_request("my-gateway-model", "", false, "s", &[], &[])).is_empty());
+    }
+
+    /// `events` as a server would send them, with a ping and the `event:` lines a reader skips.
+    fn sse(events: &[Value]) -> String {
+        let mut out = String::from("event: ping\ndata: {\"type\": \"ping\"}\n\n");
+        for e in events {
+            out.push_str(&format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()));
+        }
+        out
+    }
+
+    fn start(index: usize, block: Value) -> Value {
+        json!({ "type": "content_block_start", "index": index, "content_block": block })
+    }
+    fn delta(index: usize, delta: Value) -> Value {
+        json!({ "type": "content_block_delta", "index": index, "delta": delta })
+    }
+    fn stop(index: usize) -> Value {
+        json!({ "type": "content_block_stop", "index": index })
+    }
+
+    /// A thinking block, some words and a tool call, ending normally.
+    fn full_reply() -> Vec<Value> {
+        vec![
+            json!({ "type": "message_start", "message": { "id": "m1", "role": "assistant", "content": [], "stop_reason": null, "usage": { "input_tokens": 100, "cache_read_input_tokens": 40, "output_tokens": 1 } } }),
+            start(0, json!({ "type": "thinking", "thinking": "", "signature": "" })),
+            delta(0, json!({ "type": "thinking_delta", "thinking": "First, " })),
+            delta(0, json!({ "type": "thinking_delta", "thinking": "the loop." })),
+            delta(0, json!({ "type": "signature_delta", "signature": "sig" })),
+            stop(0),
+            start(1, json!({ "type": "thinking", "thinking": "", "signature": "" })),
+            delta(1, json!({ "type": "thinking_delta", "thinking": "Then the gap." })),
+            delta(1, json!({ "type": "signature_delta", "signature": "sig2" })),
+            stop(1),
+            start(2, json!({ "type": "text", "text": "" })),
+            delta(2, json!({ "type": "text_delta", "text": "Set" })),
+            delta(2, json!({ "type": "text_delta", "text": "ting it." })),
+            stop(2),
+            start(3, json!({ "type": "tool_use", "id": "t1", "name": "antenna_set", "input": {} })),
+            delta(3, json!({ "type": "input_json_delta", "partial_json": "{\"a\": " })),
+            delta(3, json!({ "type": "input_json_delta", "partial_json": "1}" })),
+            stop(3),
+            start(4, json!({ "type": "tool_use", "id": "t2", "name": "get_scene", "input": {} })),
+            delta(4, json!({ "type": "input_json_delta", "partial_json": "" })),
+            stop(4),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 57 } }),
+            json!({ "type": "message_stop" }),
+        ]
+    }
+
+    fn collect(stream: &str) -> (Result<Value, StreamFail>, Vec<String>) {
+        let mut said = Vec::new();
+        let result = read_stream(stream.as_bytes(), &mut |live| {
+            if let Live::Thinking(t) = live {
+                said.push(t);
+            }
+            true
+        });
+        (result, said)
+    }
+
+    #[test]
+    fn a_stream_comes_back_as_the_reply_it_stands_for() {
+        let (reply, said) = collect(&sse(&full_reply()));
+        let msg = parse_anthropic(&reply.unwrap()).unwrap();
+        assert_eq!(said, ["First, ", "the loop.", "\n\nThen the gap."]);
+        assert_eq!(msg.text(), "Setting it.");
+        assert_eq!(msg.tool_uses(), [("t1".to_string(), "antenna_set".to_string(), json!({ "a": 1 })), ("t2".to_string(), "get_scene".to_string(), json!({}))]);
+        assert_eq!(msg.usage, Some(Usage { input: 140, cached: 40, output: 57 }));
+        assert_eq!(msg.thinking(), "First, the loop.\n\nThen the gap.");
+        // What goes back is what came: a signature is only good on the block it was written for.
+        let body = anthropic_request("claude-opus-5-5", "", false, "s", &[msg], &[]);
+        let sent = &body["messages"][0]["content"];
+        assert_eq!(sent[0], json!({ "type": "thinking", "thinking": "First, the loop.", "signature": "sig" }));
+        assert_eq!(sent[1]["signature"], "sig2");
+        assert_eq!(sent[3]["input"], json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn thinking_the_model_keeps_to_itself_shows_nothing() {
+        let events = [
+            json!({ "type": "message_start", "message": { "content": [], "usage": { "input_tokens": 1 } } }),
+            start(0, json!({ "type": "thinking", "thinking": "", "signature": "" })),
+            delta(0, json!({ "type": "signature_delta", "signature": "sig" })),
+            stop(0),
+            json!({ "type": "message_stop" }),
+        ];
+        let (reply, said) = collect(&sse(&events));
+        let msg = parse_anthropic(&reply.unwrap()).unwrap();
+        assert!(said.is_empty());
+        assert_eq!(msg.thinking(), "");
+        assert_eq!(msg.raw.unwrap().1[0]["signature"], "sig", "it still goes back");
+    }
+
+    #[test]
+    fn a_model_taking_over_part_way_doesnt_run_the_first_ones_calls() {
+        let reply = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                { "type": "thinking", "thinking": "partial", "signature": "a" },
+                { "type": "text", "text": "So far " },
+                { "type": "tool_use", "id": "lost", "name": "place_objects", "input": {} },
+                { "type": "fallback", "from": { "model": "x" }, "to": { "model": "y" } },
+                { "type": "thinking", "thinking": "theirs", "signature": "b" },
+                { "type": "text", "text": "and on." },
+            ]
+        });
+        let msg = parse_anthropic(&reply).unwrap();
+        assert!(msg.tool_uses().is_empty());
+        assert_eq!(msg.text(), "So far \nand on.");
+        assert_eq!(msg.thinking(), "theirs");
+        let kinds: Vec<_> = msg.raw.unwrap().1.as_array().unwrap().iter().map(|b| b["type"].as_str().unwrap().to_string()).collect();
+        assert_eq!(kinds, ["text", "fallback", "thinking", "text"]);
+    }
+
+    #[test]
+    fn stream_failures_are_told_apart() {
+        let begun = json!({ "type": "message_start", "message": { "content": [] } });
+        let error = |kind: &str| json!({ "type": "error", "error": { "type": kind, "message": "it failed" } });
+        assert_eq!(collect(&sse(&[begun.clone(), error("overloaded_error")])).0, Err(StreamFail::Transient("it failed".into())));
+        assert_eq!(collect(&sse(&[begun.clone(), error("invalid_request_error")])).0, Err(StreamFail::Fatal("it failed".into())));
+        assert!(matches!(collect(&sse(std::slice::from_ref(&begun))).0, Err(StreamFail::Transient(_))), "a stream that just ends isn't a reply");
+        assert!(matches!(collect("data: {not json\n\n").0, Err(StreamFail::Transient(_))));
+
+        let mut asked = 0;
+        let result = read_stream(sse(&full_reply()).as_bytes(), &mut |_| {
+            asked += 1;
+            false
+        });
+        assert_eq!(result, Err(StreamFail::Abandoned));
+        assert_eq!(asked, 1, "it stops at the first report nobody wants");
+    }
+
+    /// Serves one prepared answer per connection, and returns what it was sent.
+    fn serve(answers: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for answer in answers {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(socket.try_clone().unwrap());
+                let (mut head, mut length) = (String::new(), 0);
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap();
+                    }
+                    head.push_str(&line);
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                requests.push(format!("{head}\n{}", String::from_utf8_lossy(&body)));
+                socket.write_all(answer.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, server)
+    }
+
+    fn http(status: &str, content_type: &str, extra: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn a_call_over_http_reports_its_thinking_and_survives_a_failure_part_way() {
+        let fails_part_way = sse(&[json!({ "type": "message_start", "message": { "content": [] } }), start(0, json!({ "type": "thinking", "thinking": "", "signature": "" })), delta(0, json!({ "type": "thinking_delta", "thinking": "lost" })), json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } })]);
+        let (url, server) = serve(vec![
+            http("200 OK", "text/event-stream", "", &fails_part_way),
+            http("529 Overloaded", "application/json", "retry-after: 0\r\n", "{\"error\": {\"message\": \"Overloaded\"}}"),
+            http("200 OK", "text/event-stream; charset=utf-8", "", &sse(&full_reply())),
+        ]);
+        let provider = Anthropic { base_url: url, key: "the key".into(), model: "claude-opus-5-5".into(), effort: "high".into(), fallbacks: true };
+        let mut log = Vec::new();
+        let msg = provider
+            .complete_live("sys", &[Message::user(vec![Block::Text("hi".into())])], &[], &mut |live| {
+                log.push(match live {
+                    Live::Thinking(t) => t,
+                    Live::Restart => "<restart>".to_string(),
+                });
+                true
+            })
+            .unwrap();
+        assert_eq!(log, ["lost", "<restart>", "<restart>", "First, ", "the loop.", "\n\nThen the gap."]);
+        assert_eq!(msg.text(), "Setting it.");
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        let sent = requests[2].to_lowercase();
+        assert!(sent.contains("anthropic-beta: server-side-fallback-2026-07-01,thinking-binding-controls-2026-08-01"), "{sent}");
+        assert!(sent.contains("\"stream\":true"), "{sent}");
+    }
+
+    #[test]
+    fn a_whole_reply_where_a_stream_was_asked_for_is_fine_and_an_error_says_why() {
+        let whole = json!({ "stop_reason": "end_turn", "content": [{ "type": "text", "text": "whole" }] }).to_string();
+        let (url, server) = serve(vec![http("200 OK", "application/json", "", &whole), http("400 Bad Request", "application/json", "", "{\"error\": {\"message\": \"no such model\"}}")]);
+        let provider = Anthropic { base_url: url, key: "k".into(), model: "gateway".into(), effort: String::new(), fallbacks: false };
+        assert_eq!(provider.complete("s", &[], &[]).unwrap().text(), "whole");
+        let error = provider.complete("s", &[], &[]).unwrap_err().to_string();
+        assert!(error.contains("HTTP 400") && error.contains("no such model"), "{error}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn other_providers_reasoning_is_shown_when_they_send_it() {
+        let reply = |msg: Value| parse_openai(ProviderKind::DeepSeek, &json!({ "choices": [{ "message": msg }] })).unwrap();
+        assert_eq!(reply(json!({ "content": "ok", "reasoning_content": "because" })).thinking(), "because");
+        assert_eq!(reply(json!({ "content": "ok", "reasoning": "because", "reasoning_content": "because" })).thinking(), "because");
+        // Muse redacts to an empty field.
+        assert_eq!(reply(json!({ "content": "ok", "reasoning_content": "" })).thinking(), "");
+        assert_eq!(reply(json!({ "content": "ok" })).thinking(), "");
     }
 
     #[test]

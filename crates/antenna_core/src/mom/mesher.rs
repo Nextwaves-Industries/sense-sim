@@ -35,11 +35,34 @@ const LATTICE: f64 = 0.98;
 /// A `Tris` shape up to this size is treated as flat faces, so it can be imprinted
 /// and join sheets along partial edges. Bigger ones are soup.
 const FLAT_TRIS: usize = 64;
+/// And on no more planes than this.
+const FLAT_PLANES: usize = 12;
 /// Interior triangles sharper than this (degrees) get refined.
 const MIN_ANGLE: f64 = 22.0;
 /// The most points one plane's triangulation may reach, outside the metal included. Three unknowns
 /// come to about one point, so `MAX_UNKNOWNS` is far below this.
 const MAX_VERTICES: usize = 400_000;
+
+/// Whether triangles go as one surface remade to the mesh's size rather than as flat faces imprinted
+/// plane by plane. A few flat faces can be imprinted. Many planes means a curved surface, however few
+/// triangles it has, and those are better remade as one piece.
+pub fn goes_as_soup(tris: &[[P3; 3]], tol: f64) -> bool {
+    if tris.len() > FLAT_TRIS {
+        return true;
+    }
+    let mut planes: Vec<(P3, f64)> = Vec::new();
+    for t in tris {
+        let n = cross(sub(t[1], t[0]), sub(t[2], t[0]));
+        if norm(n) > 0.0 {
+            let n = unit(n);
+            let d = dot(n, t[0]);
+            if !planes.iter().any(|(m, e)| dot(*m, n) > 1.0 - 1e-9 && (e - d).abs() <= tol) {
+                planes.push((n, d));
+            }
+        }
+    }
+    planes.len() > FLAT_PLANES
+}
 
 /// The finished mesh.
 #[derive(Clone, Debug, Default)]
@@ -103,7 +126,10 @@ pub fn mesh_geometry(geom: &Geometry, h: f64, lambda: f64) -> Result<SurfaceMesh
             }
         }
     }
-    let mut m = Mesher { tol, h, lambda, weld: Welder::new(tol), planes: Vec::new(), faces: Vec::new(), soup: Vec::new(), feeds: Vec::new(), extra: Vec::new() };
+    let pins: Vec<P3> = geom.ports.iter().flat_map(|p| [p.a, p.b]).collect();
+    // Fine enough at a feed to see its gap, without going far past what the mesh is otherwise.
+    let pin_size = geom.ports.iter().map(|p| norm(sub(p.b, p.a)).max(p.width) * 1.5).fold(h * 0.3, f64::min).max(h * 0.05);
+    let mut m = Mesher { tol, h, lambda, weld: Welder::new(tol), planes: Vec::new(), faces: Vec::new(), soup: Vec::new(), feeds: Vec::new(), extra: Vec::new(), pins, pin_size };
     for (i, s) in geom.solids.iter().enumerate() {
         m.add_solid(i, s)?;
     }
@@ -201,6 +227,9 @@ struct Mesher {
     feeds: Vec<[P3; 2]>,
     /// Attachment lines of strips built as soup: plates must imprint them.
     extra: Vec<[P3; 2]>,
+    /// Where feeds land, which a remade surface keeps as vertices, and how fine it goes there.
+    pins: Vec<P3>,
+    pin_size: f64,
 }
 
 impl Mesher {
@@ -387,7 +416,7 @@ impl Mesher {
     }
 
     fn add_tris(&mut self, tris: &[[P3; 3]], solid: Option<usize>, name: &str) -> Result<()> {
-        if tris.len() <= FLAT_TRIS {
+        if !goes_as_soup(tris, self.tol) {
             for t in tris {
                 let n = cross(sub(t[1], t[0]), sub(t[2], t[0]));
                 if norm(n) <= self.tol * self.tol {
@@ -398,7 +427,15 @@ impl Mesher {
             }
             return Ok(());
         }
-        let mut ids: Vec<[u32; 3]> = tris.iter().map(|t| t.map(|p| self.weld.id(p))).filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]).collect();
+        // Remade to the mesh's size first: a surface as it was modelled or imported has slivers and
+        // tiny facets, and in the method of moments a sliver is a wrong answer.
+        let mut raw = crate::modeler::mesh::Mesh::default();
+        for t in tris {
+            raw.push_tri(t[0], t[1], t[2], 0);
+        }
+        let options = crate::modeler::remesh::Options { target: 0.75 * self.h, pins: self.pins.clone(), pin_size: self.pin_size, passes: 6 };
+        let remade = crate::modeler::remesh::remesh(&raw.welded(self.tol), &options);
+        let mut ids: Vec<[u32; 3]> = remade.tris.iter().map(|t| t.map(|v| self.weld.id(remade.verts[v as usize]))).filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]).collect();
         self.refine_soup(&mut ids);
         self.soup.extend(ids.into_iter().map(|t| (t, solid)));
         Ok(())

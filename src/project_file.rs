@@ -32,6 +32,50 @@ pub fn save_path(path: &Path) -> PathBuf {
     if is_project_path(path) { path.to_path_buf() } else { path.with_extension(EXTENSION) }
 }
 
+/// Where an antenna project sits in what a file holds. A scene's file has `objects` and the rest
+/// instead: a file is one or the other, as a tab and the Antenna workspace each show one.
+const ANTENNA_KEY: &str = "antenna_project";
+/// What antenna projects were saved as before they became `.sesim` files.
+const OLD_ANTENNA_NAME: &str = ".antenna.json";
+
+pub fn antenna_doc(project: Value) -> Value {
+    serde_json::json!({ ANTENNA_KEY: project })
+}
+
+/// The antenna project in what a file holds: in a `.sesim`, or all of an older `.antenna.json`.
+pub fn antenna_in(mut doc: Value) -> Value {
+    match doc.get_mut(ANTENNA_KEY) {
+        Some(project) => project.take(),
+        None => doc,
+    }
+}
+
+pub fn is_antenna_doc(doc: &Value) -> bool {
+    doc.get(ANTENNA_KEY).is_some()
+}
+
+fn is_old_antenna_name(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(OLD_ANTENNA_NAME))
+}
+
+/// Whether a file opens in Antenna rather than as a scene. A `.sesim` has to be looked into, since
+/// both kinds have that name.
+pub fn holds_antenna(path: &Path) -> bool {
+    is_old_antenna_name(path) || (is_project_path(path) && read(path).is_ok_and(|doc| is_antenna_doc(&doc)))
+}
+
+/// Where saving an antenna project goes. An older `x.antenna.json` becomes `x.sesim` beside it and
+/// stays as it was, or `x.antenna.sesim` if that name is already another project's.
+pub fn antenna_save_path(path: &Path) -> PathBuf {
+    if is_project_path(path) {
+        return path.to_path_buf();
+    }
+    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let stem = if is_old_antenna_name(path) { name.get(..name.len() - OLD_ANTENNA_NAME.len()).unwrap_or(&name) } else { path.file_stem().and_then(|s| s.to_str()).unwrap_or(&name) };
+    let plain = path.with_file_name(format!("{stem}.{EXTENSION}"));
+    if plain.exists() { path.with_file_name(format!("{stem}.antenna.{EXTENSION}")) } else { plain }
+}
+
 /// Reads a project, or a layout from an earlier version.
 pub fn read(path: &Path) -> Result<Value> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -157,6 +201,36 @@ mod tests {
         assert_eq!(save_path(Path::new(r"C:\w\site.sesim")), PathBuf::from(r"C:\w\site.sesim"));
         assert_eq!(save_path(Path::new(r"C:\w\SITE.SESIM")), PathBuf::from(r"C:\w\SITE.SESIM"));
         assert!(is_project_path(Path::new("a.SeSim")) && !is_project_path(Path::new("a.json")));
+    }
+
+    #[test]
+    fn an_antenna_project_is_told_from_a_scene_by_what_it_holds() {
+        let d = folder("antenna-kind");
+        let antenna = d.join("dipole.sesim");
+        write(&antenna, &antenna_doc(json!({ "name": "Dipole" }))).unwrap();
+        assert!(holds_antenna(&antenna));
+        assert_eq!(antenna_in(read(&antenna).unwrap()), json!({ "name": "Dipole" }));
+        let scene = d.join("warehouse.sesim");
+        write(&scene, &doc()).unwrap();
+        assert!(!holds_antenna(&scene));
+        assert!(!holds_antenna(&d.join("missing.sesim")), "nothing there to look into");
+        assert!(holds_antenna(&d.join("Old.Antenna.JSON")), "an older one goes by its name");
+        assert!(!holds_antenna(&d.join("antenna.json")));
+        // An older file is the project, with nothing around it.
+        assert_eq!(antenna_in(json!({ "name": "Old" })), json!({ "name": "Old" }));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_older_antenna_file_saves_beside_itself_and_never_over_another_project() {
+        let d = folder("antenna-save");
+        let old = d.join("Dipole.antenna.json");
+        assert_eq!(antenna_save_path(&old), d.join("Dipole.sesim"));
+        assert_eq!(antenna_save_path(&d.join("loose.json")), d.join("loose.sesim"));
+        std::fs::write(d.join("Dipole.sesim"), b"a scene of that name").unwrap();
+        assert_eq!(antenna_save_path(&old), d.join("Dipole.antenna.sesim"));
+        assert_eq!(antenna_save_path(&d.join("Dipole.sesim")), d.join("Dipole.sesim"), "its own file is just saved");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The scene writes first, then positioning, plant and the rest each add their part.

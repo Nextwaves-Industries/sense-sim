@@ -415,6 +415,20 @@ pub fn stroke(path: &[P2], w: f64, closed: bool) -> Vec<Vec<P2>> {
     vec![left]
 }
 
+/// A strip along a path as one outline. A path that comes back to where it started is a ring: stroked
+/// as an open path, its two ends cross, leaving an outline that cuts itself with a corner missing, and
+/// when that corner was at the feed a real drawing came back with a negative resistance.
+pub fn strip_outline(path: &[P2], w: f64) -> Option<Vec<P2>> {
+    let closes = path.len() > 3 && dist(path[0], path[path.len() - 1]) <= w * 1e-6;
+    if closes {
+        if let [a, b] = stroke(path, w, true).as_slice() {
+            let (outer, hole) = if signed_area(a).abs() > signed_area(b).abs() { (a, b) } else { (b, a) };
+            return Some(cut_hole(outer, hole));
+        }
+    }
+    stroke(path, w, false).into_iter().next()
+}
+
 /// A round end: a half circle at `c` facing along `along`, without its two ends.
 fn round_cap(c: P2, along: P2, r: f64, out: &mut Vec<P2>) {
     let a0 = along[1].atan2(along[0]) - PI / 2.0;

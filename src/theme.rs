@@ -135,6 +135,7 @@ pub mod icon {
     pub const DROP: &str = "\u{e210}";
     pub const GEAR: &str = "\u{e270}";
     pub const PLUG: &str = "\u{e946}";
+    pub const RULER: &str = "\u{e6b8}";
     pub const HOUSE: &str = "\u{e2c2}";
     pub const QUESTION: &str = "\u{e3e8}";
     pub const EYE: &str = "\u{e220}";
@@ -911,36 +912,121 @@ pub fn ribbon_tab(ui: &mut Ui, text: &str, selected: bool) -> Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A workbench in the ribbon's tab row: blue while it is the one in front, and
-/// underlined while its tools show. `dot` flags something going on inside it.
-pub fn workbench_tab(ui: &mut Ui, glyph: &str, text: &str, current: bool, showing: bool, dot: Option<Color32>) -> Response {
-    let font = if current { bold(13.0) } else { FontId::proportional(13.0) };
-    let color = if current { ACCENT } else { TEXT };
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
-    let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 44.0, ui.available_height()), Sense::click());
+/// A group of ribbon tools with its caption under them.
+pub fn ribbon_group(ui: &mut Ui, caption: &str, add: impl FnOnce(&mut Ui)) {
+    let font = FontId::proportional(11.5);
+    let caption_w = ui.painter().layout_no_wrap(caption.to_string(), font.clone(), WEAK).size().x;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+        let tools = ui.horizontal(|ui| {
+            ui.set_min_width(caption_w + 8.0);
+            add(ui);
+        });
+        let (rect, _) = ui.allocate_exact_size(vec2(tools.response.rect.width(), 15.0), Sense::hover());
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, caption, font, WEAK);
+    });
+}
+
+/// The line between two groups of ribbon tools.
+pub fn ribbon_divider(ui: &mut Ui) {
+    ui.add_space(5.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(1.0, 58.0), Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, STROKE);
+    ui.add_space(5.0);
+}
+
+/// `color` faded towards the white of a card. Opaque, so it reads the same on any fill.
+fn tint(color: Color32, amount: f32) -> Color32 {
+    let mix = |c: u8| (255.0 + (c as f32 - 255.0) * amount) as u8;
+    Color32::from_rgb(mix(color.r()), mix(color.g()), mix(color.b()))
+}
+
+/// The tile at the left end of the ribbon: the workspace in front, and the way to
+/// change it. `dot` flags something going on behind another workspace.
+pub fn workspace_tile(ui: &mut Ui, glyph: &str, name: &str, color: Color32, open: bool, dot: Option<Color32>, height: f32) -> Response {
+    let (rect, r) = ui.allocate_exact_size(vec2(88.0, height), Sense::click());
     let p = ui.painter();
-    if current && !showing {
-        p.rect_filled(rect.shrink2(vec2(0.0, 2.0)), 4.0, ACCENT_SOFT);
-    } else if !current && r.hovered() {
-        p.rect_filled(rect.shrink2(vec2(0.0, 2.0)), 4.0, HOVER);
-    }
-    p.text(rect.left_center() + vec2(19.0, 0.0), Align2::CENTER_CENTER, glyph, FontId::proportional(15.0), if current { ACCENT } else { WEAK });
-    let y = rect.center().y - galley.size().y / 2.0;
-    p.galley(pos2(rect.left() + 31.0, y), galley, color);
+    let fill = if open {
+        ACCENT_SOFT
+    } else if r.hovered() {
+        HOVER
+    } else {
+        RAISED
+    };
+    p.rect(rect, 6.0, fill, Stroke::new(1.0, STROKE), StrokeKind::Inside);
+    p.rect_filled(Rect::from_min_size(rect.min + vec2(6.0, 0.0), vec2(rect.width() - 12.0, 3.0)), 1.5, color);
+    p.text(rect.center_top() + vec2(0.0, 25.0), Align2::CENTER_CENTER, glyph, FontId::proportional(28.0), color);
+    p.text(rect.center_top() + vec2(0.0, 52.0), Align2::CENTER_CENTER, name, bold(13.5), TEXT);
+    p.text(rect.center_bottom() - vec2(0.0, 12.0), Align2::CENTER_CENTER, format!("Workspace {}", icon::CARET_DOWN), FontId::proportional(11.5), WEAK);
     if let Some(c) = dot {
-        p.circle_filled(rect.left_center() + vec2(26.0, -6.0), 3.5, c);
-    }
-    if showing {
-        p.hline(rect.shrink2(vec2(6.0, 0.0)).x_range(), rect.bottom() - 1.0, Stroke::new(2.0, ACCENT));
+        let at = rect.right_top() + vec2(-11.0, 12.0);
+        p.circle_filled(at, 5.0, PANEL);
+        p.circle_filled(at, 3.5, c);
     }
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Grey capital label in front of a group of ribbon buttons.
-pub fn ribbon_caption(ui: &mut Ui, text: &str) {
-    ui.add_space(4.0);
-    ui.label(RichText::new(text.to_uppercase()).size(11.5).color(WEAK));
-    ui.add_space(2.0);
+/// One workspace in the "Change workspace" list.
+pub struct WorkspaceRow<'a> {
+    pub glyph: &'a str,
+    pub name: &'a str,
+    pub color: Color32,
+    pub about: &'a str,
+    /// Its ribbon tabs, as one line.
+    pub tabs: &'a str,
+    pub chip: &'a str,
+    pub chip_color: Color32,
+    /// What goes on in it now, as a second chip.
+    pub note: Option<(&'a str, Color32)>,
+    pub current: bool,
+}
+
+/// A small rounded label. Returns its right edge.
+fn chip(p: &egui::Painter, left: f32, y: f32, text: &str, fill: Color32, ink: Color32) -> f32 {
+    let g = p.layout_no_wrap(text.to_string(), FontId::proportional(12.0), ink);
+    let rect = Rect::from_min_size(pos2(left, y - 10.0), vec2(g.size().x + 16.0, 20.0));
+    p.rect_filled(rect, 10.0, fill);
+    p.galley(pos2(rect.left() + 8.0, y - g.size().y / 2.0), g, ink);
+    rect.right()
+}
+
+/// One line of text cut to `width`, with an ellipsis if it doesn't fit.
+fn one_line(p: &egui::Painter, at: Pos2, text: &str, font: FontId, color: Color32, width: f32) {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = p.layout_job(job);
+    p.galley(at, galley, color);
+}
+
+/// A workspace's row: colour bar, icon, name and status, what it is for, its ribbon tabs.
+pub fn workspace_row(ui: &mut Ui, width: f32, row: &WorkspaceRow) -> Response {
+    let (rect, r) = ui.allocate_exact_size(vec2(width, 80.0), Sense::click());
+    let body = rect.shrink2(vec2(8.0, 2.0));
+    let p = ui.painter();
+    if row.current {
+        p.rect_filled(body, 6.0, ACCENT_SOFT);
+    } else if r.hovered() {
+        p.rect_filled(body, 6.0, HOVER);
+    }
+    p.rect_filled(Rect::from_min_size(body.min + vec2(3.0, 5.0), vec2(4.0, body.height() - 10.0)), 2.0, row.color);
+    let plate = Rect::from_center_size(pos2(body.left() + 37.0, body.center().y), vec2(44.0, 44.0));
+    p.rect_filled(plate, 8.0, tint(row.color, 0.13));
+    p.text(plate.center(), Align2::CENTER_CENTER, row.glyph, FontId::proportional(25.0), row.color);
+
+    let x = body.left() + 72.0;
+    let room = body.right() - x - 10.0;
+    let name = p.layout_no_wrap(row.name.to_string(), bold(15.0), TEXT);
+    let name_w = name.size().x;
+    p.galley(pos2(x, body.top() + 6.0), name, TEXT);
+    let chip_y = body.top() + 15.0;
+    let (fill, ink) = if row.current { (ACCENT, ON_ACCENT) } else { (tint(row.chip_color, 0.13), ink(row.chip_color)) };
+    let end = chip(p, x + name_w + 10.0, chip_y, row.chip, fill, ink);
+    if let Some((text, color)) = row.note {
+        chip(p, end + 6.0, chip_y, text, tint(color, 0.14), self::ink(color));
+    }
+    one_line(p, pos2(x, body.top() + 27.0), row.about, FontId::proportional(13.5), TEXT, room);
+    one_line(p, pos2(x, body.top() + 48.0), row.tabs, FontId::proportional(12.5), WEAK, room);
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +1053,22 @@ pub fn gradient_outline(p: &egui::Painter, rect: Rect, radius: f32, a: Color32, 
         let clip = Rect::from_min_max(pos2(egui::lerp(rect.left()..=rect.right(), t0), rect.top()), pos2(egui::lerp(rect.left()..=rect.right(), t1), rect.bottom())).expand2(vec2(0.0, 1.0));
         p.with_clip_rect(clip).rect_stroke(rect, radius, Stroke::new(1.0, lerp_color(a, b, (t0 + t1) / 2.0)), StrokeKind::Inside);
     }
+}
+
+/// The little `=` grip above a card that resizes it up and down. `sign` is +1 when dragging down
+/// makes it taller, -1 when dragging up does.
+pub fn height_grip(ctx: &egui::Context, id: &str, center: Pos2, height: &mut f32, range: std::ops::RangeInclusive<f32>, sign: f32) {
+    egui::Area::new(egui::Id::new(("height_grip", id))).order(egui::Order::Middle).pivot(Align2::CENTER_CENTER).fixed_pos(center).show(ctx, |ui| {
+        let (rect, r) = ui.allocate_exact_size(vec2(34.0, 8.0), Sense::drag());
+        let col = if r.hovered() || r.dragged() { WEAK } else { Color32::from_rgb(196, 200, 206) };
+        for dy in [-1.5, 1.5] {
+            ui.painter().hline((rect.center().x - 7.0)..=(rect.center().x + 7.0), rect.center().y + dy, Stroke::new(1.0, col));
+        }
+        if r.dragged() {
+            *height = (*height + sign * r.drag_delta().y).clamp(*range.start(), *range.end());
+        }
+        r.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    });
 }
 
 /// The little `‖` grip beside a card that resizes it sideways. `sign` is +1

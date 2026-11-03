@@ -330,7 +330,7 @@ fn devices_page(ui: &mut egui::Ui, inventory: &TwinInventory, selection: &TwinSe
 
 fn no_devices(ui: &mut egui::Ui, status: &LinkStatus, slot: &mut LeftPanelSlot) {
     let (title, body) = match status {
-        LinkStatus::NoService | LinkStatus::Starting => ("No devices yet", "The Sense Twin service isn't running on this PC, so there's nothing to show. You can try this workbench with invented devices."),
+        LinkStatus::NoService | LinkStatus::Starting => ("No devices yet", "The Sense Twin service isn't running on this PC, so there's nothing to show. You can try this workspace with invented devices."),
         LinkStatus::Connected => ("No devices yet", "The service is running but hasn't found anything. Network scanning arrives in a later version."),
         LinkStatus::Lost(_) => ("Connection lost", "The service stopped answering."),
         LinkStatus::Demo => ("Building the demo", "One moment."),
@@ -415,7 +415,7 @@ fn connection_page(ui: &mut egui::Ui, inventory: &TwinInventory, slot: &mut Left
             theme::hairline(ui);
 
             ui.label(RichText::new("Demo factory").strong());
-            ui.add(egui::Label::new(RichText::new("Try the workbench with invented devices. They change state by themselves.").small().color(theme::WEAK)).wrap());
+            ui.add(egui::Label::new(RichText::new("Try the workspace with invented devices. They change state by themselves.").small().color(theme::WEAK)).wrap());
             ui.horizontal(|ui| {
                 for size in DEMO_SIZES {
                     if ui.button(format!("{size} devices")).clicked() {

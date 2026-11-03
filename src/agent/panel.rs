@@ -12,6 +12,11 @@ use crate::theme::{self, icon};
 
 const CANDIDATE: f32 = 84.0;
 
+/// Remembers, for the session, whether the plan card is open.
+const PLAN_OPEN: &str = "assistant_plan_open";
+/// The most of the room above the message box that an open plan's steps may take.
+const PLAN_SHARE: f32 = 0.4;
+
 const SUGGESTIONS: [&str; 3] = [
     "Place a row of 4 pallet racks 3 m apart",
     "Build a small loading dock with pallets and boxes",
@@ -61,7 +66,7 @@ pub fn show(root: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, library
                 .frame(egui::Frame::new().inner_margin(Margin { left: 0, right: 0, top: 8, bottom: 0 }))
                 .show_inside(ui, |ui| composer(ui, ctx, agent, bridge, &mut open_settings));
             if !agent.plan.is_empty() {
-                plan(ui, agent);
+                plan(ui, &agent.plan);
             }
             egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                 transcript(ui, ctx, agent, library);
@@ -70,38 +75,68 @@ pub fn show(root: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, library
     open_settings
 }
 
-fn plan(ui: &mut egui::Ui, agent: &Agent) {
-    let done = agent.plan.iter().filter(|(_, s)| s == "done").count();
-    let total = agent.plan.len();
-    theme::card_frame().show(ui, |ui| {
+/// The checklist, pinned above the chat. Closed it takes one line, the step in hand; open, the
+/// steps scroll inside a cap. However long the plan is, the chat keeps most of the panel.
+fn plan(ui: &mut egui::Ui, steps: &[(String, String)]) {
+    let count = |status: &str| steps.iter().filter(|(_, s)| s == status).count();
+    let (done, failed, total) = (count("done"), count("failed"), steps.len());
+    let in_hand = steps.iter().find(|(_, s)| s == "in_progress").or_else(|| steps.iter().find(|(_, s)| s != "done" && s != "failed"));
+    let id = egui::Id::new(PLAN_OPEN);
+    let open: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
+    // Measured before the card takes any of it: this is the room it shares with the chat.
+    let cap = (ui.available_height() * PLAN_SHARE).max(80.0);
+    group_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            theme::caption(ui, "Plan");
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let r = row(ui, |ui| {
+            ui.label(RichText::new(if open { icon::CARET_DOWN } else { icon::CARET_RIGHT }).small().color(theme::WEAK));
+            ui.label(RichText::new("Plan").small().color(theme::TEXT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(format!("{done} / {total}")).small().color(theme::WEAK));
+                if failed > 0 {
+                    ui.label(RichText::new(format!("{failed} failed")).small().color(theme::DANGER));
+                }
+                if let (false, Some((step, _))) = (open, in_hand) {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(egui::Label::new(RichText::new(format!("· {step}")).small().color(theme::WEAK)).truncate());
+                    });
+                }
             });
         });
-        // Thin progress bar under the caption.
+        if r.clicked() {
+            ui.data_mut(|d| d.insert_temp(id, !open));
+        }
+        // Thin progress bar under the header.
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 3.0), egui::Sense::hover());
         ui.painter().rect_filled(bar, 2.0, theme::BG);
         let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
         ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, vec2(bar.width() * frac, bar.height())), 2.0, theme::SUCCESS);
-        ui.add_space(2.0);
-        for (step, status) in &agent.plan {
-            let (ic, color) = match status.as_str() {
-                "done" => (icon::CHECK, theme::SUCCESS),
-                "in_progress" => (icon::CIRCLE_NOTCH, theme::WARNING),
-                "failed" => (icon::WARNING_CIRCLE, theme::DANGER),
-                _ => ("·", theme::WEAK),
-            };
-            ui.horizontal(|ui| {
-                // Fixed-width marker column so every step lines up.
-                ui.add_sized(vec2(16.0, 18.0), egui::Label::new(RichText::new(ic).color(color)));
-                ui.add(egui::Label::new(RichText::new(step).color(if status == "done" { theme::WEAK } else { theme::TEXT })).wrap());
-            });
+        if !open {
+            return;
         }
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().id_salt("assistant_plan_steps").auto_shrink([false, true]).max_height(cap).show(ui, |ui| {
+            for (step, status) in steps {
+                let (ic, color) = match status.as_str() {
+                    "done" => (icon::CHECK, theme::SUCCESS),
+                    "in_progress" => (icon::CIRCLE_NOTCH, theme::WARNING),
+                    "failed" => (icon::WARNING_CIRCLE, theme::DANGER),
+                    _ => ("·", theme::WEAK),
+                };
+                ui.horizontal(|ui| {
+                    // Fixed-width marker column so every step lines up.
+                    ui.add_sized(vec2(16.0, 16.0), egui::Label::new(RichText::new(ic).small().color(color)));
+                    ui.add(egui::Label::new(RichText::new(step).small().color(if status == "done" { theme::WEAK } else { theme::TEXT })).wrap());
+                });
+            }
+        });
     });
     ui.add_space(6.0);
+}
+
+/// The quiet bordered box around a plan or a run of tool calls.
+fn group_frame() -> egui::Frame {
+    egui::Frame::new().fill(theme::RAISED).stroke(egui::Stroke::new(1.0, theme::STROKE)).corner_radius(8).inner_margin(Margin::same(6))
 }
 
 fn transcript(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, library: &mut Library) {
@@ -124,10 +159,10 @@ fn transcript(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, library
             });
             ui.add_space(2.0);
         }
-        // Consecutive tool calls render as one compact group.
-        if matches!(transcript[i], ChatItem::Tool { .. }) {
+        // Consecutive tool calls, with the thinking between them, render as one compact group.
+        if matches!(transcript[i], ChatItem::Tool { .. } | ChatItem::Thinking(_)) {
             let start = i;
-            while i < transcript.len() && matches!(transcript[i], ChatItem::Tool { .. }) {
+            while i < transcript.len() && matches!(transcript[i], ChatItem::Tool { .. } | ChatItem::Thinking(_)) {
                 i += 1;
             }
             let last = i == transcript.len();
@@ -165,7 +200,7 @@ fn transcript(ui: &mut egui::Ui, ctx: &egui::Context, agent: &mut Agent, library
             ChatItem::Assistant(t) => {
                 super::markdown::show(ui, t);
             }
-            ChatItem::Tool { .. } => {}
+            ChatItem::Tool { .. } | ChatItem::Thinking(_) => {}
             ChatItem::Image(id) => {
                 if let Some(t) = texture(ctx, textures, id) {
                     ui.add(egui::Image::new(&t).max_width(width).max_height(240.0).corner_radius(8)).on_hover_text(id);
@@ -250,24 +285,55 @@ fn empty(ui: &mut egui::Ui, agent: &mut Agent) {
     }
 }
 
-/// A block of consecutive tool calls: a "Used N tools" header (open while the
-/// turn is running, collapsed afterwards) over compact one-line rows; each row
-/// expands to its raw input/output on click.
+/// The header of a group of tool calls and thinking. It names both, since it's all that shows of
+/// a closed group.
+fn group_header(tools: usize, thoughts: usize, live: bool) -> String {
+    let count = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+    match (tools, thoughts, live) {
+        (0, _, true) => "Thinking…".to_string(),
+        (0, _, false) => "Thought process".to_string(),
+        (t, 0, _) => format!("Used {}", count(t, "tool")),
+        (t, n, _) => format!("Used {} · {}", count(t, "tool"), count(n, "thought")),
+    }
+}
+
+/// The start of a thought, for its one-line row.
+fn thought_preview(text: &str) -> String {
+    let line = text.lines().map(|l| l.trim().trim_matches(['*', '#', ' '])).find(|l| !l.is_empty()).unwrap_or("");
+    clip(line, 80)
+}
+
+/// A thought in full. The one being written follows its end, in its own small window so it can't
+/// push the chat around.
+fn thought_text(ui: &mut egui::Ui, text: &str, key: usize, writing: bool) {
+    egui::Frame::new().fill(theme::BG).corner_radius(6).inner_margin(Margin::same(6)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::vertical().id_salt(("thought_text", key)).max_height(220.0).stick_to_bottom(writing).show(ui, |ui| {
+            ui.add(egui::Label::new(RichText::new(text.trim()).small().color(theme::WEAK)).wrap());
+        });
+    });
+}
+
+/// A block of consecutive tool calls and the thinking between them: a "Used N
+/// tools" header (open while the turn is running, collapsed afterwards) over
+/// compact one-line rows; each row expands on click, a tool's to its raw
+/// input/output and a thought's to all of it. The thought being written stays open.
 fn tool_group(ui: &mut egui::Ui, items: &[ChatItem], first: usize, live: bool) {
     let id = egui::Id::new(("tool_group", first));
     let user_open: Option<bool> = ui.data(|d| d.get_temp(id));
     let open = user_open.unwrap_or(live);
     let failed = items.iter().filter(|c| matches!(c, ChatItem::Tool { is_error: true, output, .. } if !output.is_empty())).count();
-    egui::Frame::new().fill(theme::RAISED).stroke(egui::Stroke::new(1.0, theme::STROKE)).corner_radius(8).inner_margin(Margin::same(6)).show(ui, |ui| {
+    group_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 2.0;
-        let header = format!("Used {} tool{}", items.len(), if items.len() == 1 { "" } else { "s" });
+        let tools = items.iter().filter(|c| matches!(c, ChatItem::Tool { .. })).count();
+        let header = group_header(tools, items.len() - tools, live);
         let r = row(ui, |ui| {
             ui.label(RichText::new(if open { icon::CARET_DOWN } else { icon::CARET_RIGHT }).small().color(theme::WEAK));
             if live {
                 ui.add(egui::Spinner::new().size(11.0).color(theme::ACCENT));
             } else {
-                ui.label(RichText::new(icon::WRENCH).small().color(theme::WEAK));
+                ui.label(RichText::new(if tools == 0 { icon::CHAT_CIRCLE_DOTS } else { icon::WRENCH }).small().color(theme::WEAK));
             }
             ui.label(RichText::new(header).small().color(theme::TEXT));
             if failed > 0 {
@@ -282,6 +348,31 @@ fn tool_group(ui: &mut egui::Ui, items: &[ChatItem], first: usize, live: bool) {
         }
         ui.add_space(2.0);
         for (k, item) in items.iter().enumerate() {
+            if let ChatItem::Thinking(text) = item {
+                let writing = live && k + 1 == items.len();
+                // The header already says what it is.
+                if tools == 0 {
+                    thought_text(ui, text, first + k, writing);
+                    continue;
+                }
+                let rid = egui::Id::new(("thought_row", first + k));
+                let expanded: bool = ui.data(|d| d.get_temp(rid)).unwrap_or(writing);
+                let r = row(ui, |ui| {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new(icon::CHAT_CIRCLE_DOTS).small().color(if writing { theme::ACCENT } else { theme::WEAK }));
+                    ui.label(RichText::new(if writing { "Thinking" } else { "Thought" }).small().color(theme::TEXT));
+                    if !expanded {
+                        ui.add(egui::Label::new(RichText::new(format!("· {}", thought_preview(text))).small().color(theme::WEAK)).truncate());
+                    }
+                });
+                if r.clicked() {
+                    ui.data_mut(|d| d.insert_temp(rid, !expanded));
+                }
+                if expanded {
+                    thought_text(ui, text, first + k, writing);
+                }
+                continue;
+            }
             let ChatItem::Tool { name, input, output, is_error } = item else { continue };
             let rid = egui::Id::new(("tool_row", first + k));
             let expanded: bool = ui.data(|d| d.get_temp(rid)).unwrap_or(false);
@@ -327,6 +418,8 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(4.0, 0.0))).layout(Layout::left_to_right(Align::Center)));
     child.spacing_mut().item_spacing.x = 6.0;
+    // A selectable label takes the click for itself, and the row wouldn't get it.
+    child.style_mut().interaction.selectable_labels = false;
     add(&mut child);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -761,7 +854,7 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
                 }
             }
         });
-        theme::setting_row(ui, "Share what's on screen", "Workbench, open card, selection and recent actions go with each message", |ui| {
+        theme::setting_row(ui, "Share what's on screen", "Workspace, open card, selection and recent actions go with each message", |ui| {
             changed |= theme::toggle_switch(ui, &mut cfg.share_screen).changed();
         });
         theme::setting_row(ui, "Approvals", "What the assistant may do without asking", |ui| {
@@ -884,5 +977,59 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
 
     if changed {
         let _ = agent.config.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The height the plan card takes in an 800 point tall window, with `n` long steps.
+    fn plan_height(n: usize, open: bool) -> f32 {
+        let steps: Vec<_> = (0..n).map(|i| (format!("Step {i}, long enough to wrap onto a second line in a narrow panel"), "pending".to_string())).collect();
+        let ctx = egui::Context::default();
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(PLAN_OPEN), open));
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 800.0))), ..Default::default() };
+        let mut height = 0.0;
+        let mut output = ctx.run_ui(input, |ui| {
+            let top = ui.cursor().top();
+            plan(ui, &steps);
+            height = ui.cursor().top() - top;
+        });
+        // Nothing draws this frame, and epaint panics if its texture updates are dropped unapplied.
+        output.textures_delta.clear();
+        height
+    }
+
+    #[test]
+    fn a_long_plan_leaves_the_chat_its_room() {
+        let closed = plan_height(30, false);
+        assert_eq!(closed, plan_height(1, false), "closed, the plan's height doesn't depend on its length");
+        assert!(closed < 60.0, "closed, the plan is one line, got {closed}");
+        let open = plan_height(30, true);
+        assert!(open <= 800.0 * PLAN_SHARE + 60.0, "open, the steps scroll inside the cap, got {open}");
+    }
+
+    #[test]
+    fn a_group_with_no_tool_calls_doesnt_claim_any() {
+        assert_eq!(group_header(0, 1, true), "Thinking…");
+        assert_eq!(group_header(0, 2, false), "Thought process");
+        assert_eq!(group_header(1, 0, true), "Used 1 tool");
+        assert_eq!(group_header(3, 0, false), "Used 3 tools");
+        assert_eq!(group_header(1, 1, false), "Used 1 tool · 1 thought");
+        assert_eq!(group_header(3, 2, false), "Used 3 tools · 2 thoughts");
+    }
+
+    #[test]
+    fn a_thoughts_row_starts_with_its_words() {
+        assert_eq!(thought_preview("\n\n**Checking the loop**\n\nThe loop is short."), "Checking the loop");
+        assert_eq!(thought_preview(""), "");
+        assert!(thought_preview(&"long ".repeat(100)).ends_with('…'));
+    }
+
+    #[test]
+    fn an_open_plan_takes_only_what_it_needs() {
+        let (one, three) = (plan_height(1, true), plan_height(3, true));
+        assert!(one < three, "the cap is a limit, not a fixed height: {one} and {three}");
     }
 }

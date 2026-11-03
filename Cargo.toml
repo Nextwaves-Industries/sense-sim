@@ -1,6 +1,6 @@
 [package]
 name = "sense_sim"
-version = "1.8.0"
+version = "1.12.0"
 edition = "2024"
 description = "Sense Sim - SimReady USD asset viewer and scene builder"
 
@@ -30,7 +30,7 @@ antenna-studio = []
 
 [dependencies]
 sim-core = { path = "crates/sim-core" }
-antenna_core = { path = "crates/antenna_core" }
+antenna_core = { path = "crates/antenna_core", features = ["gpu"] }
 ifc = { path = "crates/ifc" }
 proof = { path = "crates/proof" }
 # Read-only device data. Never add twin_control_proto here: see crates/twin_proto/tests/control_boundary.rs.

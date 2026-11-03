@@ -8,6 +8,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::cad::{self, CadFeed, P2, signed_area};
 use crate::geometry::{Geometry, P3, Shape, plane_point};
 use crate::expr::Vars;
+use crate::modeler::CombineOp;
+use crate::modeler::boolean::{Op, boolean};
+use crate::modeler::mesh::Mesh;
+use crate::modeler::prims::fill_region;
 use crate::project::{ExtraPort, ExtraPrim, ExtraSolid, Form, Param, Project, extra_solid, form_outline};
 use crate::{expr, material};
 use std::borrow::Cow;
@@ -38,7 +42,7 @@ pub fn strip(path: &[P2], w: f64) -> Result<Vec<P2>> {
     if !(w > 0.0) {
         bail!("A strip needs a width above zero.");
     }
-    cad::stroke(path, w, false).into_iter().next().ok_or_else(|| anyhow!("A strip needs two different points."))
+    cad::strip_outline(path, w).ok_or_else(|| anyhow!("A strip needs two different points."))
 }
 
 /// The first free `base 1`, `base 2`, …
@@ -200,6 +204,91 @@ fn near(a: P2, b: P2) -> bool {
     (a[0] - b[0]).abs() + (a[1] - b[1]).abs() < 1e-9
 }
 
+/// The expressions a flat part's plane and thickness are written in.
+fn plane_text(prim: &ExtraPrim) -> Option<(&String, Option<&String>)> {
+    match prim {
+        ExtraPrim::Outline { at, thick, .. } | ExtraPrim::Drawn { at, thick, .. } | ExtraPrim::Polygon { at, thick, .. } => Some((at, Some(thick))),
+        ExtraPrim::Plate { at, .. } | ExtraPrim::Strip { at, .. } | ExtraPrim::Disc { at, .. } | ExtraPrim::Arc { at, .. } | ExtraPrim::Meander { at, .. } => Some((at, None)),
+        _ => None,
+    }
+}
+
+/// Flat parts on one plane combined, in the order given: `Cut` keeps the first, less the others.
+/// They're replaced by what's left, the first part's name and material carried over, and one new
+/// part for each separate piece. The result's sizes are numbers: nothing says how a joined outline
+/// would follow a variable. Returns where the new parts are.
+pub fn combine_parts(p: &mut Project, parts: &[usize], op: CombineOp) -> Result<Vec<usize>> {
+    let mut chosen = parts.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    chosen.retain(|i| seen.insert(*i));
+    if chosen.len() < 2 {
+        bail!("Combining takes at least two shapes.");
+    }
+    let vars = p.vars()?;
+    let mut first: Option<(usize, f64, f64)> = None;
+    let mut sheets: Vec<Mesh> = Vec::with_capacity(chosen.len());
+    for (k, &i) in chosen.iter().enumerate() {
+        let e = p.extra.get(i).ok_or_else(|| anyhow!("That shape is gone."))?;
+        let Shape::Polygon { axis, at, pts, thick } = extra_solid(e, &vars)?.shape else {
+            bail!("{} isn't a flat shape, so it can't be combined here. In the 3D model, bodies can.", e.name);
+        };
+        let same = 1e-12;
+        match first {
+            Some((a, h, _)) if a != axis || (h - at).abs() > same => bail!("{} isn't on the same plane as {}.", e.name, p.extra[chosen[0]].name),
+            Some((_, _, t)) if op != CombineOp::Cut && op != CombineOp::Common && (t - thick).abs() > same => bail!("{} isn't as thick as {}, so one shape can't be made of them.", e.name, p.extra[chosen[0]].name),
+            _ => first = first.or(Some((axis, at, thick))),
+        }
+        let (q, tris) = fill_region(&[pts.as_slice()]);
+        let mut sheet = Mesh::default();
+        let lift = |c: usize| [q[c][0], q[c][1], 0.0];
+        for t in tris {
+            sheet.push_tri(lift(t[0]), lift(t[1]), lift(t[2]), k as u32 + 1);
+        }
+        sheets.push(sheet.welded(1e-12));
+    }
+    let Some((axis, _, _)) = first else { bail!("Combining takes at least two shapes.") };
+    let how = match op {
+        CombineOp::Add => Op::Union,
+        CombineOp::Cut => Op::Difference,
+        CombineOp::Common => Op::Intersection,
+        CombineOp::Exclude => Op::Exclusion,
+    };
+    let keeper = p.extra[chosen[0]].clone();
+    let mut mesh = sheets[0].clone();
+    for other in &sheets[1..] {
+        mesh = boolean(&mesh, other, how)?;
+    }
+    if mesh.is_empty() {
+        bail!("Nothing would be left of {}.", keeper.name);
+    }
+    let rings: Vec<Vec<P2>> = mesh.face_ids().into_iter().flat_map(|f| mesh.boundary_loops(f)).map(|l| l.iter().map(|v| [mesh.verts[*v as usize][0], mesh.verts[*v as usize][1]]).collect()).collect();
+    let size = |r: &[P2]| signed_area(r).abs();
+    // Halfway along an edge, as two loops can touch at a corner and that says nothing.
+    let probe = |r: &[P2]| [(r[0][0] + r[1][0]) / 2.0, (r[0][1] + r[1][1]) / 2.0];
+    let depth: Vec<usize> = (0..rings.len()).map(|i| (0..rings.len()).filter(|j| *j != i && size(&rings[*j]) > size(&rings[i]) && cad::point_inside(&rings[*j], probe(&rings[i]))).count()).collect();
+    let (at, thick) = plane_text(&keeper.prim).map_or((None, None), |(a, t)| (Some(a.clone()), t.cloned()));
+    let at = at.unwrap_or_else(|| mm(first.map_or(0.0, |f| f.1)));
+    let thick = thick.unwrap_or_else(|| "0".to_string());
+    let mut gone = chosen.clone();
+    gone.sort_unstable();
+    let place = gone[0];
+    for i in gone.iter().rev() {
+        p.extra.remove(*i);
+    }
+    let mut made = Vec::new();
+    for i in 0..rings.len() {
+        if depth[i] % 2 != 0 {
+            continue;
+        }
+        let holes = (0..rings.len()).filter(|j| depth[*j] == depth[i] + 1 && cad::point_inside(&rings[i], probe(&rings[*j]))).map(|j| rings[j].iter().map(|q| mm2(*q)).collect()).collect();
+        let name = if made.is_empty() { keeper.name.clone() } else { free_name(p, &keeper.name) };
+        let form = Form::Poly { pts: rings[i].iter().map(|q| mm2(*q)).collect() };
+        p.extra.insert(place + made.len(), ExtraSolid { name, material: keeper.material.clone(), prim: ExtraPrim::Drawn { axis, at: at.clone(), thick: thick.clone(), form, holes } });
+        made.push(place + made.len());
+    }
+    Ok(made)
+}
+
 /// The corners and other points of a part that can be grabbed on the canvas.
 pub fn handles(p: &Project, part: usize) -> Vec<P2> {
     let Ok(v) = p.vars() else { return Vec::new() };
@@ -251,6 +340,30 @@ pub fn is_tied(p: &Project, part: usize) -> bool {
         ExtraPrim::Drawn { form: Form::Rect { size, .. }, .. } => size.iter().any(|s| !is_free(s)),
         ExtraPrim::Drawn { form: Form::Circle { r, .. }, .. } | ExtraPrim::Disc { r, .. } => !is_free(r),
         _ => false,
+    }
+}
+
+/// What's typed for a coordinate: an expression over the variables, or a plain number, which on this
+/// page is in millimetres as it was when the field only took numbers. Comes back with its value and
+/// how to write it.
+pub fn typed_length(text: &str, vars: &Vars) -> Result<(f64, String)> {
+    let t = text.trim();
+    if t.is_empty() {
+        bail!("Type a number or an expression for this coordinate.");
+    }
+    let written = if t.parse::<f64>().is_ok() { format!("{t}mm") } else { t.to_string() };
+    Ok((expr::eval(&written, vars)?, written))
+}
+
+/// Puts back what was typed for a part's points, in place of the numbers it was stored with, so a point
+/// typed as `a1+2mm` follows `a1` from then on. A shape keeps only the points that are really its own:
+/// a rectangle is stored by its centre and size, so it has none of these.
+pub fn keep_typed(prim: &mut ExtraPrim, typed: &[(P2, [String; 2])], vars: &Vars) {
+    for q in points_of(prim) {
+        let Some(at) = point_at(q, vars) else { continue };
+        if let Some((_, written)) = typed.iter().find(|(p, _)| (p[0] - at[0]).abs() < 1e-9 && (p[1] - at[1]).abs() < 1e-9) {
+            *q = written.clone();
+        }
     }
 }
 
@@ -723,6 +836,88 @@ mod tests {
         }
     }
 
+    fn two_squares(second: (P2, P2)) -> Project {
+        let mut p = Project::from_template("custom", Some("1GHz")).unwrap();
+        add_rect(&mut p, "a", &sheet(2, "0"), [0.0, 0.0], [0.004, 0.004]).unwrap();
+        add_rect(&mut p, "b", &sheet(2, "0"), second.0, second.1).unwrap();
+        p
+    }
+
+    fn area_of(p: &Project) -> f64 {
+        let v = p.vars().unwrap();
+        flat_parts(p, &v).iter().map(|f| signed_area(&f.outline).abs()).sum()
+    }
+
+    #[test]
+    fn flat_shapes_combine_into_shapes_that_still_solve_and_save() {
+        let overlap = ([0.002, 0.002], [0.006, 0.006]);
+        let square = 16e-6;
+        let shared = 4e-6;
+        for (op, want, pieces) in [(CombineOp::Add, 2.0 * square - shared, 1), (CombineOp::Cut, square - shared, 1), (CombineOp::Common, shared, 1), (CombineOp::Exclude, 2.0 * square - 2.0 * shared, 2)] {
+            let mut p = two_squares(overlap);
+            let made = combine_parts(&mut p, &[0, 1], op).unwrap();
+            assert_eq!(made.len(), pieces, "{op:?}");
+            assert_eq!(p.extra.len(), pieces, "{op:?}: the originals are gone");
+            assert!((area_of(&p) - want).abs() < 1e-12, "{op:?}: {} against {want}", area_of(&p));
+            assert_eq!(p.extra[0].name, "a 1", "it keeps the first one's name");
+            assert_eq!(Project::from_json(&p.to_json().unwrap()).unwrap().extra, p.extra);
+        }
+    }
+
+    #[test]
+    fn the_first_shape_picked_is_the_one_kept_when_subtracting() {
+        let mut p = two_squares(([0.0, 0.0], [0.004, 0.002]));
+        combine_parts(&mut p, &[1, 0], CombineOp::Cut).unwrap_err();
+        let mut p = two_squares(([0.0, 0.0], [0.004, 0.002]));
+        combine_parts(&mut p, &[0, 1], CombineOp::Cut).unwrap();
+        assert!((area_of(&p) - 8e-6).abs() < 1e-12, "{}", area_of(&p));
+    }
+
+    #[test]
+    fn a_shape_with_another_inside_it_gets_a_real_hole() {
+        let mut p = two_squares(([0.001, 0.001], [0.002, 0.002]));
+        combine_parts(&mut p, &[0, 1], CombineOp::Cut).unwrap();
+        assert_eq!(p.extra.len(), 1);
+        let ExtraPrim::Drawn { holes, .. } = &p.extra[0].prim else { panic!("{:?}", p.extra[0].prim) };
+        assert_eq!(holes.len(), 1);
+        let v = p.vars().unwrap();
+        let f = flat_parts(&p, &v);
+        assert!((signed_area(&f[0].outline).abs() - 15e-6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_shape_cut_in_two_becomes_two_shapes() {
+        let mut p = two_squares(([0.001, -0.001], [0.002, 0.005]));
+        let made = combine_parts(&mut p, &[0, 1], CombineOp::Cut).unwrap();
+        assert_eq!(made, vec![0, 1]);
+        assert_eq!(p.extra.len(), 2);
+        assert_ne!(p.extra[0].name, p.extra[1].name);
+    }
+
+    #[test]
+    fn combining_says_what_it_cannot_do() {
+        let mut p = two_squares(([0.002, 0.002], [0.006, 0.006]));
+        assert!(combine_parts(&mut p, &[0], CombineOp::Add).is_err());
+        assert!(combine_parts(&mut p, &[0, 0], CombineOp::Add).is_err());
+        add_rect(&mut p, "c", &sheet(2, "1mm"), [0.0, 0.0], [0.001, 0.001]).unwrap();
+        assert!(combine_parts(&mut p, &[0, 2], CombineOp::Add).unwrap_err().to_string().contains("same plane"));
+        // Refused, it leaves everything as it was.
+        assert_eq!(p.extra.len(), 3);
+        let mut q = two_squares(([0.0, 0.0], [0.004, 0.004]));
+        assert!(combine_parts(&mut q, &[0, 1], CombineOp::Cut).unwrap_err().to_string().contains("Nothing would be left"));
+        assert_eq!(q.extra.len(), 2);
+    }
+
+    #[test]
+    fn shapes_that_only_touch_along_an_edge_join_into_one_outline() {
+        let mut p = two_squares(([0.004, 0.001], [0.006, 0.003]));
+        combine_parts(&mut p, &[0, 1], CombineOp::Add).unwrap();
+        assert_eq!(p.extra.len(), 1);
+        let ExtraPrim::Drawn { form: Form::Poly { pts }, holes, .. } = &p.extra[0].prim else { panic!() };
+        assert_eq!(pts.len(), 8, "{pts:?}");
+        assert!(holes.is_empty());
+    }
+
     /// Drawn the way a person would: two rectangles, then a feed clicked between them.
     #[test]
     fn a_dipole_drawn_by_hand_solves_like_the_template() {
@@ -816,6 +1011,23 @@ mod tests {
         assert!((signed_area(&pts).abs() - want).abs() / want < 1e-6, "{}", signed_area(&pts));
         assert!(strip(&path, 0.0).is_err());
         assert!(strip(&[[0.0, 0.0]], 0.002).is_err());
+    }
+
+    /// A model drawing a closed loop writes it as a path ending where it began. Stroked as an open one,
+    /// that crossed itself and lost a corner, right where the feed was.
+    #[test]
+    fn a_strip_that_comes_back_to_its_start_is_a_ring_with_all_its_corners() {
+        let path = [[0.0, 0.0], [0.02, 0.0], [0.02, 0.01], [0.0, 0.01], [0.0, 0.0]];
+        let pts = strip(&path, 0.002).unwrap();
+        // The outside, 22 by 12, less the inside, 18 by 8.
+        let want = 0.022 * 0.012 - 0.018 * 0.008;
+        assert!((signed_area(&pts).abs() - want).abs() / want < 1e-9, "{}", signed_area(&pts));
+        for corner in [[-0.0005, -0.0005], [0.0205, -0.0005], [0.0205, 0.0105], [-0.0005, 0.0105]] {
+            assert!(cad::point_inside(&pts, corner), "the corner at {corner:?}");
+        }
+        assert!(!cad::point_inside(&pts, [0.01, 0.005]), "the middle stays open");
+        // One that stops short of its start is still a strip with two ends.
+        assert!(signed_area(&strip(&path[..4], 0.002).unwrap()).abs() < want);
     }
 
     #[test]

@@ -1516,6 +1516,9 @@ pub fn apply_actions(
 /// whose asset still has to be downloaded.
 fn load_layout(path: &Path) -> anyhow::Result<(Vec<PendingSpawn>, Vec<PendingDownload>)> {
     let v = crate::project_file::read(path)?;
+    if crate::project_file::is_antenna_doc(&v) {
+        anyhow::bail!("{} is an antenna project: it opens in Antenna, with File, Open.", path.display());
+    }
     let arr = |o: &serde_json::Value, k: &str| -> Vec<f32> {
         o[k].as_array().map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect()).unwrap_or_default()
     };

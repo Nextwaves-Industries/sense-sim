@@ -17,7 +17,7 @@ fn def(name: &str, description: &str, schema: Value) -> ToolDef {
 
 pub fn defs() -> Vec<ToolDef> {
     let mut all = vec![
-        def("antenna_references", "What's known about a job: the structure real products use, why, the order to tune it in, target numbers, limits and sources. Read it to learn the job, not as the answer: it's one structure among several, and it was solved in free space. Also lists RFID tag chips with their impedance and sensitivity. For a tag, design with antenna_tag_design. antenna_open_sample opens a reference to study.", json!({ "type": "object", "properties": { "job": { "type": "string", "description": "What it's for, in words: 'RFID tag on cartons', 'circular reader panel for the US band'" } } })),
+        def("antenna_references", "What's known about a job: the structure real products use, why, the order to tune it in, target numbers, limits and sources. Read it to learn the job, not as the answer: it's one structure among several, and it was solved in free space. Also lists RFID tag chips with their impedance and sensitivity. For a tag, design with antenna_tag_try. antenna_open_sample opens a reference to study.", json!({ "type": "object", "properties": { "job": { "type": "string", "description": "What it's for, in words: 'RFID tag on cartons', 'circular reader panel for the US band'" } } })),
         def("antenna_list_samples", "List the sample antenna projects: real uses like a UHF RFID reader panel, a Wi-Fi PCB antenna or a GPS helix, each in its band and checked against a solver, with what they are for. Ready to open and study, or to start a design from.", json!({ "type": "object", "properties": {} })),
         def("antenna_open_sample", "Open a sample project in Antenna Studio on its results, replacing the current design. Those that are slow to solve come with results stored; the rest solve when opened, so poll antenna_results until the job is idle. id: from antenna_list_samples.", json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] })),
         def("antenna_list_templates", "List the antenna templates of Antenna Studio (dipole, Yagi, helix, patch, horn, Vivaldi, ...), with what they are and which solvers apply.", json!({ "type": "object", "properties": {} })),
@@ -28,10 +28,10 @@ pub fn defs() -> Vec<ToolDef> {
         ),
         def(
             "antenna_set",
-            "Change the current design: variables (expressions with units are fine, e.g. {\"L\":\"31mm\",\"h\":\"0.04*lambda0\"}), metal and substrate material names, sweep band in GHz, solver (auto, fdtd, mom_wire, mom_surface), far-field frequencies in GHz, mesh density.",
-            json!({ "type": "object", "properties": { "vars": { "type": "object" }, "metal": { "type": "string" }, "substrate": { "type": "string" }, "f_lo_ghz": { "type": "number" }, "f_hi_ghz": { "type": "number" }, "far_ghz": { "type": "array", "items": { "type": "number" } }, "solver": { "type": "string", "enum": ["auto", "fdtd", "mom_wire", "mom_surface"] }, "cells_per_lambda": { "type": "number" }, "segments_per_lambda": { "type": "number" }, "edges_per_lambda": { "type": "number" }, "mom_samples": { "type": "integer" } } }),
+            "Change the current design: variables (expressions with units are fine, e.g. {\"L\":\"31mm\",\"h\":\"0.04*lambda0\"}), which is how any size in a template or drawing is changed, metal and substrate material names, sweep band in GHz, solver (auto, fdm for the built-in finite-difference solver, fdtd for openEMS, mom_wire, mom_surface), far-field frequencies in GHz, mesh density, adaptive_mesh (the fdm solver repeats the run, adding cells where the field sits, until S stops changing).",
+            json!({ "type": "object", "properties": { "vars": { "type": "object" }, "metal": { "type": "string" }, "substrate": { "type": "string" }, "f_lo_ghz": { "type": "number" }, "f_hi_ghz": { "type": "number" }, "far_ghz": { "type": "array", "items": { "type": "number" } }, "solver": { "type": "string", "enum": ["auto", "fdm", "fdtd", "mom_wire", "mom_surface"] }, "cells_per_lambda": { "type": "number" }, "adaptive_mesh": { "type": "boolean" }, "wave_feeds": { "type": "array", "items": { "type": "string" }, "description": "Names of the feeds that are wave ports, for the fdm solver: each has to join a line's two conductors at the model's outer edge" }, "segments_per_lambda": { "type": "number" }, "edges_per_lambda": { "type": "number" }, "mom_samples": { "type": "integer" } } }),
         ),
-        def("antenna_get", "The current design: template, variable table with evaluated values, materials, sweep, solver, overall size, ports, and the estimate of a run.", json!({ "type": "object", "properties": {} })),
+        def("antenna_get", "The current design: template, variable table with evaluated values, materials, sweep, solver, overall size, ports, and the estimate of a run. A drawing also comes with how each part and feed is written, and any numbers in them not yet tied to a variable.", json!({ "type": "object", "properties": {} })),
         def("antenna_run", "Start a simulation of the current design in the background. Use antenna_wait until it's done, then antenna_assess.", json!({ "type": "object", "properties": {} })),
         def(
             "antenna_results",
@@ -47,6 +47,7 @@ pub fn defs() -> Vec<ToolDef> {
         def("antenna_cancel", "Stop the running antenna job.", json!({ "type": "object", "properties": {} })),
     ];
     all.extend(super::gate::defs());
+    all.extend(super::model_tools::defs());
     all.extend(super::reconfig::defs());
     all.extend(super::phased::defs());
     all.extend(super::assist::defs());
@@ -133,6 +134,9 @@ fn parse_goal(v: &Value) -> Result<Goal, String> {
 }
 
 pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
+    if let Some(out) = super::model_tools::tool(world, name, i) {
+        return Some(out);
+    }
     if let Some(out) = super::gate::tool(world, name, i) {
         return Some(out);
     }
@@ -206,6 +210,9 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             }
         }
         "antenna_set" => {
+            // Known before this call, so that a new row can be told from a change to one that's there.
+            let known: Vec<String> = st.project.var_hints().into_iter().map(|h| h.name).collect();
+            let mut created = Vec::new();
             if let Some(vars) = i["vars"].as_object() {
                 for (k, v) in vars {
                     let expr = match v {
@@ -214,7 +221,12 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                     };
                     match st.project.params.iter_mut().find(|p| &p.name == k) {
                         Some(p) => p.expr = expr,
-                        None => st.project.params.push(antenna_core::project::Param::new(k, &expr, "Set by the assistant")),
+                        None => {
+                            st.project.params.push(antenna_core::project::Param::new(k, &expr, "Set by the assistant"));
+                            if !known.contains(k) {
+                                created.push(k.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -243,6 +255,7 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             if let Some(s) = i["solver"].as_str() {
                 st.project.setup.solver = match s {
                     "fdtd" => SolverKind::Fdtd,
+                    "fdm" | "fit" => SolverKind::Fit,
                     "mom_wire" => SolverKind::MomWire,
                     "mom_surface" => SolverKind::MomSurface,
                     _ => SolverKind::Auto,
@@ -250,6 +263,12 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             }
             if let Some(v) = i["cells_per_lambda"].as_f64() {
                 st.project.setup.cells_per_lambda = v;
+            }
+            if let Some(v) = i["adaptive_mesh"].as_bool() {
+                st.project.setup.adaptive = v;
+            }
+            if let Some(a) = i["wave_feeds"].as_array() {
+                st.project.wave_feeds = a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
             }
             if let Some(v) = i["segments_per_lambda"].as_f64() {
                 st.project.setup.segments_per_lambda = v;
@@ -261,11 +280,28 @@ pub fn start(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
                 st.project.setup.mom_samples = v as usize;
             }
             match st.project.geometry() {
-                Ok(_) => text(json!({ "ok": true, "design": describe(&st.project) })),
+                Ok(_) => {
+                    // A template's rows are read by its code, so only a drawing can tell. A new name
+                    // nothing uses is usually a wrong one, and would sit in the user's table doing nothing.
+                    created.retain(|name| st.project.template == "custom" && antenna_core::freeform::what_it_moves(&st.project, name).is_empty());
+                    st.project.params.retain(|r| !created.contains(&r.name));
+                    let mut out = json!({ "ok": true, "design": describe(&st.project) });
+                    if !created.is_empty() {
+                        out["changes_nothing"] = json!(created);
+                        out["changes_nothing_note"] = json!("No part is written over these, so they weren't added and nothing moved. A wrong name? See variables in design. To add a dimension, send the part again with antenna_draw, written over it.");
+                    }
+                    text(out)
+                }
                 Err(e) => ToolOutput::err(format!("{e:#}")),
             }
         }
-        "antenna_get" => text(describe(&st.project)),
+        "antenna_get" => {
+            let mut d = describe(&st.project);
+            if !st.project.extra.is_empty() || !st.project.extra_ports.is_empty() {
+                d["drawing"] = antenna_core::freeform::written(&st.project);
+            }
+            text(d)
+        }
         "antenna_run" => {
             if st.busy() {
                 return Some(ToolOutput::err("a job is already running"));

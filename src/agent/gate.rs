@@ -120,8 +120,8 @@ pub fn class_of(name: &str, input: &Value) -> Class {
         | "search_knowledge" | "read_knowledge" | "list_knowledge" | "sim_faces" | "design_job" | "sim_catalog" | "sim_studies" | "sim_jobs" | "sim_check_faces"
         | "sim_results" | "sim_probe" | "plant_list_ports" | "plant_status" | "outcomes_ledger" | "site_material_ranges" | "rtls_list_regions" | "rtls_list_profiles" | "rtls_list_devices" | "rtls_status"
         | "rtls_coverage" | "antenna_assess" | "antenna_calc" | "antenna_sweep_results" | "antenna_converge_results" | "antenna_yield_results" | "antenna_gate_results" | "antenna_list_samples"
-        | "antenna_references" | "antenna_list_templates" | "antenna_get" | "antenna_results" | "antenna_job_state" | "antenna_wait" | "antenna_reconfig_parts" | "antenna_reconfig_results" | "antenna_reconfig_found"
-        | "antenna_reconfig_tuning" | "antenna_reconfig_spread" | "antenna_phased_results" | "antenna_phased_table" | "antenna_df_results" | "antenna_df_fix" | "antenna_df_switched" | "antenna_chain_budget" | "antenna_chain_results" | "antenna_radar_results" | "antenna_tag_options" => Read,
+        | "antenna_references" | "antenna_list_templates" | "antenna_get" | "antenna_model_get" | "antenna_results" | "antenna_job_state" | "antenna_wait" | "antenna_reconfig_parts" | "antenna_reconfig_results" | "antenna_reconfig_found"
+        | "antenna_reconfig_tuning" | "antenna_reconfig_spread" | "antenna_phased_results" | "antenna_phased_table" | "antenna_df_results" | "antenna_df_fix" | "antenna_df_switched" | "antenna_chain_budget" | "antenna_chain_results" | "antenna_radar_results" | "antenna_tag_options" | "antenna_sketch_view" => Read,
 
         // Reading an optimizer's progress is a lookup; applying its result changes the design.
         // Reading a tag's two metrics changes nothing. Tuning replaces the last result, and applying moves the design.
@@ -153,7 +153,7 @@ pub fn class_of(name: &str, input: &Value) -> Class {
         | "site_conditions" | "site_erces" | "site_compare_tech" | "site_acceptance_plan" | "site_acceptance_preview" | "site_anchor_practice" | "site_battery" | "site_esl" | "site_route_coverage"
         | "site_proximity" | "site_set_antenna" | "site_import_bim" | "rtls_set_region" | "rtls_run" | "rtls_control" | "antenna_spec" | "antenna_sweep" | "antenna_converge" | "antenna_match" | "antenna_yield"
         | "antenna_array" | "antenna_save_pattern" | "antenna_import_cad" | "antenna_states" | "antenna_gate_test" | "antenna_find_phases" | "antenna_open_sample" | "antenna_new" | "antenna_set" | "antenna_run"
-        | "antenna_optimize" | "antenna_cancel" | "antenna_reconfig_set" | "antenna_reconfig_solve" | "antenna_reconfig_search" | "antenna_phased_set" | "antenna_phased_shape" | "antenna_df_set" | "antenna_df_study" | "antenna_chain_set" | "antenna_chain_run" | "antenna_radar_set" | "antenna_radar_run" | "antenna_stack" | "antenna_draw" | "antenna_tag_design" | "antenna_tag_open" | "antenna_tag_retune" => Project,
+        | "antenna_optimize" | "antenna_cancel" | "antenna_reconfig_set" | "antenna_reconfig_solve" | "antenna_reconfig_search" | "antenna_phased_set" | "antenna_phased_shape" | "antenna_df_set" | "antenna_df_study" | "antenna_chain_set" | "antenna_chain_run" | "antenna_radar_set" | "antenna_radar_run" | "antenna_stack" | "antenna_draw" | "antenna_model_add" | "antenna_model_clear" | "antenna_tag_try" | "antenna_tag_design" | "antenna_tag_open" | "antenna_tag_retune" => Project,
 
         "open_external" => OpensOutside,
 

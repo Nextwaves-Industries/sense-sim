@@ -439,20 +439,24 @@ fn region_warnings(res: &super::RegionResult) -> Vec<String> {
 /// The "FDTD" page of the Positioning panel. Returns the technology whose
 /// floor map should be recomputed (the applied antenna changed).
 pub fn tab(ui: &mut egui::Ui, fdtd: &mut Fdtd, applied: &mut AppliedAntenna, library: &mut AntennaLibrary, cov: &mut Coverage) -> Option<Tech> {
-    // Solver: installed or not, in one row.
+    // Solver: built in, or openEMS if it's here and wanted.
     card(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("openEMS field solver (FDTD)").strong())
-                .on_hover_text("openEMS (openems.de) solves the radio waves themselves. It is unrelated to OpenEMS Edge, the energy-management system on the OpenEMS Edge page.");
+            ui.label(RichText::new("Field solver (FDM)").strong())
+                .on_hover_text("Solves the radio waves themselves on a 3D grid. The built-in solver needs nothing installed. openEMS (openems.de) is the free alternative it can be checked against; it is unrelated to OpenEMS Edge, the energy-management system on the OpenEMS Edge page.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match super::exe() {
                 Some(_) => {
-                    theme::badge(ui, &format!("{} installed", super::OPENEMS_VERSION), theme::SUCCESS);
+                    let mut wanted = super::prefers_openems();
+                    if theme::segmented(ui, &mut wanted, &[(false, "Built in"), (true, "openEMS")]) {
+                        super::set_prefers_openems(wanted);
+                    }
                 }
                 None => {
-                    let b = ui.add_enabled(!fdtd.busy(), egui::Button::new("Install (~65 MB)"));
-                    if b.on_hover_text("Downloads the official Windows build into %LOCALAPPDATA%\\SenseSim\\openems-fdtd").clicked() {
+                    let b = ui.add_enabled(!fdtd.busy(), egui::Button::new("Add openEMS (~65 MB)"));
+                    if b.on_hover_text("Optional: a second solver to check results against. Downloads the official Windows build into %LOCALAPPDATA%\\SenseSim\\openems-fdtd").clicked() {
                         fdtd.install();
                     }
+                    theme::badge(ui, "Built in", theme::SUCCESS);
                 }
             });
         });

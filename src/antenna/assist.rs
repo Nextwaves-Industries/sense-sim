@@ -29,6 +29,9 @@ pub const WAIT: &str = "antenna_wait";
 const WAIT_DEFAULT_S: f64 = 120.0;
 // HTTP clients give up around 300 s, so a long job is waited for in several calls.
 const WAIT_MAX_S: f64 = 280.0;
+// The app's own assistant has no such limit, and each call back to a model to say "still running"
+// resends the whole conversation: about 70 thousand tokens to learn nothing.
+const WAIT_IN_APP_S: f64 = 1800.0;
 
 fn def(name: &str, description: &str, schema: Value) -> ToolDef {
     ToolDef { name: name.into(), description: description.into(), schema }
@@ -110,10 +113,17 @@ fn job_json(st: &Studio) -> Value {
     }
 }
 
+/// How long to wait. In the app it's until the job's done, whatever was asked: nothing else can happen
+/// while a job runs, and the user can stop it. Over HTTP it's what was asked, within what a client bears.
+fn wait_limit(seconds: Option<f64>, in_app: bool) -> f64 {
+    if in_app { WAIT_IN_APP_S } else { seconds.unwrap_or(WAIT_DEFAULT_S).clamp(1.0, WAIT_MAX_S) }
+}
+
 /// Blocks a worker thread until the job ends. Called from `tools::call`, so the app's
 /// update loop keeps running and the wait counts as one tool call.
 pub fn wait(tx: &Sender<ToolJob>, input: &Value, cancel: Option<&AtomicBool>) -> ToolOutput {
-    let limit = input["seconds"].as_f64().unwrap_or(WAIT_DEFAULT_S).clamp(1.0, WAIT_MAX_S);
+    // Only the app's own assistant waits with a way to be stopped.
+    let limit = wait_limit(input["seconds"].as_f64(), cancel.is_some());
     let started = Instant::now();
     loop {
         let out = crate::agent::tools::call(tx, JOB_STATE, json!({}), false, cancel);

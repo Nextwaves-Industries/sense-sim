@@ -14,6 +14,7 @@ use crate::theme::{self, icon};
 fn solver_options(fit: antenna_core::geometry::SolverFit) -> Vec<SolverKind> {
     let mut v = vec![SolverKind::Auto];
     if fit.fdtd {
+        v.push(SolverKind::Fit);
         v.push(SolverKind::Fdtd);
     }
     if fit.wire_mom {
@@ -140,6 +141,7 @@ pub fn setup(ui: &mut egui::Ui, st: &mut Studio) {
         ui,
         match chosen {
             SolverKind::Fdtd => "FDTD handles anything, dielectrics included. One run gives the whole band at once; a high-Q antenna takes longer to ring down.",
+            SolverKind::Fit => "The built-in finite-difference solver handles anything, dielectrics included, and needs nothing installed. It treats thin metal and thin layers inside the cell, so it needs far fewer cells on a printed trace, and it uses the GPU for big models. One run gives the whole band at once.",
             SolverKind::MomWire => "Method of moments on wire segments: exact free-space physics for metal wires, solved in seconds, one matrix per frequency.",
             SolverKind::MomSurface => "Method of moments on triangles (RWG): metal in free space, no mesh of the air around it. Cost grows with the third power of the unknowns.",
             SolverKind::Auto => "",
@@ -178,13 +180,17 @@ pub fn setup(ui: &mut egui::Ui, st: &mut Studio) {
 
     theme::caption(ui, "Mesh");
     match chosen {
-        SolverKind::Fdtd => {
+        SolverKind::Fdtd | SolverKind::Fit => {
             ui.horizontal(|ui| {
                 ui.label("Cells per λ");
                 let mut v = st.project.setup.cells_per_lambda;
                 theme::segmented(ui, &mut v, &[(12.0, "Fast 12"), (20.0, "Normal 20"), (30.0, "Fine 30"), (45.0, "Finest 45")]);
                 st.project.setup.cells_per_lambda = v;
             });
+            let direct = chosen == SolverKind::Fit || (st.project.setup.solver == SolverKind::Auto && crate::rtls::fdtd::runner() == crate::rtls::fdtd::Runner::BuiltIn);
+            if direct {
+                ui.checkbox(&mut st.project.setup.adaptive, "Adaptive mesh").on_hover_text("Starts from this density and runs again, adding cells where the field sits, until S stops changing twice running, then reports what it settled to. Takes several runs: what it gives you is a mesh that's been checked, more than a mesh that's small.");
+            }
             egui::Grid::new("studio_end").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
                 ui.label("Stop at energy").on_hover_text("The run ends when the energy in the model has decayed this far");
                 ui.add(egui::DragValue::new(&mut st.project.setup.end_db).range(20.0..=80.0).prefix("−").suffix(" dB"));
@@ -214,18 +220,23 @@ pub fn setup(ui: &mut egui::Ui, st: &mut Studio) {
                 }
             }
             ui.horizontal(|ui| {
-                match crate::rtls::fdtd::exe() {
-                    Some(_) => {
-                        theme::badge(ui, &format!("openEMS {}", crate::rtls::fdtd::OPENEMS_VERSION), theme::SUCCESS);
-                    }
-                    None => {
-                        theme::badge(ui, "openEMS not installed", theme::WARNING);
-                        let idle = st.ui.install_status.is_none();
-                        if ui.add_enabled(idle, egui::Button::new("Install (about 65 MB)")).on_hover_text("Downloads the official Windows build into %LOCALAPPDATA%\\SenseSim\\openems-fdtd").clicked() {
-                            st.ui.want_install = true;
-                        }
-                    }
+                // Auto takes the built-in solver unless openEMS was chosen on the field-solver card.
+                let built_in = match st.project.setup.solver {
+                    SolverKind::Fdtd => crate::rtls::fdtd::runner_for_openems() == crate::rtls::fdtd::Runner::BuiltIn,
+                    SolverKind::Fit => true,
+                    _ => crate::rtls::fdtd::runner() == crate::rtls::fdtd::Runner::BuiltIn,
                 };
+                if built_in {
+                    theme::badge(ui, "Built-in FDM, nothing to install", theme::SUCCESS);
+                } else {
+                    theme::badge(ui, &format!("openEMS {}", crate::rtls::fdtd::OPENEMS_VERSION), theme::SUCCESS);
+                }
+                if chosen == SolverKind::Fdtd && crate::rtls::fdtd::exe().is_none() {
+                    let idle = st.ui.install_status.is_none();
+                    if ui.add_enabled(idle, egui::Button::new("Add openEMS (about 65 MB)")).on_hover_text("Optional: a second solver to check results against. Downloads the official Windows build into %LOCALAPPDATA%\\SenseSim\\openems-fdtd").clicked() {
+                        st.ui.want_install = true;
+                    }
+                }
             });
             if let Some(s) = st.ui.install_status.clone() {
                 weak(ui, s);
@@ -490,20 +501,27 @@ fn goal_editor(ui: &mut egui::Ui, g: &mut Goal, id: usize) {
     });
 }
 
-pub fn optimize(ui: &mut egui::Ui, st: &mut Studio) {
-    let busy = st.busy();
-    theme::caption(ui, "Optimizer");
-    weak(ui, "Pick the variables it may change and what the antenna must achieve. Each step is a full simulation, so use a fast mesh and few variables.");
-    // Variables list, built on first view, kept across edits.
+/// The list of what the optimizer may vary, one row per free variable. Kept across edits, and it
+/// starts from the range the project was saved with, if it has one.
+pub(super) fn sync_opt_vars(st: &mut Studio) {
     let vars = st.project.vars().unwrap_or_default();
     let names = free_vars(st);
     st.ui.opt_vars.retain(|v| names.contains(&v.0));
     for n in &names {
         if !st.ui.opt_vars.iter().any(|v| &v.0 == n) {
             let c = vars.get(n).copied().unwrap_or(0.0);
-            st.ui.opt_vars.push((n.clone(), c * 0.8, c * 1.2, false));
+            let (lo, hi) = st.project.params.iter().find(|p| &p.name == n).and_then(|p| p.range).unwrap_or((c * 0.8, c * 1.2));
+            st.ui.opt_vars.push((n.clone(), lo, hi, false));
         }
     }
+}
+
+pub fn optimize(ui: &mut egui::Ui, st: &mut Studio) {
+    let busy = st.busy();
+    theme::caption(ui, "Optimizer");
+    weak(ui, "Pick the variables it may change and what the antenna must achieve. Each step is a full simulation, so use a fast mesh and few variables.");
+    sync_opt_vars(st);
+    let vars = st.project.vars().unwrap_or_default();
     egui::Grid::new("studio_optvars").num_columns(4).spacing(vec2(10.0, 3.0)).striped(true).show(ui, |ui| {
         for t in ["Vary", "Now", "Min", "Max"] {
             ui.label(RichText::new(t).size(12.0).color(theme::WEAK));
@@ -774,7 +792,7 @@ pub fn yield_page(ui: &mut egui::Ui, st: &mut Studio) {
 }
 
 /// A number field for a design variable: shows its unit and accepts `46mm` or `2.4GHz`.
-fn var_drag<'a>(name: &'a str, v: &'a mut f64, speed: f64) -> egui::DragValue<'a> {
+pub(super) fn var_drag<'a>(name: &'a str, v: &'a mut f64, speed: f64) -> egui::DragValue<'a> {
     egui::DragValue::new(v)
         .speed(speed)
         .custom_formatter(move |x, _| antenna_core::report::param_text(name, x))

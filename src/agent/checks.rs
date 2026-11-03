@@ -12,6 +12,8 @@ const MAX_CHECKS: usize = 4;
 const MAX_RTLS_CHECKS: usize = 3;
 const MAX_PLANT_CHECKS: usize = 3;
 const MAX_ANTENNA_CHECKS: usize = 4;
+/// How many structures of its own the assistant has to try before a new tag counts as designed.
+const MIN_TAG_TRIES: usize = 3;
 const MAX_PLAN_CHECKS: usize = 4;
 
 const MUTATING: [&str; 15] = [
@@ -180,6 +182,10 @@ impl StopChecks for SelfChecks {
             self.antenna.checks += 1;
             if self.antenna.checks <= MAX_ANTENNA_CHECKS {
                 let _ = ev.send(Event::Info(format!("Antenna not proven yet; sending the assistant back to check it (round {}/{MAX_ANTENNA_CHECKS}).", self.antenna.checks)));
+                // With nothing asked for there's nothing to reach, and this text would tell it to reach it.
+                if self.antenna.only_drawn() {
+                    return OnStop::SendBack(vec![Block::Text(format!("[Automatic check] {why}"))]);
+                }
                 return OnStop::SendBack(vec![Block::Text(format!(
                     "[Automatic check] {why}\n\
                      Before finishing: follow the antenna_assess diagnosis and next steps, change one thing at a time, then antenna_run, antenna_wait and antenna_assess again. \
@@ -295,20 +301,64 @@ struct AntennaCheck {
     checks: usize,
     /// A tag is being designed: requirements name a chip.
     tag_job: bool,
-    /// Different structures were compared for it.
-    tag_compared: bool,
+    /// Structures of the assistant's own that have been tried for it.
+    tag_own_tries: usize,
+    /// It's adjusting a tag that already exists, which asks for nothing new.
+    tag_adjusting: bool,
     tag_reminded: bool,
+    /// The known shapes have been searched, so there's something to compare with.
+    tag_known_searched: bool,
+    tag_compare_reminded: bool,
+    /// Something was drawn, and requirements were set: either can come without the other.
+    drawn: bool,
+    spec_set: bool,
 }
 
 impl AntennaCheck {
+    /// Something was drawn and nobody asked for it to meet anything: reading its results is the job.
+    fn only_drawn(&self) -> bool {
+        self.drawn && !self.spec_set
+    }
+
     fn observe(&mut self, tool: &str, input: &serde_json::Value, output: &str) {
-        let changed = matches!(tool, "antenna_new" | "antenna_set" | "antenna_import_cad" | "antenna_spec" | "antenna_draw" | "antenna_tag_open") || (tool == "antenna_stack" && input.as_object().is_some_and(|o| !o.is_empty())) || (tool == "antenna_optimize_status" && input["apply"].as_bool().unwrap_or(false)) || (matches!(tool, "antenna_tag_retune" | "antenna_tag_tune") && input["apply"].as_bool().unwrap_or(false));
+        let changed = matches!(tool, "antenna_new" | "antenna_set" | "antenna_import_cad" | "antenna_spec" | "antenna_draw" | "antenna_model_add" | "antenna_tag_try" | "antenna_tag_open") || (tool == "antenna_stack" && input.as_object().is_some_and(|o| !o.is_empty())) || (tool == "antenna_optimize_status" && input["apply"].as_bool().unwrap_or(false)) || (matches!(tool, "antenna_tag_retune" | "antenna_tag_tune") && input["apply"].as_bool().unwrap_or(false));
+        // The design frequency moves nothing that's drawn. A real run put it back after reading its
+        // results, was sent off to set requirements, made up 860 to 960 MHz at 50 ohm, and then asked the
+        // user whether to make their 70 mm tag 180 mm long.
+        let only_f0 = tool == "antenna_set" && self.only_drawn() && input.as_object().is_some_and(|o| o.len() == 1) && input["vars"].as_object().is_some_and(|v| v.len() == 1 && v.contains_key("f0"));
+        let changed = changed && !only_f0;
         if tool == "antenna_spec" && (input.get("chip").is_some() || input.get("chip_z").is_some()) {
             self.tag_job = true;
         }
         if tool == "antenna_tag_design" {
             self.tag_job = true;
-            self.tag_compared = true;
+            // Testing a drawing against them counts as trying it. Only searching them doesn't.
+            if input["vary"].as_array().is_some_and(|a| !a.is_empty()) {
+                self.tag_own_tries += 1;
+            }
+            if !input["only_vary"].as_bool().unwrap_or(false) {
+                self.tag_known_searched = true;
+            }
+        }
+        if tool == "antenna_tag_try" {
+            self.tag_job = true;
+            self.tag_own_tries += 1;
+        }
+        // Tuning a tag that exists, or drawing the one in the user's sketch, asks for nothing new.
+        if matches!(tool, "antenna_tag_tune" | "antenna_tag_retune" | "antenna_draw") && self.tag_own_tries == 0 {
+            self.tag_adjusting = true;
+        }
+        // Having it judged says there's something to judge it against.
+        if matches!(tool, "antenna_spec" | "antenna_assess") {
+            self.spec_set = true;
+        }
+        // A drawing with no requirements has nothing to be judged against, and reading its results is
+        // the job. Sent back to set some, a real run made up 0.5 to 6 GHz, failed it, and said so.
+        if tool == "antenna_results" && self.only_drawn() {
+            self.dirty = false;
+        }
+        if tool == "antenna_draw" {
+            self.drawn = true;
         }
         if changed {
             self.dirty = true;
@@ -336,16 +386,25 @@ impl AntennaCheck {
 
     /// Why the assistant should not finish yet.
     fn pending(&mut self) -> Option<String> {
+        // Ahead of proving anything: there's no use proving a design that's about to be replaced.
+        if self.tag_job && self.tag_own_tries < MIN_TAG_TRIES && !self.tag_adjusting && !self.tag_reminded {
+            self.tag_reminded = true;
+            return Some(format!("A new tag hasn't been designed yet: {} of your own structures tried, and known shapes with their sizes searched aren't a design. Read what limits the best so far, then try at least {MIN_TAG_TRIES} structures of your own with antenna_tag_try, across at least two different ideas, or say plainly why this job shouldn't have one.", self.tag_own_tries));
+        }
+        // Calling a design good means nothing with no idea what a known shape does in the same place.
+        if self.tag_job && self.tag_own_tries > 0 && !self.tag_known_searched && !self.tag_adjusting && !self.tag_compare_reminded {
+            self.tag_compare_reminded = true;
+            return Some("Your tag hasn't been compared with anything. Run antenna_tag_design at quick effort with no vary, which keeps your tries on the list, and say how yours stands against the known shapes. Quick under-tunes them, so before saying yours beats one, search that one at normal effort with structures. If one beats yours, change your structure in answer or say so plainly.".into());
+        }
         if self.dirty {
             self.dirty = false;
+            if self.only_drawn() {
+                return Some("The drawing changed and its results haven't been read since. Run it if it hasn't been, read antenna_results and report what they show. Nobody asked for a band or a match, so don't set requirements, don't assess it against any, and don't change the drawing to meet them.".into());
+            }
             return Some("The antenna design or its requirements changed and antenna_assess hasn't judged a run since. If no requirements are set yet, set them with antenna_spec from what the user asked for.".into());
         }
         if let Some(p) = self.problem.take() {
             return Some(p);
-        }
-        if self.tag_job && !self.tag_compared && !self.tag_reminded {
-            self.tag_reminded = true;
-            return Some("A tag was designed by adjusting one structure. Run antenna_tag_design to compare different structures in the surroundings it will really be in, and give the user the options, or say plainly why one structure is all this job needs.".into());
         }
         if self.mesh_unchecked && !self.mesh_reminded {
             self.mesh_reminded = true;
@@ -427,24 +486,105 @@ mod rtls_check_tests {
     }
 
     #[test]
-    fn a_tag_tuned_from_one_structure_is_sent_back_once_to_compare_others() {
+    fn a_tag_job_is_sent_back_once_until_it_has_tried_structures_of_its_own() {
         let met = json!({ "verdict": "met_mesh_checked" }).to_string();
         let mut c = AntennaCheck::default();
         c.observe("antenna_spec", &json!({ "chip": "ucode9" }), "{}");
         c.observe("antenna_assess", &json!({}), &met);
-        assert!(c.pending().unwrap().contains("antenna_tag_design"));
+        let why = c.pending().unwrap();
+        assert!(why.contains("antenna_tag_try"), "{why}");
         assert!(c.pending().is_none(), "advice, not a loop");
-        // Having compared them, there's nothing to say.
+
+        // Only searching the known shapes is exactly what this is for.
         let mut d = AntennaCheck::default();
         d.observe("antenna_spec", &json!({ "chip_z": [15, -231] }), "{}");
         d.observe("antenna_tag_design", &json!({}), "{}");
         d.observe("antenna_assess", &json!({}), &met);
-        assert!(d.pending().is_none());
-        // An antenna with no chip isn't a tag.
+        let why = d.pending().unwrap();
+        assert!(why.contains("antenna_tag_try") && why.contains("0 of your own"), "{why}");
+
+        // It comes first, so nothing is proved that's about to be replaced.
+        let mut first = AntennaCheck::default();
+        first.observe("antenna_tag_design", &json!({}), "{}");
+        first.observe("antenna_tag_open", &json!({ "id": "option_1" }), "{}");
+        assert!(first.pending().unwrap().contains("antenna_tag_try"));
+        assert!(first.pending().unwrap().contains("antenna_assess"), "and then the proof is still asked for");
+
+        // One try isn't a comparison of ideas.
         let mut e = AntennaCheck::default();
-        e.observe("antenna_spec", &json!({ "f_lo_ghz": 2.4 }), "{}");
+        e.observe("antenna_tag_try", &json!({}), "{}");
         e.observe("antenna_assess", &json!({}), &met);
-        assert!(e.pending().is_none());
+        assert!(e.pending().unwrap().contains("1 of your own"));
+        // Enough tries, and a drawing tested through the search counts as one, but nothing known to
+        // compare them with: a real run called its first try good without ever looking.
+        let mut f = AntennaCheck::default();
+        f.observe("antenna_tag_try", &json!({}), "{}");
+        f.observe("antenna_tag_try", &json!({}), "{}");
+        f.observe("antenna_tag_design", &json!({ "only_vary": true, "vary": [{ "name": "L", "min": 0.05, "max": 0.09 }] }), "{}");
+        f.observe("antenna_assess", &json!({}), &met);
+        let why = f.pending().unwrap();
+        assert!(why.contains("hasn't been compared") && why.contains("quick"), "{why}");
+        assert!(f.pending().is_none(), "advice, not a loop");
+        // Having looked, there's nothing more to say.
+        let mut done = AntennaCheck::default();
+        for _ in 0..3 {
+            done.observe("antenna_tag_try", &json!({}), "{}");
+        }
+        done.observe("antenna_tag_design", &json!({ "effort": "quick" }), "{}");
+        done.observe("antenna_assess", &json!({}), &met);
+        assert!(done.pending().is_none());
+
+        // Tuning a tag that already exists asks for nothing new.
+        let mut g = AntennaCheck::default();
+        g.observe("antenna_spec", &json!({ "chip": "ucode9" }), "{}");
+        g.observe("antenna_tag_tune", &json!({ "f_mhz": 902 }), "{}");
+        g.observe("antenna_assess", &json!({}), &met);
+        assert!(g.pending().is_none());
+
+        // An antenna with no chip isn't a tag.
+        let mut h = AntennaCheck::default();
+        h.observe("antenna_spec", &json!({ "f_lo_ghz": 2.4 }), "{}");
+        h.observe("antenna_assess", &json!({}), &met);
+        assert!(h.pending().is_none());
+
+        // Drawing the tag in the user's sketch isn't designing a new one.
+        let mut sketch = AntennaCheck::default();
+        sketch.observe("antenna_draw", &json!({}), "{}");
+        sketch.observe("antenna_spec", &json!({ "chip": "ucode9" }), "{}");
+        sketch.observe("antenna_assess", &json!({}), &met);
+        assert!(sketch.pending().is_none());
+    }
+
+    /// Drawing a sketch and reading its S-parameters is the whole job when nobody named a band.
+    #[test]
+    fn a_drawing_with_no_requirements_only_needs_its_results_read() {
+        let mut c = AntennaCheck::default();
+        c.observe("antenna_draw", &json!({}), "{}");
+        c.observe("antenna_set", &json!({ "f_lo_ghz": 0.5, "f_hi_ghz": 6.0 }), "{}");
+        c.observe("antenna_run", &json!({}), "{}");
+        let why = c.pending().unwrap_or_default();
+        assert!(why.contains("antenna_results") && why.contains("don't set requirements"), "not until it's looked, and not by making some up: {why}");
+        c.observe("antenna_draw", &json!({}), "{}");
+        c.observe("antenna_run", &json!({}), "{}");
+        c.observe("antenna_results", &json!({}), "{}");
+        assert!(c.pending().is_none(), "nothing to judge it against");
+
+        // Putting the design frequency back moves nothing that's drawn.
+        c.observe("antenna_set", &json!({ "vars": { "f0": "915MHz" } }), "{}");
+        assert!(c.pending().is_none(), "this sent a real run off to make up a band");
+        // Moving a dimension does, and so does f0 along with anything else.
+        c.observe("antenna_set", &json!({ "vars": { "L": "60mm" } }), "{}");
+        assert!(c.pending().is_some());
+        c.observe("antenna_results", &json!({}), "{}");
+        c.observe("antenna_set", &json!({ "vars": { "f0": "915MHz", "L": "60mm" } }), "{}");
+        assert!(c.pending().is_some());
+
+        // With requirements, it's judged as before.
+        let mut d = AntennaCheck::default();
+        d.observe("antenna_draw", &json!({}), "{}");
+        d.observe("antenna_spec", &json!({ "f_lo_ghz": 0.902, "f_hi_ghz": 0.928 }), "{}");
+        d.observe("antenna_results", &json!({}), "{}");
+        assert!(d.pending().is_some_and(|w| w.contains("antenna_assess")));
     }
 
     #[test]

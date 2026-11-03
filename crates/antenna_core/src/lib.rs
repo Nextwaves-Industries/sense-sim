@@ -13,13 +13,17 @@ pub mod calc;
 pub mod cad;
 pub mod checks;
 pub mod csx;
+pub mod dims;
 pub mod expr;
 pub mod farfield;
+#[cfg(feature = "fit")]
+pub mod fit;
 pub mod freeform;
 pub mod geometry;
 pub mod linalg;
 pub mod matching;
 pub mod material;
+pub mod modeler;
 pub mod mom;
 pub mod optimize;
 pub mod phased;

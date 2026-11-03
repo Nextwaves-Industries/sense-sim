@@ -72,6 +72,12 @@ impl Shape {
         }
     }
 
+    /// The method of moments meshes this as one open sheet with metal on both faces. A flat outline
+    /// goes that way whatever its thickness.
+    pub fn meshed_as_sheet(&self) -> bool {
+        matches!(self, Shape::Polygon { .. }) || self.is_sheet()
+    }
+
     /// Axis-aligned bounds.
     pub fn bounds(&self) -> (P3, P3) {
         let mut lo = [f64::MAX; 3];
@@ -184,6 +190,10 @@ pub struct Geometry {
     /// Layers of paper, film or product around flat metal, as wide as the world.
     #[serde(default)]
     pub stack: Option<crate::stack::Stack>,
+    /// Which of `ports` launch their line's own mode rather than drive a gap. The built-in solver only;
+    /// the others treat them as ordinary gaps, and say so.
+    #[serde(default)]
+    pub wave_ports: Vec<usize>,
 }
 
 /// Triangulates a simple polygon (concave and keyhole outlines included) by ear
@@ -434,7 +444,8 @@ impl Geometry {
                     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
                     add_to(axis, min[axis], vec![[min[u], min[v]], [max[u], min[v]], [max[u], max[v]], [min[u], max[v]]]);
                 }
-                Shape::Polygon { axis, at, pts, thick } if *thick <= 0.0 => add_to(*axis, *at, pts.clone()),
+                // Thick or not, its outline is what gets cut.
+                Shape::Polygon { axis, at, pts, .. } => add_to(*axis, *at, pts.clone()),
                 _ => {}
             }
         }

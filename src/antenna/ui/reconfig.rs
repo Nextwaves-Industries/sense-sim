@@ -838,7 +838,7 @@ fn write_touchstones(dir: &std::path::Path, name: &str, rc: &Reconfig, run: &Rec
 
 fn solve_text(st: &Studio, geometry: &Geometry) -> String {
     let n = geometry.ports.len();
-    if st.ui.chosen == antenna_core::project::SolverKind::Fdtd {
+    if st.ui.chosen.is_time_domain() {
         let time = st.ui.plan.as_ref().map_or(String::new(), |p| format!(", about {}", duration(p.estimate_s(st.speed_mcs()) * n as f64)));
         format!("FDTD, one run per port: {n} runs{time}. That one solve answers for every state.")
     } else {

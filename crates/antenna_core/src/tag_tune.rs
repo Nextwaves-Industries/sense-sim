@@ -815,7 +815,7 @@ pub fn tune(p: &Project, goal: &TagGoal, f0: f64, knobs: &Knobs, ctl: &Control) 
     let expect = 400;
     let step = |what: &str| {
         let n = solves.load(Ordering::Relaxed);
-        (ctl.report)(Progress { message: what.to_string(), done: n.min(expect), total: expect, best_range_m: 0.0 });
+        (ctl.report)(Progress { message: what.to_string(), done: n.min(expect), total: expect, best_range_m: 0.0, found: None });
     };
     step("Reading the design as it stands");
     let before = read(&start, goal, f0, knobs, ctl)?;

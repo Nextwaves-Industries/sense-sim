@@ -201,6 +201,26 @@ pub fn width_axis(port: &PortDef, geom: &Geometry) -> usize {
             }
         }
     }
+    // A feed at the end of a line, on the edge of its metal, is as wide as the line is across.
+    let center = port.center();
+    for s in &geom.solids {
+        let (lo, hi) = s.shape.bounds();
+        let flat_along_dir = hi[dir] - lo[dir] <= tol;
+        if !flat_along_dir {
+            continue;
+        }
+        let on_it = (center[dir] - lo[dir]).abs() <= norm(sub(port.b, port.a)) * 0.5 + tol;
+        if !on_it {
+            continue;
+        }
+        for (i, k) in others.iter().enumerate() {
+            let other = others[1 - i];
+            let inside_other = center[other] >= lo[other] - tol && center[other] <= hi[other] + tol;
+            if inside_other && ((center[*k] - lo[*k]).abs() <= tol || (center[*k] - hi[*k]).abs() <= tol) {
+                return other;
+            }
+        }
+    }
     default
 }
 
@@ -488,6 +508,9 @@ pub fn plan(geom: &Geometry, setup: &Setup, design_f: f64) -> Result<Plan> {
     if cells > 60_000_000 {
         warnings.push(format!("{:.0} million cells: expect a long run and {:.0} GB of memory.", cells as f64 / 1e6, cells as f64 * 90.0 / 1e9));
     }
+    if !geom.wave_ports.is_empty() {
+        warnings.push("Wave ports are only in the built-in solver: on this one they run as ordinary gaps.".into());
+    }
     if eps_max > 4.0 && cpl < 15.0 {
         warnings.push("A coarse mesh with a high-permittivity material shifts resonances noticeably.".into());
     }
@@ -588,14 +611,11 @@ fn shape_xml(s: &mut String, shape: &Shape, ports: &[PortDef], prio: i32, max_ce
         }
         Shape::Tris { tris, solid, sheet } => {
             if *solid {
-                let mut verts = Vec::with_capacity(tris.len() * 3);
-                let mut faces = Vec::with_capacity(tris.len());
-                for t in tris {
-                    let n = verts.len();
-                    verts.extend_from_slice(t);
-                    faces.push([n, n + 1, n + 2]);
-                }
-                polyhedron_xml(s, &verts, &faces, prio);
+                // One vertex per corner: openEMS only treats a surface as a closed solid, and so only
+                // fills its inside, if its triangles share their vertices.
+                let mut pool = crate::modeler::mesh::Pool::new(1e-10);
+                let faces: Vec<[usize; 3]> = tris.iter().map(|t| t.map(|p| pool.id(p) as usize)).filter(|f| f[0] != f[1] && f[1] != f[2] && f[0] != f[2]).collect();
+                polyhedron_xml(s, &pool.pts, &faces, prio);
             } else {
                 // Thinner than a cell, a tilted sheet can fall between the mesh lines and leak.
                 let thick = sheet.max(max_cell * 1.2);

@@ -48,6 +48,8 @@ use tools::{PendingTools, ToolBridge, ToolJob, ToolOutput};
 pub enum ChatItem {
     User { text: String, images: Vec<String> },
     Assistant(String),
+    /// What the model reasoned before one reply.
+    Thinking(String),
     Tool { name: String, input: String, output: String, is_error: bool },
     /// Index into `Agent::questions`.
     Question(usize),
@@ -80,6 +82,10 @@ impl Question {
 
 enum Event {
     Assistant(String),
+    /// More of what the model is thinking.
+    Thinking(String),
+    /// The model call is being sent again, so what it was thinking is void.
+    ThinkingVoid,
     ToolStart { name: String, input: String },
     ToolEnd { output: String, is_error: bool },
     Finished { history: Vec<Message>, error: Option<String> },
@@ -161,7 +167,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    fn new(config: AgentConfig) -> Self {
+    pub(crate) fn new(config: AgentConfig) -> Self {
         let mcp = Arc::new(McpHub::default());
         mcp.connect_all(&config.mcp_servers);
         Self {
@@ -449,7 +455,9 @@ impl Agent {
                 content.push(Block::Image { data, mime });
             }
         }
-        let shown = if text.is_empty() { "Rebuild this scene with SimReady assets.".to_string() } else { text };
+        // A picture sent with no words means what it's sent to: a sketch on the antenna bench isn't a scene.
+        let wordless = if self.screen.workbench == "Antenna Design" { "Draw this antenna from the picture, with its dimensions as variables." } else { "Rebuild this scene with SimReady assets." };
+        let shown = if text.is_empty() { wordless.to_string() } else { text };
         content.push(Block::Text(shown.clone()));
         if interrupted {
             content.push(Block::Text(INTERRUPTED_NOTE.to_string()));
@@ -603,6 +611,15 @@ fn pump_events(mut agent: ResMut<Agent>, bridge: Res<ToolBridge>) {
         }
         match e {
             Event::Assistant(t) => agent.transcript.push(ChatItem::Assistant(t)),
+            Event::Thinking(t) => match agent.transcript.last_mut() {
+                Some(ChatItem::Thinking(so_far)) => so_far.push_str(&t),
+                _ => agent.transcript.push(ChatItem::Thinking(t)),
+            },
+            Event::ThinkingVoid => {
+                if matches!(agent.transcript.last(), Some(ChatItem::Thinking(_))) {
+                    agent.transcript.pop();
+                }
+            }
             Event::ToolStart { name, input } => {
                 agent.transcript.push(ChatItem::Tool { name, input, output: String::new(), is_error: false })
             }
@@ -732,8 +749,19 @@ pub mod images {
 
     /// Loads a photo, downsized to at most 1600 px (enough for vision models
     /// and depth), re-encoded as JPEG.
+    /// A photo the way it's meant to be seen. A phone often stores one on its side with a flag saying
+    /// so, and the copy made for the model below keeps the pixels and loses the flag.
+    fn decode_upright(path: &Path) -> image::ImageResult<image::DynamicImage> {
+        use image::ImageDecoder;
+        let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
+        let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+        let mut img = image::DynamicImage::from_decoder(decoder)?;
+        img.apply_orientation(orientation);
+        Ok(img)
+    }
+
     pub fn load_file(path: &Path) -> Result<(String, Arc<Vec<u8>>, String), String> {
-        let img = image::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
+        let img = decode_upright(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
         let img = if img.width().max(img.height()) > 1600 { img.resize(1600, 1600, image::imageops::FilterType::Lanczos3) } else { img };
         // JPEG has no alpha: flatten transparent PNG/WebP onto white instead of
         // letting transparent pixels turn black.
@@ -752,6 +780,37 @@ pub mod images {
         let data = Arc::new(out.into_inner());
         let id = put(data.clone(), "image/jpeg");
         Ok((id, data, "image/jpeg".into()))
+    }
+}
+
+#[cfg(test)]
+mod photo_tests {
+    /// A phone stores a portrait photo on its side with a flag saying so: here, 40 wide by 20 tall, and
+    /// flag 6, meaning turn it a quarter clockwise to see it.
+    #[test]
+    fn a_photo_stored_on_its_side_reaches_the_model_upright() {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let pic = image::RgbImage::from_fn(40, 20, |x, _| if x < 20 { image::Rgb([250, 0, 0]) } else { image::Rgb([0, 0, 250]) });
+        image::DynamicImage::ImageRgb8(pic).write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95)).unwrap();
+        let jpeg = out.into_inner();
+        // An APP1 segment right after the start marker: "Exif", a little-endian TIFF header, one entry.
+        let mut app1: Vec<u8> = b"Exif  II*     ".to_vec();
+        app1.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0]);
+        let mut flagged = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        flagged.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+        flagged.extend_from_slice(&app1);
+        flagged.extend_from_slice(&jpeg[2..]);
+        let dir = std::env::temp_dir().join(format!("sense_sim_photo_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sideways.jpg");
+        std::fs::write(&path, &flagged).unwrap();
+        let (_, data, _) = super::images::load_file(&path).unwrap();
+        let seen = image::load_from_memory(&data).unwrap().to_rgb8();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(seen.dimensions(), (20, 40), "it stands up");
+        // A quarter turn clockwise puts what was on the left at the top.
+        assert!(seen.get_pixel(10, 5).0[0] > 150, "red on top: {:?}", seen.get_pixel(10, 5));
+        assert!(seen.get_pixel(10, 35).0[2] > 150, "blue below: {:?}", seen.get_pixel(10, 35));
     }
 }
 
@@ -823,6 +882,34 @@ mod lifecycle_tests {
         assert!(agent.transcript.is_empty(), "the old run wrote into the new chat");
         assert!(!agent.running, "Send has to work again");
         assert!(!agent.discard_run);
+    }
+
+    #[test]
+    fn thinking_builds_up_in_one_place_and_a_retry_clears_it() {
+        let mut agent = Agent::new(AgentConfig::default());
+        let (tx, rx) = unbounded();
+        agent.events = Some(rx);
+        agent.running = true;
+        tx.send(Event::Thinking("lost".into())).unwrap();
+        tx.send(Event::ThinkingVoid).unwrap();
+        tx.send(Event::Thinking("First, ".into())).unwrap();
+        tx.send(Event::Thinking("the loop.".into())).unwrap();
+        tx.send(Event::ToolStart { name: "get_scene".into(), input: "{}".into() }).unwrap();
+        tx.send(Event::Thinking("Next, the gap.".into())).unwrap();
+        // Only a thought is void: this one is over, and the call being retried is the next.
+        tx.send(Event::Assistant("Done.".into())).unwrap();
+        tx.send(Event::ThinkingVoid).unwrap();
+        let mut world = World::new();
+        world.insert_resource(agent);
+        world.insert_resource(ToolBridge::default());
+        world.run_system_once(pump_events).unwrap();
+
+        let t = &world.resource::<Agent>().transcript;
+        assert_eq!(t.len(), 4);
+        assert!(matches!(&t[0], ChatItem::Thinking(s) if s == "First, the loop."));
+        assert!(matches!(&t[1], ChatItem::Tool { .. }));
+        assert!(matches!(&t[2], ChatItem::Thinking(s) if s == "Next, the gap."));
+        assert!(matches!(&t[3], ChatItem::Assistant(s) if s == "Done."));
     }
 
     #[test]

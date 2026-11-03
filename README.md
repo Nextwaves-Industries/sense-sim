@@ -8,7 +8,7 @@ C++ or Python USD install is needed.
 
 ## Install
 
-Run `dist\SenseSim-Setup-1.8.0.exe`. It installs per-user (no admin) into
+Run `dist\SenseSim-Setup-1.12.0.exe`. It installs per-user (no admin) into
 `%LOCALAPPDATA%\Programs\Sense Sim`, adds a Start Menu entry (desktop shortcut
 optional) and an uninstaller in *Apps & features*.
 
@@ -32,13 +32,19 @@ on the *Library* section or in Settings → Library; the choice is remembered.
   Downloads, the AI assistant and Help (all keyboard and mouse shortcuts). The grips beside the
   cards resize them, and each section folds with its chevron.
 - **Start:** the dialog at launch and from File → New asks what to work on: an antenna, which needs
-  no scene, or a scene. Press Esc to skip it and start with a blank scene.
-- **Workbenches (the ribbon's tabs):** each job has its own tools and project tree, over the one scene.
-  *Layout* builds the site (assets, walls, arranging). *Placement* places positioning devices and plans
-  coverage. *Antenna Design* is Antenna Studio. *Simulation* holds the live test, RF analysis, the RF solver,
-  predictions and outputs. *Plant* runs connected equipment. Each one remembers the card it had open, and a
-  dot on a tab flags what goes on behind it: alarms on Simulation, a running plant on Plant.
-- **Project tree (left):** the workbench's pages, whose nodes show how far they are set up
+  no scene, or a scene. At launch Antenna is already highlighted. Press Esc to skip it and start with a blank scene.
+- **Workspaces (the tile at the left of the ribbon):** click it to change workspace. Each has its own ribbon
+  tabs and project tree, and what is on offer depends on the project.
+  A *scene project* has *Layout* to build the site (assets, walls, arranging), *Plan* to place positioning devices
+  and plan coverage, *Simulation* for the live test, RF analysis, the RF solver, predictions and outputs, *Plant*
+  to run connected equipment and *Factory* for the real hardware on the network. All five work on the same scene.
+  An *antenna project* needs no scene and has its own *Antenna* workspace, which is Antenna Studio, with tabs for
+  each stage: Design, Model (every modelling tool on one tab), Solve, Results, Analysis and Arrays.
+  A project opens in the workspace it is for: an antenna project in Antenna, a scene with a plant in Plant, a
+  scene with positioning devices in Plan, any other scene in Layout. Each scene tab keeps its own workspace. Each
+  workspace remembers the card it had open, and a dot on the tile flags what goes on behind another one:
+  alarms on Simulation, a running plant on Plant, failed devices on Factory.
+- **Project tree (left):** the workspace's pages, whose nodes show how far they are set up
   (green check: done, red ring: needs something, blue ring: optional, amber ring: working) and open a
   detail card beside the tree; *Downloads*; and the *Job status* card with what is running.
 - **Scene tree (right):** every placed object under the scene's name, filterable above a few objects.
@@ -112,8 +118,8 @@ on PATH. In Git Bash:
 Scripted UI checks: `--screenshot out.png` also takes `--no-select`, `--shot-delay S` and `--open NAME`
 (`deploy`, `test`, `devices`, `inspector`, `live`, `rf`, `planning`, `outputs`, `rtls-settings`, `openems`,
 `fdtd`, `predictions`, `settings`, `settings-viewport`, `settings-graphics`, `settings-performance`, `settings-assistant`,
-`assistant`, `downloads`, `jobs`, `start-empty`, `start-N`, `bench-layout`, `bench-placement`, `bench-antenna`,
-`bench-simulation`, `bench-plant`). Debug builds also take
+`assistant`, `downloads`, `jobs`, `start-empty`, `start-N`, `bench-layout`, `bench-plan`, `bench-antenna`,
+`bench-simulation`, `bench-plant`, `bench-factory`). Debug builds also take
 `--drive "wait:5;click:96,722;probe"`, which plays mouse input through the app without touching the real
 pointer (see `src/drive.rs`).
 
@@ -148,7 +154,7 @@ OpenEMS), or records a real measurement (`outcomes_check`, `site_survey_fit`, `s
 `site_acceptance_score`, drift tools, `design_fit_measured`), asks in every mode. MCP clients can't
 be asked, so those calls are refused for them.
 
-**Project files.** A project saves as one `.sesim` file, a compressed container like a `.docx`, holding the scene, devices, plant, simulation studies and factory view. The installer makes double-clicking one open the app. Layouts saved as `.json` by earlier versions still open, and saving one writes a `.sesim` beside it.
+**Project files.** A project saves as one `.sesim` file, a compressed container like a `.docx`, holding the scene, devices, plant, simulation studies and factory view, or an antenna design, which opens in Antenna. The installer makes double-clicking one open the app. Layouts and `.antenna.json` files saved by earlier versions still open, and saving one writes a `.sesim` beside it.
 
 **Files.** Each chat has a working folder under `%LOCALAPPDATA%/SenseSim/agent`. `open_file` opens
 a file by type: a layout in a new tab, DXF or Gerber in Antenna Studio, IFC as a
@@ -199,7 +205,7 @@ To add your own documents, open Settings → AI assistant → Knowledge base →
 
 ## Predictions: numbers you can commit to
 
-Open **Predictions** in the *Simulation* workbench, or ask the assistant. Every recipe here runs the same loop (`crates/proof`): **predict with a range, measure, calibrate, predict again, decide**. Each number says what it rests on (*Estimate*, *Simulated*, *Calibrated*, *Measured*), what it assumes, and what makes it uncertain. Add a real measurement to any prediction and it gets scored. The ledger is kept in `%APPDATA%\SenseSim\predictions.json`.
+Open **Predictions** in the *Simulation* workspace, or ask the assistant. Every recipe here runs the same loop (`crates/proof`): **predict with a range, measure, calibrate, predict again, decide**. Each number says what it rests on (*Estimate*, *Simulated*, *Calibrated*, *Measured*), what it assumes, and what makes it uncertain. Add a real measurement to any prediction and it gets scored. The ledger is kept in `%APPDATA%\SenseSim\predictions.json`.
 
 **None of these models has been checked against real hardware yet.** They've been tested against known answers, the field solvers and real building files. The first measurements you add are what will show how far to trust them.
 
@@ -295,15 +301,27 @@ always mates two ports exactly; nothing is lined up by eye.
 
 ## Antenna Studio
 
-A workspace for designing one antenna, in the workflow of HFSS, CST Microwave Studio and FEKO: the **Antenna
-Design** workbench in the ribbon, or **Antenna** in the start dialog; it needs no scene. While it is in front, the
+A workspace for designing one antenna, in the workflow of HFSS, CST Microwave Studio and FEKO: **Antenna** in the
+start dialog or in the ribbon's workspace list; it needs no scene. While it is in front, the
 top bar's name and Save, Ctrl+S and the File menu act on the antenna project. A `--no-default-features` build leaves it out.
 
 **Flow.** Pick one of 44 templates, draw your own on the canvas, or import a DXF or Gerber drawing. Set the design
 frequency and edit the variable table; everything is an expression (`0.47*lambda0`, `12mm`, `er`). Run. The results
 pages, array, matching and exports all work from that run.
 
-**Drawing.** The Draw page puts tools on the canvas: rectangle, polygon, strip, circle, and a Cut option for holes and
+**The window.** On the left, the *Project* tree: objects with the steps that made them, coordinate systems, ports,
+boundary conditions, meshing, results, materials and settings. Under it, *Parameters*: the numbers of whatever's picked
+in the tree or on the model, in a grid to type in, including a sheet's thickness and the dimensions of the sketch it came
+from. Along the bottom, *Variables* (name, expression, value, optimizable, min, max, and which part uses them), *Messages*
+and *Jobs*. Every tool is on the ribbon; a page with more to say, like a plot, opens on the right and closes again.
+
+**Modelling.** Pick a shape on the *Model* tab and click on the grid: a box takes a corner, a size and a height, with the
+numbers there to type at each step, and what's typed stays as typed, so a variable's name stays a variable. Right-click any
+number in Parameters for *Add variable*, which names it, or *Use variable*. Copy and paste make separate objects with their
+own dimensions. A flat sheet can be given a thickness: FDTD and FDM cut the real slab, while the method of moments keeps a
+sheet. New shapes go on the work plane (XY, XZ or YZ) in the coordinate system in use, in bold in the tree.
+
+**Drawing flat parts.** *Flat parts* on the Design tab puts tools on the canvas: rectangle, polygon, strip, circle, and a Cut option for holes and
 slots. Points snap to the grid and to existing corners, on whichever plane and height you choose. Select drags a shape
 or its corners, double-clicking an edge adds a corner, and right-clicking a corner removes it; every corner can also be
 typed exactly. Feed clicks across a gap and lands on the metal along an axis; Probe joins two sheets. Ctrl+Z undoes. A
@@ -336,7 +354,7 @@ against hand-written files in the R2000 layout, not files from other CAD program
 
 None of the array, direction-finding, chain or radar work has been measured on hardware. Solved arrays are labelled Simulated, and everything else Estimate.
 
-**Designing an RFID tag.** The *Design an RFID tag* page, and the assistant's `antenna_tag_design`, search different structures rather than adjust a reference: T-match meander, a loop coupled to a separate radiator, a loop with two radiators, dogbone, bow-tie with a hairpin, slotted plate, square spiral, fractal arms and bent arms, plus any shape drawn for the job, against a chip, a band, a footprint and what the tag is really in. They're judged by forward-link read range across the band, and several options come back with what each stands out for and what it does if its surroundings change. A retune says what new surroundings do to an existing design, such as putting it under paper, and what small changes get back. *Evolve* lays out metal cell by cell with no assumed shape. The assistant can also draw any shape from a description with `antenna_draw`, every coordinate an expression over the variable table, so it can be swept, optimised or searched by name.
+**Designing an RFID tag.** The *Design an RFID tag* page, and the assistant's `antenna_tag_design`, search different structures rather than adjust a reference: T-match meander, a loop coupled to a separate radiator, a loop with two radiators, dogbone, bow-tie with a hairpin, slotted plate, square spiral, fractal arms and bent arms, plus any shape drawn for the job, against a chip, a band, a footprint and what the tag is really in. They're judged by forward-link read range across the band, and several options come back with what each stands out for and what it does if its surroundings change. A retune says what new surroundings do to an existing design, such as putting it under paper, and what small changes get back. *Evolve* lays out metal cell by cell with no assumed shape. The assistant can also draw any shape from a description with `antenna_draw`, every coordinate an expression over the variable table, so it can be swept, optimised or searched by name. A drawing with dimensions typed in as plain numbers is refused, so whatever it draws can be changed later by changing a variable, and one part can be replaced without redrawing the rest. Given a photo of a sketch, the assistant first turns and crops it with `antenna_sketch_view`, reads a closed outline as filled metal, and keeps any labels on it, such as A1, as the variables' names. Each drawing then comes back under that view, the same way up, with how symmetric it measures about its feed and a warning if it fits the pen strokes better flipped.
 
 **Layers around flat metal.** Paper, PET, glue, a carton, glass, a bottle of water or a metal surface behind a spacer can lie over and under flat metal in one plane. The method of moments carries them in its Green's function (MPIE in layered media, Michalski and Zheng 1990), so a 20 µm film adds no unknowns and solves in under a second. Layers are as wide as the world there, and a surface wave along them counts as loss. FDTD builds the same layers to size, at a cost. Air layers land on the free-space solve, and metal behind air lands on the image solve to the digits shown; a strip on a thick slab shifts by the average permittivity's root (1.250 against 1.245). Against openEMS building the same layers, strip dipoles under 1 mm of paper and on 1.6 mm of FR-4 resonate within 0.23 % and 0.57 %. On a small loop the two disagree: openEMS reads reactance 15 to 20 % low near 915 MHz, moving towards the method of moments as its mesh refines, while the method of moments agrees with the thin-wire solver and the textbook inductance at low frequency. A tag's chip match depends on that reactance, so measure a built tag and retune before relying on a range figure. Paper, PET, adhesive and corrugated board values are typical or assumed, and no tag from here has been measured.
 
@@ -359,13 +377,13 @@ UHF: E-field coupling to dipole tags. HF (13.56 MHz) loop gates are not covered.
 | Import DXF, Gerber | yes, and ODB++, STEP | DXF and Gerber; no ODB++ or STEP |
 | Near-field read-zone test under several excitation states | scripted by hand | RFID gate test: read rate, stray reads, EIRP, phase search |
 | Switches and varactors, every state from one solve | circuit co-simulation, set up by hand | Reconfigurable page: parts with bias and mounts, states, search per target, RF stress on each part, tuning curves |
-| Material library, lossy dielectrics and metals | yes, with dispersion | 31 materials, constant εr and tan δ (water's loss follows Debye), conductivity |
-| Time-domain solver (CST T-solver) | FIT | openEMS FDTD |
+| Material library, lossy dielectrics and metals | yes, with dispersion | 31 materials, constant εr and tan δ (water's loss follows Debye), conductivity. The built-in solver takes water as a true Debye material; Lorentz and Drude aren't available |
+| Time-domain solver (CST T-solver) | FIT | built-in FDM with subcell metal and layers, on CPU or GPU, nothing to install; openEMS as an optional cross-check. On two patches someone else built and measured it lands within 0.3 % of that paper's HFSS and 1 % of its CST, and like them about 3 % from the hardware. HFSS and CST haven't been run here, and nothing built for this project has been measured: see [docs/fit](docs/fit/README.md) |
 | Method of moments (FEKO) | MLFMM, multilayer | wire and RWG surface MoM, dense LU; metal in free space or over an infinite ground; no dielectrics, no MLFMM |
 | Frequency-domain FEM (HFSS) | adaptive tetrahedra | **not available**; the mesh convergence study is the closest thing |
 | Lumped ports, several per model, full S-matrix | yes | yes |
 | Lumped RLC loads | yes | yes, as fixed parts on the Reconfigurable page |
-| Waveguide, wave and microstrip ports | yes | **not available**; probes and lumped ports stand in |
+| Waveguide, wave and microstrip ports | yes | wave ports on quasi-TEM lines (microstrip, stripline, coax) in the built-in solver, CPU and GPU, from the Draw page or the assistant; **no waveguide modes**; probes and lumped ports stand in |
 | S-parameters, VSWR, Z, Y, group delay, Q, TDR, Smith chart | yes | yes |
 | Far field: directivity, gain, realized gain, efficiencies, θ/φ, RHCP/LHCP, Ludwig 3, axial ratio, beam width, side lobes, front/back | yes | yes, with a 3D pattern and polar cuts |
 | Near field and surface currents | yes | field planes (FDTD), currents per element (MoM) |
@@ -375,19 +393,23 @@ UHF: E-field coupling to dipole tags. HF (13.56 MHz) loop gates are not covered.
 | MIMO: ECC, diversity gain, TARC, active S | yes | yes |
 | RCS | yes | monostatic and bistatic, MoM, metal only |
 | Parameter sweep, optimiser, sensitivity, Monte-Carlo yield | yes | yes: 1D/2D sweeps; Nelder-Mead, particle swarm, differential evolution, surrogate; yield with sensitivities |
-| Mesh refinement study | adaptive passes | yes, repeated solves |
+| Mesh refinement study | adaptive passes | yes, repeated solves; field-driven passes exist in the built-in solver's API, not yet in the app, and on the patch tried they saved no cells over uniform refinement |
 | Touchstone, far-field files, report | yes | `.sNp`, `.ffe`, `.ffd`, CSV, one-page HTML |
 | Fabrication output | yes | Gerber, DXF, STL |
 | SAR | yes | a design-stage pre-check only (`design_sar`): flat tissue, field read in two planes, never a compliance result |
 | Thermal, EMC, antenna placement on a platform | yes | **not available**, apart from using the pattern in this app's positioning planner |
-| GPU acceleration, HPC | yes | no; openEMS runs on CPU threads |
+| GPU acceleration, HPC | yes | the built-in solver on any Vulkan GPU, about 1 billion cell updates a second on an RTX A2000 at 64 M cells, and from 0.3 M cells it is the default; no HPC. openEMS here runs on CPU threads |
 
-**Solvers.** *Automatic* picks MoM when a model is only metal and needs at most 6000 unknowns, FDTD otherwise.
-openEMS is the same managed install as the RF solver.
+**Solvers.** *Automatic* picks MoM when a model is only metal and needs at most 6000 unknowns, and the built-in
+finite-difference solver otherwise, which needs nothing installed. Everything else that runs a finite-difference model, the
+RTLS antenna, through-object and whole-scene runs, the RFID gate's aisle field, SAR and the hardware recipes, runs on it too.
+openEMS is optional: installed, it can be named on the Setup page or chosen on the field-solver card as a second opinion.
+This changed the default from openEMS with no antenna of this project's measured yet, on the strength of the published
+patches and the benchmarks in [docs/fit](docs/fit/README.md).
 
 **How far to trust it.** Tests compare against textbook values, and `cargo test -p antenna_core` runs in under a
-minute without building the app. These figures come from those tests; the FDTD rows need openEMS, with
-`cargo test --bin SenseSim antenna_fdtd -- --ignored`:
+minute without building the app. These figures come from those tests; the FDTD rows are openEMS, with
+`SENSESIM_FDTD=openems cargo test --bin SenseSim antenna_fdtd -- --ignored`:
 
 | Check | Reference | Result |
 |---|---|---|
@@ -470,7 +492,7 @@ Radio links are ray cast against the placed USD objects, so shelves, cabinets an
 
 ### One-button deployment, built-in OpenEMS (RTLS v2)
 
-The steps run across two workbenches, each opening a card beside the tree: *Deploy* is in **Placement**, with
+The steps run across two workspaces, each opening a card beside the tree: *Deploy* is in **Plan**, with
 devices & zones, inspector, planning and settings; *Test live* and *OpenEMS Edge* are in **Simulation**, with
 live data, RF analysis and outputs:
 

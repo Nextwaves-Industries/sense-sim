@@ -159,7 +159,7 @@ fn page_rows(ui: &mut egui::Ui, w: f32, bench: Workbench, slot: &mut LeftPanelSl
         (d, z) => format!("{d} · {z} zones"),
     };
     let rows: Vec<(Page, &str, &str, Dot, &str)> = match bench {
-        Workbench::Placement => vec![
+        Workbench::Plan => vec![
             (Page::Deploy, "Deploy", icon::ROCKET_LAUNCH, st.deploy, ""),
             (Page::Tool(Tab::Devices), "Devices & zones", icon::BROADCAST, if st.devices > 0 { Dot::Done } else { Dot::Optional }, &devices_note),
             (Page::Tool(Tab::Inspector), "Inspector", icon::INFO, Dot::Optional, ""),

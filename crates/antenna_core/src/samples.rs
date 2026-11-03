@@ -376,6 +376,27 @@ impl Sample {
 mod tests {
     use super::*;
     use crate::geometry::Geometry;
+
+    /// Every antenna is drawn at the origin: the floor's axes cross on it, and nothing looks adrift.
+    /// What's held up has to be. A gate's z is the height its test reads tags at, and a dipole over a
+    /// ground plane belongs a quarter wave above it.
+    #[test]
+    fn everything_stands_at_the_origin() {
+        let check = |name: &str, p: &Project| {
+            let g = p.scatterer().unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            let (lo, hi) = g.bounds();
+            let held_up = g.ground || p.template == "rfid_gate";
+            for k in 0..if held_up { 2 } else { 3 } {
+                assert!(lo[k] <= 1e-9 && hi[k] >= -1e-9, "{name}: axis {k} runs {:.2} to {:.2} mm, missing the origin", lo[k] * 1e3, hi[k] * 1e3);
+            }
+        };
+        for t in templates::all().iter().filter(|t| t.id != "custom") {
+            check(t.id, &Project::from_template(t.id, None).unwrap());
+        }
+        for s in all() {
+            check(s.id, &s.project().unwrap());
+        }
+    }
     use crate::mom::{MomOptions, MomProblem};
     use crate::project::SolverKind;
     use crate::sparam::Network;

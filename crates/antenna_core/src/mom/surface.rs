@@ -404,7 +404,7 @@ impl SurfaceModel {
         let materials = mesh
             .solid
             .iter()
-            .map(|s| s.and_then(|i| material::by_name(&geom.solids[i].material).filter(|m| !matches!(m.kind, material::MatKind::Pec)).map(|m| (m, if geom.solids[i].shape.is_sheet() { 0.5 } else { 1.0 }))))
+            .map(|s| s.and_then(|i| material::by_name(&geom.solids[i].material).filter(|m| !matches!(m.kind, material::MatKind::Pec)).map(|m| (m, if geom.solids[i].shape.meshed_as_sheet() { 0.5 } else { 1.0 }))))
             .collect();
         let mut notes = facing_sheets(geom, lambda);
         let quality = mesh.quality();

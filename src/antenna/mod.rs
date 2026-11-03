@@ -6,7 +6,9 @@
 
 pub mod assist;
 pub mod gate;
+pub mod model_tools;
 pub mod phased;
+pub mod picture;
 pub mod reconfig;
 pub mod run;
 pub mod tagjob;
@@ -152,6 +154,12 @@ pub struct Studio {
     children: Arc<Mutex<Vec<(u64, std::process::Child)>>>,
     shared: Arc<Mutex<Shared>>,
     pub ui: ui::StudioUi,
+    /// The picture being drawn from, as the assistant last turned and cropped it.
+    pub sketch: Option<picture::Sketch>,
+    /// The attached picture the assistant was last told to look at before drawing.
+    sketch_asked: Option<String>,
+    /// It's been asked whether a closed path in this sketch is really a wire.
+    outline_asked: bool,
 }
 
 impl Default for Studio {
@@ -163,6 +171,9 @@ impl Default for Studio {
             children: Arc::new(Mutex::new(Vec::new())),
             shared: Arc::new(Mutex::new(Shared::default())),
             ui: ui::StudioUi::default(),
+            sketch: None,
+            sketch_asked: None,
+            outline_asked: false,
         }
     }
 }
@@ -453,7 +464,7 @@ impl Studio {
             // A wire pass is cheap, so it can double. On FDTD or a surface 1.5 already
             // costs 5 and 11 times the pass before, and the error left is weighed instead.
             let (start, ratio) = match solver {
-                SolverKind::Fdtd => (base.setup.cells_per_lambda, 1.5),
+                SolverKind::Fdtd | SolverKind::Fit => (base.setup.cells_per_lambda, 1.5),
                 SolverKind::MomWire => (base.setup.segments_per_lambda, 2.0),
                 _ => (base.setup.edges_per_lambda, 1.5),
             };
@@ -465,7 +476,7 @@ impl Studio {
                 let mut p = base.clone();
                 p.setup.field_planes = false;
                 match solver {
-                    SolverKind::Fdtd => p.setup.cells_per_lambda = density,
+                    SolverKind::Fdtd | SolverKind::Fit => p.setup.cells_per_lambda = density,
                     SolverKind::MomWire => p.setup.segments_per_lambda = density,
                     _ => p.setup.edges_per_lambda = density,
                 }
@@ -594,6 +605,32 @@ pub struct AntennaPlugin;
 impl Plugin for AntennaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Studio>();
+        app.add_systems(Update, hand_to_assistant);
+    }
+}
+
+/// Carries what the Design an RFID tag page asks for over to the assistant, which the page can't reach,
+/// and how the assistant is doing back again. It opens the panel either way, because that's where the
+/// work shows, or where it says what's stopping it. Anything already being typed goes along with it.
+fn hand_to_assistant(mut studio: ResMut<Studio>, agent: Option<ResMut<crate::agent::Agent>>, bridge: Option<Res<crate::agent::tools::ToolBridge>>) {
+    let (Some(mut agent), Some(bridge)) = (agent, bridge) else { return };
+    let blocked = agent.blocker();
+    if studio.ui.tag.assistant_busy != agent.running {
+        studio.ui.tag.assistant_busy = agent.running;
+    }
+    if studio.ui.tag.assistant_blocked != blocked {
+        studio.ui.tag.assistant_blocked = blocked.clone();
+    }
+    if studio.ui.tag.to_assistant.is_none() {
+        return;
+    }
+    let Some(request) = studio.ui.tag.to_assistant.take() else { return };
+    agent.open = true;
+    let typing = agent.input.trim().to_string();
+    agent.input = if typing.is_empty() { request } else { format!("{request}\n\n{typing}") };
+    // With no key it stays in the box for when there is one, and the panel says what's missing.
+    if blocked.is_none() {
+        agent.send(&bridge);
     }
 }
 

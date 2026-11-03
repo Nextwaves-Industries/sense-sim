@@ -1,0 +1,17 @@
+[package]
+name = "fdtd_kernel"
+version = "0.1.0"
+edition = "2024"
+description = "Finite-integration time-domain field solver: FIT on a rectilinear grid, subcell metal from local static fields, CPML, lumped ports, near-field recording. No UI and no dependency on the rest of Sense Sim."
+
+[dependencies]
+num-complex = "0.4"
+rayon = "1"
+
+wgpu = { version = "30", default-features = false, features = ["std", "vulkan", "wgsl", "parking_lot"], optional = true }
+pollster = { version = "0.4", optional = true }
+anyhow = { version = "1", optional = true }
+
+[features]
+# The time stepper on a GPU, through wgpu compute shaders.
+gpu = ["dep:wgpu", "dep:pollster", "dep:anyhow"]

@@ -3,11 +3,12 @@
 //! what fits at the caret as you type. Up and Down move in the list, Enter or Tab take
 //! the choice, Esc closes it, and Ctrl+Space opens it without typing. What each piece
 //! is and what fits are worked out by [`antenna_core::expr`]; this only shows them.
+//! A field holding a plain number can also be dragged, or scrolled while it's being typed in.
 
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use antenna_core::expr::{self, Completions, TokenKind};
+use antenna_core::expr::{self, Completions, PlainNumber, TokenKind};
 use antenna_core::project::{Project, VarHint};
 use bevy_egui::egui::{self, Color32, FontId, Key, Modifiers, Order, Response, Sense, Stroke, TextEdit, TextFormat, vec2};
 
@@ -175,9 +176,142 @@ fn show_list(ctx: &egui::Context, id: egui::Id, field: egui::Rect, set: &Complet
     (clicked, area.response.contains_pointer())
 }
 
-/// An expression field. `own` is the variable this expression defines, if it does.
-/// `edit` makes the field itself, so a caller sets its size and whether it wraps.
-pub fn expr_field(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String, table: &VarTable, own: Option<&str>, edit: impl for<'t> FnOnce(&'t mut String) -> TextEdit<'t>) -> Response {
+/// A drag on a field holding a plain number, from where it began.
+#[derive(Clone)]
+struct Scrub {
+    number: PlainNumber,
+    /// As it was typed, to go back to exactly if the drag comes back to where it started.
+    start: String,
+    /// Steps moved so far: added up, so pressing Shift partway doesn't make the value jump.
+    moved: f64,
+    decimals: usize,
+}
+
+impl Scrub {
+    /// The text for how far it's moved, at `step` a step.
+    fn written(&self, step: f64) -> String {
+        if self.moved.abs() < 1e-9 { self.start.clone() } else { self.number.text(self.number.value + self.moved * step, self.decimals) }
+    }
+}
+
+/// Shift for a tenth of the step, Ctrl for ten of them.
+fn step_scale(ctx: &egui::Context) -> f64 {
+    ctx.input(|i| if i.modifiers.shift { 0.1 } else if i.modifiers.ctrl { 10.0 } else { 1.0 })
+}
+
+fn scrub_frame() -> egui::Id {
+    egui::Id::new("expr_field_scrub_frame")
+}
+
+/// A field is being dragged, and not for the first frame. The pages count one edit per field by
+/// whether the keyboard is in one, and a drag never puts it there; this keeps a drag to one undo.
+/// The first frame is left out so that a drag right after typing is an undo step of its own.
+pub fn scrubbing(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<u64>(scrub_frame())) == Some(ctx.cumulative_frame_nr())
+}
+
+/// The drag on a field that isn't being typed in: changes `text`, or on a plain click, puts the caret
+/// where it landed. Gives what the field's response has to take on.
+fn scrub(ui: &egui::Ui, id: egui::Id, rect: egui::Rect, text: &mut String, unit: Option<&str>, caret_at: impl Fn(egui::Pos2) -> egui::text::CCursor) -> (Response, bool) {
+    let ctx = ui.ctx().clone();
+    let state_id = id.with("scrub_state");
+    // Not focusable: Tab should go on stopping only at the field itself.
+    let over = ui.interact(rect, id.with("scrub"), Sense::CLICK | Sense::DRAG);
+    if over.hovered() || over.dragged() {
+        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    let mut changed = false;
+    if over.drag_started() {
+        // Whatever was being typed in ends here, as a click elsewhere would end it.
+        ctx.memory_mut(|m| {
+            if let Some(f) = m.focused() {
+                m.surrender_focus(f);
+            }
+        });
+        if let Some(number) = PlainNumber::read(text, unit) {
+            let decimals = number.decimals_for(number.drag_step());
+            ctx.data_mut(|d| d.insert_temp(state_id, Scrub { number, start: text.clone(), moved: 0.0, decimals }));
+        }
+    } else if over.dragged()
+        && let Some(mut s) = ctx.data(|d| d.get_temp::<Scrub>(state_id))
+    {
+        let d = over.drag_delta();
+        let scale = step_scale(&ctx);
+        let step = s.number.drag_step();
+        // Right and up for more, as on the app's other number fields.
+        s.moved += (d.x - d.y) as f64 * scale;
+        s.decimals = s.decimals.max(s.number.decimals_for(step * scale));
+        let now = s.written(step);
+        changed = now != *text;
+        *text = now;
+        // Read first: asking the context anything while it's locked for writing never returns.
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|d| {
+            d.insert_temp(state_id, s);
+            d.insert_temp(scrub_frame(), frame);
+        });
+    }
+    let held_still = over.drag_stopped() && ctx.data(|d| d.get_temp::<Scrub>(state_id)).is_some_and(|s| s.moved == 0.0);
+    if over.drag_stopped() {
+        ctx.data_mut(|d| d.remove::<Scrub>(state_id));
+    }
+    if over.clicked() || held_still {
+        let mut state = TextEdit::load_state(&ctx, id).unwrap_or_default();
+        let at = over.interact_pointer_pos().map_or_else(|| egui::text::CCursor::new(text.chars().count()), caret_at);
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(at)));
+        state.store(&ctx, id);
+        ctx.memory_mut(|m| m.request_focus(id));
+    }
+    (over, changed)
+}
+
+/// The wheel over the field being typed in. Only that one: a value that changed because the panel
+/// was being scrolled and a field happened to pass under the pointer is a design silently altered.
+fn wheel(ui: &egui::Ui, id: egui::Id, number: &PlainNumber, text: &mut String) -> bool {
+    let ctx = ui.ctx();
+    let notches: f32 = ctx.input_mut(|i| {
+        // Every frame the pointer's here, as what's left of a scroll carries on for a few.
+        i.smooth_scroll_delta = egui::Vec2::ZERO;
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, .. } => Some(delta.x + delta.y),
+                egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, .. } => Some((delta.x + delta.y) / 50.0),
+                egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Page, delta, .. } => Some((delta.x + delta.y) * 10.0),
+                _ => None,
+            })
+            .sum()
+    });
+    if notches == 0.0 {
+        return false;
+    }
+    // Held from the first notch until the field's typed in or left, not read again from the text:
+    // so ten up and ten down come back to where they began even if the number passed 10 on the way
+    // or went through a bare zero, and a touchpad's fractions of a notch add up.
+    let state_id = wheel_state(id);
+    // Unless the text isn't what it left there: then something else has changed it, and that counts.
+    let held = ctx.data(|d| d.get_temp::<Scrub>(state_id)).filter(|s| s.written(s.number.wheel_step()) == *text);
+    let mut s = held.unwrap_or_else(|| Scrub { number: number.clone(), start: text.clone(), moved: 0.0, decimals: 0 });
+    let scale = if s.number.whole { step_scale(ctx).max(1.0) } else { step_scale(ctx) };
+    let step = s.number.wheel_step();
+    s.moved += notches as f64 * scale;
+    s.decimals = s.decimals.max(s.number.decimals_for(step * scale));
+    let now = s.written(step);
+    let changed = now != *text;
+    *text = now;
+    ctx.data_mut(|d| d.insert_temp(state_id, s));
+    changed
+}
+
+fn wheel_state(id: egui::Id) -> egui::Id {
+    id.with("wheel_state")
+}
+
+/// An expression field. `own` is the variable this expression defines, if it does. `unit` is what
+/// it measures, if it knows; see [`PlainNumber::read`]. `edit` makes the field itself, so a caller
+/// sets its size and whether it wraps. While it holds a plain number, a drag on it changes the
+/// number, a click starts typing, and once typing the wheel over it changes the number.
+pub fn expr_field(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String, table: &VarTable, own: Option<&str>, unit: Option<&str>, edit: impl for<'t> FnOnce(&'t mut String) -> TextEdit<'t>) -> Response {
     let id = ui.make_persistent_id(salt);
     let list_id = id.with("list");
     let ctx = ui.ctx().clone();
@@ -227,6 +361,7 @@ pub fn expr_field(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String,
     };
     let output = edit(text).id(id).layouter(&mut layouter).show(ui);
     let cursor = output.cursor_range;
+    let (galley, galley_pos) = (output.galley.clone(), output.galley_pos);
     let mut response = output.response.response;
     if response.changed() {
         list.open = response.has_focus();
@@ -234,6 +369,27 @@ pub fn expr_field(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String,
     }
     if accepted {
         response.mark_changed();
+    }
+    // What the wheel's been going by no longer applies.
+    if response.changed() || response.lost_focus() {
+        ctx.data_mut(|d| d.remove::<Scrub>(wheel_state(id)));
+    }
+    // A variable written as a bare 0 has nothing to say what it measures: 1 might be a metre.
+    let number = PlainNumber::read(text, unit).filter(|n| own.is_none() || n.value != 0.0 || !n.suffix.is_empty());
+    if response.has_focus() {
+        if let Some(number) = number.filter(|_| !list.open && ui.rect_contains_pointer(response.rect))
+            && wheel(ui, id, &number, text)
+        {
+            response.mark_changed();
+        }
+    } else if number.is_some() && ui.is_enabled() {
+        let caret_at = |at: egui::Pos2| galley.cursor_from_pos(at - galley_pos);
+        let (over, changed) = scrub(ui, id, response.rect, text, unit, caret_at);
+        // Hover text and the like belong to the field, which is underneath.
+        response = response.union(over);
+        if changed {
+            response.mark_changed();
+        }
     }
     if !response.has_focus() && !list.hovered {
         list.open = false;
@@ -268,7 +424,329 @@ pub fn expr_field(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String,
     response
 }
 
-/// An expression field on one line.
+fn line(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String, table: &VarTable, width: f32, unit: Option<&str>) -> Response {
+    // A grid hands a cell only as much room as its column had last frame, so without a floor a column
+    // that starts narrow stays narrow, and `a1+10mm` wraps a word to a line.
+    expr_field(ui, salt, text, table, None, unit, |t| TextEdit::singleline(t).desired_width(width).min_size(egui::vec2(width, 0.0)))
+}
+
+/// An expression field on one line, for a count or anything else with no unit of its own.
 pub fn expr_line(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String, table: &VarTable, width: f32) -> Response {
-    expr_field(ui, salt, text, table, None, |t| TextEdit::singleline(t).desired_width(width))
+    line(ui, salt, text, table, width, None)
+}
+
+/// An expression field on one line, for a length.
+pub fn length_line(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String, table: &VarTable, width: f32) -> Response {
+    line(ui, salt, text, table, width, Some("mm"))
+}
+
+/// An expression field on one line, for an angle that takes a unit.
+pub fn angle_line(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String, table: &VarTable, width: f32) -> Response {
+    line(ui, salt, text, table, width, Some("deg"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_egui::egui::{Event, MouseWheelUnit, PointerButton, Pos2, RawInput, Rect, TouchPhase};
+
+    /// The field on its own, played real pointer events a frame at a time.
+    struct Bench {
+        ctx: egui::Context,
+        table: VarTable,
+        text: String,
+        rect: Rect,
+        time: f64,
+        focused: bool,
+        changed: bool,
+        going: bool,
+        scroll_left: egui::Vec2,
+        modifiers: egui::Modifiers,
+    }
+
+    impl Bench {
+        fn new(text: &str) -> Self {
+            let project = Project::from_template("custom", Some("1GHz")).unwrap();
+            let mut b = Self { ctx: egui::Context::default(), table: VarTable::of(&project), text: text.into(), rect: Rect::NOTHING, time: 0.0, focused: false, changed: false, going: false, scroll_left: egui::Vec2::ZERO, modifiers: egui::Modifiers::NONE };
+            // A widget can only be hit once it's been laid out.
+            b.frame(vec![]);
+            b.frame(vec![]);
+            b
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 0.05;
+            let mut all = vec![Event::ModifiersChanged(self.modifiers)];
+            all.extend(events);
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), time: Some(self.time), predicted_dt: 0.05, events: all, ..Default::default() };
+            let ctx = self.ctx.clone();
+            let mut out = ctx.run_ui(input, |ui| {
+                let r = length_line(ui, "field", &mut self.text, &self.table, 120.0);
+                self.rect = r.rect;
+                self.focused = r.has_focus();
+                self.changed |= r.changed();
+                self.going = scrubbing(ui.ctx());
+                self.scroll_left = ui.input(|i| i.smooth_scroll_delta);
+            });
+            // Nothing draws this frame, and epaint panics if its texture updates are dropped unapplied.
+            out.textures_delta.clear();
+        }
+
+        fn middle(&self) -> Pos2 {
+            self.rect.center()
+        }
+
+        fn button(&mut self, at: Pos2, pressed: bool) {
+            self.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: self.modifiers }]);
+        }
+
+        fn drag(&mut self, steps: &[f32]) {
+            let at = self.middle();
+            self.frame(vec![Event::PointerMoved(at)]);
+            self.button(at, true);
+            for dx in steps {
+                self.frame(vec![Event::PointerMoved(at + vec2(*dx, 0.0))]);
+            }
+            self.button(at + vec2(*steps.last().unwrap(), 0.0), false);
+            self.frame(vec![]);
+        }
+
+        fn click(&mut self) {
+            let at = self.middle();
+            self.frame(vec![Event::PointerMoved(at)]);
+            self.button(at, true);
+            self.button(at, false);
+            self.frame(vec![]);
+        }
+
+        fn wheel(&mut self, notches: f32) {
+            let at = self.middle();
+            self.frame(vec![Event::PointerMoved(at)]);
+            self.frame(vec![Event::MouseWheel { unit: MouseWheelUnit::Line, delta: vec2(0.0, notches), phase: TouchPhase::Move, modifiers: self.modifiers }]);
+        }
+    }
+
+    #[test]
+    fn dragging_a_number_changes_it_and_keeps_its_unit() {
+        let mut b = Bench::new("70mm");
+        // Past the distance that makes it a drag, then three points at a time, at 0.1 a point.
+        b.drag(&[10.0, 13.0, 16.0]);
+        assert_eq!(b.text, "70.6mm");
+        assert!(b.changed);
+        assert!(!b.focused, "a drag doesn't start typing");
+    }
+
+    #[test]
+    fn dragging_left_takes_away_and_coming_back_restores_what_was_typed() {
+        let mut b = Bench::new("1.50mm");
+        b.drag(&[10.0, 5.0]);
+        assert_eq!(b.text, "1.45mm");
+        // Back to where it began, the text is as it was typed, trailing zero and all.
+        let mut b = Bench::new("1.50mm");
+        b.drag(&[10.0, 15.0, 10.0]);
+        assert_eq!(b.text, "1.50mm");
+    }
+
+    #[test]
+    fn a_bare_zero_in_a_length_field_becomes_millimetres() {
+        let mut b = Bench::new("0");
+        b.drag(&[10.0, 13.0]);
+        assert_eq!(b.text, "0.03mm", "not 0.03, which would be 30 mm");
+    }
+
+    #[test]
+    fn shift_is_finer_and_ctrl_is_coarser() {
+        let mut b = Bench::new("70mm");
+        b.modifiers = egui::Modifiers::SHIFT;
+        b.drag(&[10.0, 13.0]);
+        assert_eq!(b.text, "70.03mm");
+        let mut b = Bench::new("70mm");
+        b.modifiers = egui::Modifiers::CTRL;
+        b.drag(&[10.0, 13.0]);
+        assert_eq!(b.text, "73mm");
+    }
+
+    #[test]
+    fn a_click_starts_typing_and_changes_nothing() {
+        let mut b = Bench::new("70mm");
+        b.click();
+        assert!(b.focused);
+        assert_eq!(b.text, "70mm");
+        assert!(!b.changed);
+    }
+
+    #[test]
+    fn once_typing_a_drag_selects_text_as_it_always_did() {
+        let mut b = Bench::new("70mm");
+        b.click();
+        b.drag(&[10.0, 16.0]);
+        assert_eq!(b.text, "70mm");
+        assert!(b.focused);
+    }
+
+    #[test]
+    fn a_formula_has_no_number_to_drag() {
+        for formula in ["f0/2", "2*3mm"] {
+            let mut b = Bench::new(formula);
+            b.drag(&[10.0, 30.0]);
+            assert_eq!(b.text, formula);
+            assert!(b.focused, "it selects text, as before");
+        }
+    }
+
+    #[test]
+    fn a_drag_after_its_first_frame_counts_as_one_edit() {
+        let mut b = Bench::new("70mm");
+        let at = b.middle();
+        b.frame(vec![Event::PointerMoved(at)]);
+        b.button(at, true);
+        b.frame(vec![Event::PointerMoved(at + vec2(10.0, 0.0))]);
+        assert!(!b.going, "the first frame leaves room for a new undo step");
+        b.frame(vec![Event::PointerMoved(at + vec2(13.0, 0.0))]);
+        assert!(b.going);
+        b.frame(vec![Event::PointerMoved(at + vec2(16.0, 0.0))]);
+        assert!(b.going);
+        b.button(at + vec2(16.0, 0.0), false);
+        assert!(!b.going);
+    }
+
+    #[test]
+    fn the_wheel_changes_only_the_field_being_typed_in() {
+        let mut b = Bench::new("70mm");
+        b.wheel(1.0);
+        assert_eq!(b.text, "70mm", "scrolling a panel past a field must not change it");
+        b.click();
+        b.wheel(1.0);
+        assert_eq!(b.text, "71mm");
+        assert_eq!(b.scroll_left, egui::Vec2::ZERO, "and the panel behind it stays put");
+        b.wheel(-2.0);
+        assert_eq!(b.text, "69mm");
+    }
+
+    #[test]
+    fn the_wheel_comes_back_to_where_it_began_across_a_power_of_ten() {
+        let mut b = Bench::new("9.5mm");
+        b.click();
+        for _ in 0..10 {
+            b.wheel(1.0);
+        }
+        assert_eq!(b.text, "10.5mm");
+        for _ in 0..10 {
+            b.wheel(-1.0);
+        }
+        assert_eq!(b.text, "9.5mm");
+    }
+
+    #[test]
+    fn the_wheel_keeps_what_a_bare_number_meant_through_zero() {
+        // 0.01 here is ten millimetres. Passing through 0 mustn't turn it into 0.01mm.
+        let mut b = Bench::new("0.01");
+        b.click();
+        for _ in 0..10 {
+            b.wheel(-1.0);
+        }
+        assert_eq!(b.text, "0");
+        for _ in 0..10 {
+            b.wheel(1.0);
+        }
+        assert_eq!(b.text, "0.01");
+    }
+
+    #[test]
+    fn a_touchpads_fractions_of_a_notch_add_up() {
+        let mut b = Bench::new("70mm");
+        b.click();
+        for _ in 0..3 {
+            let at = b.middle();
+            b.frame(vec![Event::PointerMoved(at)]);
+            b.frame(vec![Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, 20.0), phase: TouchPhase::Move, modifiers: b.modifiers }]);
+        }
+        assert_eq!(b.text, "71mm", "1.2 notches");
+    }
+
+    #[test]
+    fn a_value_changed_from_elsewhere_starts_the_wheel_afresh() {
+        let mut b = Bench::new("70mm");
+        b.click();
+        b.wheel(1.0);
+        assert_eq!(b.text, "71mm");
+        // An undo, or a tool, with the field still in use.
+        b.text = "5mm".into();
+        b.wheel(1.0);
+        assert_eq!(b.text, "5.1mm", "from what's there now, by a step to suit it");
+    }
+
+    #[test]
+    fn leaving_the_field_starts_the_wheel_afresh() {
+        let mut b = Bench::new("70mm");
+        b.click();
+        b.wheel(1.0);
+        let away = egui::pos2(300.0, 250.0);
+        b.frame(vec![Event::PointerMoved(away)]);
+        b.button(away, true);
+        b.button(away, false);
+        b.frame(vec![]);
+        assert!(!b.focused);
+        b.text = "71.5mm".into();
+        b.click();
+        b.wheel(-1.0);
+        assert_eq!(b.text, "70.5mm");
+    }
+
+    #[test]
+    fn a_variable_written_as_a_bare_zero_cannot_be_dragged() {
+        let project = Project::from_template("custom", Some("1GHz")).unwrap();
+        let table = VarTable::of(&project);
+        for (start, moves) in [("0", false), ("0mm", true), ("50", true)] {
+            let ctx = egui::Context::default();
+            let mut text = start.to_string();
+            let mut rect = Rect::NOTHING;
+            let mut frame = |events: Vec<Event>, t: f64, text: &mut String| {
+                let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), time: Some(t), events, ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| {
+                    rect = expr_field(ui, "v", text, &table, Some("mine"), None, |t| TextEdit::singleline(t).desired_width(120.0)).rect;
+                });
+                out.textures_delta.clear();
+                rect
+            };
+            frame(vec![], 0.0, &mut text);
+            let at = frame(vec![], 0.05, &mut text).center();
+            frame(vec![Event::PointerMoved(at)], 0.1, &mut text);
+            frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }], 0.15, &mut text);
+            for (k, dx) in [10.0, 30.0, 50.0].into_iter().enumerate() {
+                frame(vec![Event::PointerMoved(at + vec2(dx, 0.0))], 0.2 + k as f64 * 0.05, &mut text);
+            }
+            frame(vec![Event::PointerButton { pos: at + vec2(50.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }], 0.4, &mut text);
+            assert_eq!(text != start, moves, "{start} became {text}");
+        }
+    }
+
+    #[test]
+    fn tab_stops_only_at_the_fields_themselves() {
+        let project = Project::from_template("custom", Some("1GHz")).unwrap();
+        let table = VarTable::of(&project);
+        let ctx = egui::Context::default();
+        let (mut first, mut second) = ("1mm".to_string(), "2mm".to_string());
+        let mut frame = |events: Vec<Event>, t: f64| -> (Rect, egui::Id) {
+            let (mut rect, mut id) = (Rect::NOTHING, egui::Id::NULL);
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), time: Some(t), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                rect = length_line(ui, "one", &mut first, &table, 120.0).rect;
+                id = length_line(ui, "two", &mut second, &table, 120.0).id;
+            });
+            out.textures_delta.clear();
+            (rect, id)
+        };
+        frame(vec![], 0.0);
+        let (rect, two) = frame(vec![], 0.05);
+        let at = rect.center();
+        frame(vec![Event::PointerMoved(at)], 0.1);
+        frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }], 0.15);
+        frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }], 0.2);
+        frame(vec![], 0.25);
+        let tab = |pressed| Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        frame(vec![tab(true), tab(false)], 0.3);
+        frame(vec![], 0.35);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(two));
+    }
 }

@@ -54,12 +54,18 @@ const KINDS: [(Kind, &str, &str); 7] = [
 ];
 
 /// What the dialog remembers while it is open.
-#[derive(Default)]
 pub struct StartState {
     kind: Kind,
     selected: Option<Item>,
     /// Item under the pointer last frame: previewed on the right.
     hovered: Option<Item>,
+}
+
+impl Default for StartState {
+    /// With nothing open yet, an antenna project is what is offered first.
+    fn default() -> Self {
+        Self { kind: Kind::default(), selected: Some(Item::Antenna), hovered: None }
+    }
 }
 
 impl StartState {
@@ -108,6 +114,9 @@ fn tags(index: usize) -> &'static [&'static str] {
 /// Draws the dialog; returns what the user picked, if anything.
 pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, name: &mut String, antenna: bool) -> Option<Choice> {
     let mut choice = None;
+    if !antenna && st.selected == Some(Item::Antenna) {
+        st.selected = None;
+    }
     let screen = ctx.content_rect();
     let size = vec2(1040.0f32.min(screen.width() - 48.0), 830.0f32.min(screen.height() - 40.0));
     let modal = egui::Modal::new(egui::Id::new("start_modal")).backdrop_color(theme::BACKDROP).frame(theme::modal_frame()).show(ctx, |ui| {
@@ -227,8 +236,8 @@ pub fn show(ctx: &egui::Context, st: &mut StartState, library: &mut Library, nam
         if footer_r.hovered() {
             p.rect_filled(footer.shrink(1.0), 0.0, theme::RAISED);
         }
-        p.text(footer.left_center() + vec2(14.0, 0.0), Align2::LEFT_CENTER, "Have a scene?", theme::bold(15.5), theme::TEXT);
-        p.text(footer.left_center() + vec2(142.0, 0.0), Align2::LEFT_CENTER, "Click here to open a layout you saved earlier.", egui::FontId::proportional(14.0), theme::TEXT);
+        p.text(footer.left_center() + vec2(14.0, 0.0), Align2::LEFT_CENTER, "Have a project?", theme::bold(15.5), theme::TEXT);
+        p.text(footer.left_center() + vec2(142.0, 0.0), Align2::LEFT_CENTER, "Click here to open a scene or antenna project you saved earlier.", egui::FontId::proportional(14.0), theme::TEXT);
         if footer_r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             choice = Some(Choice::Open);
         }

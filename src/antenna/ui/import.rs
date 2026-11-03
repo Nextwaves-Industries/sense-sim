@@ -271,7 +271,7 @@ pub fn panel(ui: &mut egui::Ui, st: &mut Studio) {
                 }
                 match role {
                     LayerRole::Metal => {
-                        super::expr_field::expr_line(ui, ("cad_height", k), &mut l.places[k].height, &table, 66.0);
+                        super::expr_field::length_line(ui, ("cad_height", k), &mut l.places[k].height, &table, 66.0);
                         egui::ComboBox::from_id_salt(("cad_mat", k)).selected_text(l.places[k].material.clone()).width(84.0).show_ui(ui, |ui| {
                             for m in &metal_names {
                                 ui.selectable_value(&mut l.places[k].material, m.clone(), m);

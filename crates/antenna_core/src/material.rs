@@ -85,8 +85,56 @@ impl Material {
     }
 }
 
-/// Everything the Studio offers by default. The name is the id projects refer to.
+/// Materials projects have defined for themselves, for looking up by name deep inside the solvers.
+/// Nothing is taken out: a run still going may need one its project has since dropped.
+static KNOWN: std::sync::RwLock<Vec<Material>> = std::sync::RwLock::new(Vec::new());
+/// Those of the project in hand: what's on offer to choose from.
+static OFFERED: std::sync::RwLock<Vec<Material>> = std::sync::RwLock::new(Vec::new());
+/// Goes up when a material changes, so a build that read one isn't taken from memory.
+static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Makes a project's own materials available by name, and offered.
+pub fn remember_user(list: &[Material]) {
+    if OFFERED.read().is_ok_and(|o| o.as_slice() == list) {
+        return;
+    }
+    if let Ok(mut o) = OFFERED.write() {
+        *o = list.to_vec();
+    }
+    if let Ok(mut known) = KNOWN.write() {
+        for m in list {
+            match known.iter_mut().find(|x| x.name.eq_ignore_ascii_case(&m.name)) {
+                Some(x) if *x == *m => {}
+                Some(x) => {
+                    *x = m.clone();
+                    CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                None => known.push(m.clone()),
+            }
+        }
+    }
+}
+
+/// How many times a project's material has changed, for what's kept across builds.
+pub fn changes() -> u64 {
+    CHANGES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What can be chosen: the built-in materials, then those of the project in hand.
 pub fn library() -> Vec<Material> {
+    let mut all = built_in();
+    if let Ok(o) = OFFERED.read() {
+        for m in o.iter() {
+            if !all.iter().any(|b| b.name.eq_ignore_ascii_case(&m.name)) {
+                all.push(m.clone());
+            }
+        }
+    }
+    all
+}
+
+/// What the Studio offers by default. The name is the id projects refer to.
+pub fn built_in() -> Vec<Material> {
     let d = Material::dielectric;
     let m = Material::metal;
     vec![
@@ -106,6 +154,9 @@ pub fn library() -> Vec<Material> {
         // Rogers' design Dk where it differs from the process Dk (3.38, 3.48, 10.2):
         // that is the value a real resonance lands on.
         d("RO4003C", 3.55, 0.0027),
+        // The figure on the datasheet's first line, which is what papers usually simulate with.
+        d("RO4003C (process Dk)", 3.38, 0.0022),
+        d("RO3003", 3.0, 0.0013),
         d("RO4350B", 3.66, 0.0037),
         d("RT/duroid 5880", 2.2, 0.0009),
         d("RT/duroid 6002", 2.94, 0.0012),
@@ -141,7 +192,10 @@ pub fn library() -> Vec<Material> {
 }
 
 pub fn by_name(name: &str) -> Option<Material> {
-    library().into_iter().find(|m| m.name.eq_ignore_ascii_case(name))
+    if let Some(m) = built_in().into_iter().find(|m| m.name.eq_ignore_ascii_case(name)) {
+        return Some(m);
+    }
+    KNOWN.read().ok()?.iter().find(|m| m.name.eq_ignore_ascii_case(name)).cloned()
 }
 
 #[cfg(test)]

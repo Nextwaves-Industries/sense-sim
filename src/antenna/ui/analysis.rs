@@ -14,6 +14,7 @@ use bevy_egui::egui::{self, vec2};
 use super::charts::{self, ChartOptions, Series};
 use super::{Page, ghz_field, group, tiles, verdict, weak};
 use crate::antenna::Studio;
+use crate::project_file;
 use crate::rtls::antenna::AntennaLibrary;
 use crate::rtls::planning::{AppliedAntenna, FdtdAntenna, Tech};
 use crate::theme::{self, icon};
@@ -499,21 +500,35 @@ pub(crate) fn planner_antenna(r: &SimResult, label: String, axis_forward: bool, 
 /// Writes the project to its file, or asks for one: the first time, on request, or when the
 /// antenna showing is no longer the one in that file.
 pub fn save_project(st: &mut Studio, pick: bool) {
-    let known = st.ui.file.as_ref().filter(|f| !pick && f.is_for(&st.project)).map(|f| f.path.clone());
-    let file_name = format!("{}.antenna.json", slug(&st.project.name));
-    let Some(path) = known.or_else(|| rfd::FileDialog::new().add_filter("Antenna project", &["json"]).set_file_name(file_name).save_file()) else { return };
-    match st.project.to_json().map_err(|e| format!("{e:#}")).and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string())) {
+    let known = st.ui.file.as_ref().filter(|f| !pick && f.is_for(&st.project)).map(|f| project_file::antenna_save_path(&f.path));
+    let file_name = format!("{}.{}", slug(&st.project.name), project_file::EXTENSION);
+    let Some(path) = known.or_else(|| rfd::FileDialog::new().add_filter("Sense Sim project", &[project_file::EXTENSION]).set_file_name(file_name).save_file().map(|p| project_file::save_path(&p))) else { return };
+    match write_project(&st.project, &path) {
         Ok(()) => {
             st.ui.message = Some((format!("Saved {}", path.display()), true));
             st.ui.file = Some(super::ProjectFile { path, saved: st.project.clone() });
         }
-        Err(e) => st.ui.message = Some((format!("Could not save: {e}"), false)),
+        Err(e) => st.ui.message = Some((format!("Could not save: {e:#}"), false)),
     }
 }
 
+fn write_project(project: &Project, path: &std::path::Path) -> anyhow::Result<()> {
+    project_file::write(path, &project_file::antenna_doc(serde_json::to_value(project)?))
+}
+
+/// An antenna project from a `.sesim`, or from the `.antenna.json` earlier versions saved.
+fn read_project(path: &std::path::Path) -> anyhow::Result<Project> {
+    use anyhow::Context;
+    serde_json::from_value(project_file::antenna_in(project_file::read(path)?)).context("this is not a Sense Sim antenna project")
+}
+
 pub fn open_project(st: &mut Studio) {
-    let Some(path) = rfd::FileDialog::new().add_filter("Antenna project", &["json"]).pick_file() else { return };
-    match std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|s| Project::from_json(&s)) {
+    let Some(path) = rfd::FileDialog::new().add_filter("Sense Sim project", &[project_file::EXTENSION]).add_filter("Older antenna project", &["json"]).pick_file() else { return };
+    open_project_at(st, path);
+}
+
+pub fn open_project_at(st: &mut Studio, path: std::path::PathBuf) {
+    match read_project(&path) {
         Ok(project) => {
             st.ui.message = Some((format!("Opened {}", path.display()), true));
             st.ui.file = Some(super::ProjectFile { path, saved: project.clone() });
@@ -626,5 +641,60 @@ pub fn export(ui: &mut egui::Ui, st: &mut Studio, library: &mut AntennaLibrary, 
                 ui.label(format!("Use on all {} infrastructure", a.tech.label()));
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod project_file_tests {
+    use super::*;
+
+    fn folder(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sense-sim-antenna-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_antenna_comes_back_whole_from_its_project_file() {
+        let d = folder("round");
+        let mut p = Project::from_template("tag_loop", None).unwrap();
+        p.params[0].expr = "868MHz".into();
+        p.name = "Dán thử".into();
+        let path = d.join("tag.sesim");
+        write_project(&p, &path).unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(b"PK"), "a container, like every other project");
+        assert!(project_file::holds_antenna(&path));
+        // Reading JSON can move a number by its last digit (1052249999.9999999 Hz comes back as
+        // 1052250000), as it always did for these projects, so it's held to the same as an older file.
+        let as_older_file = Project::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(read_project(&path).unwrap(), as_older_file);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_older_antenna_file_still_opens_and_saving_leaves_it_as_it_was() {
+        let d = folder("old");
+        let p = Project::from_template("dipole", None).unwrap();
+        let old = d.join("Dipole.antenna.json");
+        let text = p.to_json().unwrap();
+        std::fs::write(&old, &text).unwrap();
+        assert_eq!(read_project(&old).unwrap(), p);
+        let new = project_file::antenna_save_path(&old);
+        write_project(&p, &new).unwrap();
+        assert_eq!(new, d.join("Dipole.sesim"));
+        assert_eq!(read_project(&new).unwrap(), p);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_scene_is_not_taken_for_an_antenna() {
+        let d = folder("scene");
+        let path = d.join("warehouse.sesim");
+        project_file::write(&path, &serde_json::json!({ "objects": [], "rtls": { "devices": [] } })).unwrap();
+        assert!(!project_file::holds_antenna(&path));
+        assert!(read_project(&path).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

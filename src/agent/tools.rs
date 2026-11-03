@@ -98,6 +98,10 @@ fn send_and_wait(tx: &Sender<ToolJob>, name: &str, input: Value, ctx: CallCtx, c
     if name == crate::antenna::assist::WAIT {
         return crate::antenna::assist::wait(tx, &input, cancel);
     }
+    #[cfg(feature = "antenna-studio")]
+    if name == crate::antenna::tagjob::TRY {
+        return crate::antenna::tagjob::try_structure(tx, &input, ctx);
+    }
     let (rtx, rrx) = unbounded();
     send_job(tx, ToolJob { name: name.into(), input, reply: rtx, ctx, check_only: false }, rrx, cancel)
 }
@@ -575,7 +579,7 @@ pub fn tool_defs(mcp: bool) -> Vec<ToolDef> {
     ];
     v.push(def(
         "get_screen",
-        "What the user has on screen right now: workbench, open card or workspace, scene, selection, the tool they're using, what is running, and what they did lately. Their message already says this as it stood when they sent it; call this during a long task, when they may have moved on.",
+        "What the user has on screen right now: workspace, open card or workspace, scene, selection, the tool they're using, what is running, and what they did lately. Their message already says this as it stood when they sent it; call this during a long task, when they may have moved on.",
         json!({ "type": "object", "properties": {} }),
     ));
     if mcp {
@@ -1514,6 +1518,11 @@ fn start(world: &mut World, job: ToolJob) -> Option<ToolOutput> {
         "open_layout_tab" => match i["path"].as_str() {
             Some(p) => {
                 let p = PathBuf::from(p);
+                if crate::project_file::holds_antenna(&p) {
+                    let text = format!("opening {} in Antenna, in place of the antenna that was showing", p.display());
+                    crate::ui::open_antenna(world, p);
+                    return Some(ToolOutput::text(text));
+                }
                 let tab = crate::tabs::NewTab { title: crate::tabs::title_of(&p), path: Some(p.clone()), load: Some(p.clone()) };
                 world.resource_mut::<crate::tabs::Tabs>().request(crate::tabs::Request::Open(vec![tab]));
                 ToolOutput::text(format!("opening {} in a new tab; the scene that was open stays in its own tab", p.display()))

@@ -44,6 +44,97 @@ pub fn parse_ghz(src: &str) -> Option<f64> {
     eval(src, &Vars::default()).ok().map(|hz| hz / 1e9)
 }
 
+/// A field holding one number and perhaps a unit: what a drag or the wheel can change. A formula
+/// or a variable has no single number to move, so it isn't one of these.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlainNumber {
+    pub value: f64,
+    /// What follows the number, as typed: `mm`, ` GHz`, or nothing.
+    pub suffix: String,
+    /// How many places it was written to.
+    pub decimals: usize,
+    /// A bare whole number in a field with no unit of its own: a count, which moves in whole steps.
+    pub whole: bool,
+}
+
+impl PlainNumber {
+    /// `unit` is what the field measures, if it knows. A bare zero takes it on, because `0` is the
+    /// same in any unit and `0.01` isn't: left bare, a length would go to ten millimetres.
+    pub fn read(src: &str, unit: Option<&str>) -> Option<Self> {
+        let all = tokens(src, |_| false);
+        let (negative, rest) = match all.split_first() {
+            Some((t, rest)) if &src[t.start..t.end] == "-" => (true, rest),
+            Some((t, rest)) if &src[t.start..t.end] == "+" => (false, rest),
+            _ => (false, all.as_slice()),
+        };
+        let (number, has_unit) = match rest {
+            [n] if n.kind == TokenKind::Number => (n, false),
+            [n, u] if n.kind == TokenKind::Number && u.kind == TokenKind::Unit => (n, true),
+            _ => return None,
+        };
+        let digits = &src[number.start..number.end];
+        let size: f64 = digits.parse().ok()?;
+        if !size.is_finite() {
+            return None;
+        }
+        let (mantissa, exponent) = match digits.split_once(['e', 'E']) {
+            Some((m, e)) => (m, e.parse::<i32>().ok()?),
+            None => (digits, 0),
+        };
+        let written = mantissa.split_once('.').map_or(0, |(_, f)| f.len()) as i32;
+        let mut suffix = if has_unit { src[number.end..].trim_end().to_string() } else { String::new() };
+        if suffix.is_empty() && size == 0.0 {
+            suffix = unit.unwrap_or_default().to_string();
+        }
+        Some(Self { value: if negative { -size } else { size }, whole: unit.is_none() && suffix.is_empty() && !digits.contains(['.', 'e', 'E']), suffix, decimals: (written - exponent).max(0) as usize })
+    }
+
+    fn place(&self, shift: i32) -> f64 {
+        10f64.powi(self.value.abs().log10().floor() as i32 + shift)
+    }
+
+    /// How far a point of drag takes it: a hundredth of its leading digit's place, so 70 moves by
+    /// 0.1, 1.095 by 0.01 and 0.2875 by 0.001. Four points to a step for a count.
+    pub fn drag_step(&self) -> f64 {
+        match (self.whole, self.value == 0.0) {
+            (true, true) => 0.25,
+            (true, false) => self.place(-2).max(0.25),
+            (false, true) if self.suffix.trim() == "deg" => 0.1,
+            (false, true) => 0.01,
+            (false, false) => self.place(-2),
+        }
+    }
+
+    /// How far a notch of the wheel takes it.
+    pub fn wheel_step(&self) -> f64 {
+        match (self.whole, self.value == 0.0) {
+            (true, true) => 1.0,
+            (true, false) => self.place(-1).max(1.0),
+            (false, _) => self.drag_step() * 10.0,
+        }
+    }
+
+    /// How many places a change of this size needs, keeping any it was written with.
+    pub fn decimals_for(&self, step: f64) -> usize {
+        if self.whole {
+            return 0;
+        }
+        self.decimals.max((-step.log10().round()).clamp(0.0, 12.0) as usize)
+    }
+
+    /// `value`, written the way this was.
+    pub fn text(&self, value: f64, decimals: usize) -> String {
+        let mut t = format!("{value:.decimals$}");
+        if t.contains('.') {
+            t.truncate(t.trim_end_matches('0').trim_end_matches('.').len());
+        }
+        if t == "-0" {
+            t = "0".into();
+        }
+        t + &self.suffix
+    }
+}
+
 /// What a piece of an expression is, for colouring it and for offering what fits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
@@ -750,6 +841,64 @@ fn eval_call(name: &str, args: &[Node], vars: &Vars) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_lone_number_can_be_nudged() {
+        let read = |s: &str| PlainNumber::read(s, Some("mm"));
+        for formula in ["L", "L/2", "2*3mm", "1mm+2mm", "", "mm", "--5", "sin(1)", "5 apples"] {
+            assert_eq!(read(formula), None, "{formula}");
+        }
+        let n = read("-1.095mm").unwrap();
+        assert_eq!((n.value, n.suffix.as_str(), n.decimals, n.whole), (-1.095, "mm", 3, false));
+        assert_eq!(read(" 915 MHz ").unwrap().suffix, " MHz");
+        assert_eq!(read("+2mm").unwrap().value, 2.0);
+        assert_eq!(read("1e-3").unwrap().decimals, 3);
+        assert_eq!(read("2.5e-3mm").unwrap().decimals, 4);
+    }
+
+    #[test]
+    fn a_nudge_is_sized_to_the_number() {
+        let step = |s: &str| PlainNumber::read(s, Some("mm")).unwrap().drag_step();
+        for (text, want) in [("70mm", 0.1), ("1.095mm", 0.01), ("0.2875mm", 0.001), ("9.9mm", 0.01), ("0mm", 0.01)] {
+            assert!((step(text) - want).abs() < want * 1e-9, "{text}: {}", step(text));
+        }
+        assert!((PlainNumber::read("0deg", None).unwrap().drag_step() - 0.1).abs() < 1e-12);
+        assert!((PlainNumber::read("70mm", None).unwrap().wheel_step() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nudged_text_keeps_the_unit_and_the_digits_it_had() {
+        let n = PlainNumber::read("-1.095mm", Some("mm")).unwrap();
+        assert_eq!(n.text(n.value + 3.0 * n.drag_step(), n.decimals_for(n.drag_step())), "-1.065mm");
+        let n = PlainNumber::read("70mm", Some("mm")).unwrap();
+        assert_eq!(n.text(70.3, n.decimals_for(n.drag_step())), "70.3mm");
+        assert_eq!(n.text(71.0, n.decimals_for(n.drag_step())), "71mm", "no trailing zeros");
+        assert_eq!(n.text(-0.0004, 2), "0mm", "never a minus zero");
+        let n = PlainNumber::read("915 MHz", None).unwrap();
+        assert_eq!(n.text(916.0, 0), "916 MHz");
+        assert_eq!(eval(&n.text(916.0, 0), &Vars::default()).unwrap(), 916e6);
+    }
+
+    #[test]
+    fn a_bare_zero_takes_the_fields_unit_and_a_bare_count_stays_whole() {
+        // Left bare, 0.01 in a length field is ten millimetres.
+        let z = PlainNumber::read("0", Some("mm")).unwrap();
+        assert_eq!(z.text(0.01, z.decimals_for(z.drag_step())), "0.01mm");
+        assert!(!z.whole);
+        // A bare number other than zero means what it already meant.
+        let m = PlainNumber::read("0.002", Some("mm")).unwrap();
+        assert_eq!((m.suffix.as_str(), m.whole), ("", false));
+        // With no unit to go by, a whole number is a count.
+        let n = PlainNumber::read("4", None).unwrap();
+        assert!(n.whole);
+        assert_eq!(n.decimals_for(n.drag_step() * 0.1), 0);
+        assert_eq!(n.text(4.0 + 5.0 * n.drag_step(), 0), "5");
+        assert!((n.wheel_step() - 1.0).abs() < 1e-12);
+        assert_eq!(PlainNumber::read("50", None).unwrap().wheel_step(), 1.0);
+        assert_eq!(PlainNumber::read("0", None).unwrap().suffix, "");
+        // Written with a point, it's a measure, whatever the field.
+        assert!(!PlainNumber::read("4.0", None).unwrap().whole);
+    }
 
     fn kinds(src: &str, known: &[&str]) -> Vec<(String, TokenKind)> {
         tokens(src, |n| known.contains(&n)).iter().map(|t| (src[t.start..t.end].to_string(), t.kind)).collect()

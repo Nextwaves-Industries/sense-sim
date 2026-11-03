@@ -256,6 +256,7 @@ name = "antenna_core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fdtd_kernel",
  "num-complex",
  "proof",
  "rayon",
@@ -3278,6 +3279,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdtd_kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "num-complex",
+ "pollster",
+ "rayon",
+ "wgpu",
+]
+
+[[package]]
 name = "fearless_simd"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6230,7 +6242,7 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 
 [[package]]
 name = "sense_sim"
-version = "1.8.0"
+version = "1.12.0"
 dependencies = [
  "antenna_core",
  "anyhow",
@@ -7830,6 +7842,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "js-sys",
  "log",
+ "parking_lot",
  "portable-atomic",
  "profiling",
  "raw-window-handle",

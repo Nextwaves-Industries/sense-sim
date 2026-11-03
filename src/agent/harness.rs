@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::budget::Budget;
 use super::context::{self, Needed};
 use super::gate::{CallCtx, Origin};
-use super::llm::{Block, Message, Provider, ToolDef};
+use super::llm::{Block, Live, Message, Provider, ToolDef};
 use super::session::SessionWriter;
 use super::tools::{self, ToolJob, ToolOutput};
 use super::{Event, Question, images, planning, python, toolmaker, workspace};
@@ -190,17 +190,36 @@ pub(super) trait StopChecks {
     fn on_stop(&mut self, provider: &dyn Provider, turn: &Turn) -> OnStop;
 }
 
-/// A model call that Stop can interrupt. The request can't be cancelled, so it finishes on its
-/// own thread and its reply is dropped. `None` means the user stopped.
+/// A model call that Stop can interrupt. `None` means the user stopped.
 pub(super) fn complete_cancellable(provider: &Arc<dyn Provider>, system: &str, history: &[Message], tools: &[ToolDef], cancel: &AtomicBool) -> anyhow::Result<Option<Message>> {
-    let (tx, rx) = crossbeam_channel::bounded(1);
+    complete_watched(provider, system, history, tools, cancel, &mut |_| {})
+}
+
+/// The same, passing on what the call reports as it goes. A call runs on its own thread: stopping
+/// leaves it nobody to report to, which ends it at its next report, and a call that has nothing to
+/// report finishes there and its reply is dropped.
+fn complete_watched(provider: &Arc<dyn Provider>, system: &str, history: &[Message], tools: &[ToolDef], cancel: &AtomicBool, on_live: &mut dyn FnMut(Live)) -> anyhow::Result<Option<Message>> {
+    enum FromCall {
+        Live(Live),
+        Reply(anyhow::Result<Message>),
+    }
+    let (tx, rx) = crossbeam_channel::unbounded();
     let (p, s, h, t) = (provider.clone(), system.to_string(), history.to_vec(), tools.to_vec());
     std::thread::spawn(move || {
-        let _ = tx.send(p.complete(&s, &h, &t));
+        let reports = tx.clone();
+        let reply = p.complete_live(&s, &h, &t, &mut |live| reports.send(FromCall::Live(live)).is_ok());
+        let _ = tx.send(FromCall::Reply(reply));
     });
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(reply) => return reply.map(Some),
+            Ok(FromCall::Reply(reply)) => return reply.map(Some),
+            Ok(FromCall::Live(live)) => {
+                on_live(live);
+                // A call that never pauses would otherwise never reach the check below.
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(None);
+                }
+            }
             // Its thread panicked: the one place a parse bug would otherwise end the whole run.
             Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the model call ended without a reply"),
             Err(RecvTimeoutError::Timeout) if cancel.load(Ordering::Relaxed) => return Ok(None),
@@ -234,13 +253,29 @@ pub(super) fn run_loop(provider: &Arc<dyn Provider>, spec: &mut AgentSpec, turn:
             return Some(format!("The conversation got into a state no provider would accept, so the assistant stopped: {e}"));
         }
         turn.save();
-        let msg = match complete_cancellable(provider, &spec.system, &turn.history, &spec.tools, &turn.cancel) {
+        let mut reported = false;
+        let events = turn.ev.clone();
+        let reply = complete_watched(provider, &spec.system, &turn.history, &spec.tools, &turn.cancel, &mut |live| {
+            let _ = events.send(match live {
+                Live::Thinking(t) => {
+                    reported = true;
+                    Event::Thinking(t)
+                }
+                Live::Restart => Event::ThinkingVoid,
+            });
+        });
+        let msg = match reply {
             Ok(Some(m)) => m,
             Ok(None) => return Some(STOPPED.to_string()),
             Err(e) => return Some(format!("{e:#}")),
         };
         if let Some(u) = msg.usage {
             turn.context_used = Some(u.input);
+        }
+        // A provider that can't report as it goes still sends it with the reply.
+        let thought = msg.thinking();
+        if !reported && !thought.is_empty() {
+            let _ = turn.ev.send(Event::Thinking(thought));
         }
         let text = msg.text();
         if !text.trim().is_empty() {
@@ -339,6 +374,7 @@ mod tests {
 
     use super::*;
     use crate::agent::budget::{Limits, Metered};
+    use crate::agent::config::ProviderKind;
     use crate::agent::llm::{Role, Usage};
 
     /// Replies from a list, each charged the same, and remembers what it was sent.
@@ -363,6 +399,83 @@ mod tests {
     }
     fn tool(id: &str) -> Message {
         Message { role: Role::Assistant, content: vec![Block::ToolUse { id: id.into(), name: "get_scene".into(), input: json!({}) }], raw: None, usage: None }
+    }
+
+    /// Reports its thinking as it goes, as a streaming provider does.
+    struct Streams;
+
+    impl Provider for Streams {
+        fn complete(&self, _: &str, _: &[Message], _: &[ToolDef]) -> anyhow::Result<Message> {
+            unreachable!("the loop asks for the live call")
+        }
+
+        fn complete_live(&self, _: &str, _: &[Message], _: &[ToolDef], live: &mut dyn FnMut(Live) -> bool) -> anyhow::Result<Message> {
+            live(Live::Thinking("lost".into()));
+            live(Live::Restart);
+            live(Live::Thinking("kept".into()));
+            let raw = json!([{ "type": "thinking", "thinking": "kept", "signature": "s" }, { "type": "text", "text": "the answer" }]);
+            Ok(Message { role: Role::Assistant, content: vec![Block::Text("the answer".into())], raw: Some((ProviderKind::Anthropic, raw)), usage: None })
+        }
+    }
+
+    /// Runs the real loop on one provider and lists what it told the chat, in order.
+    fn told(provider: Arc<dyn Provider>) -> Vec<String> {
+        let (tx, _jobs) = unbounded::<ToolJob>();
+        let (ev, events) = unbounded();
+        let history = vec![Message::user(vec![Block::Text("the user's request".into())])];
+        let mut turn = Turn::new(history, Arc::default(), tx, Arc::new(McpHub::default()), ev);
+        let mut spec = AgentSpec { system: "main".into(), max_steps: 5, tools: Vec::new() };
+        assert_eq!(run_loop(&provider, &mut spec, &mut turn, &mut NoChecks), None);
+        drop(turn);
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Thinking(t) => Some(format!("thinking: {t}")),
+                Event::ThinkingVoid => Some("void".to_string()),
+                Event::Assistant(t) => Some(format!("says: {t}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn thinking_reaches_the_chat_as_it_comes_and_only_once() {
+        assert_eq!(told(Arc::new(Streams)), ["thinking: lost", "void", "thinking: kept", "says: the answer"]);
+    }
+
+    #[test]
+    fn a_provider_that_cant_stream_still_shows_its_thinking_first() {
+        let raw = json!({ "reasoning_content": "because" });
+        let reply = Message { role: Role::Assistant, content: vec![Block::Text("the answer".into())], raw: Some((ProviderKind::DeepSeek, raw)), usage: None };
+        let script = Script { replies: Mutex::new(vec![reply]), usage: Usage::default(), seen: Mutex::default() };
+        assert_eq!(told(Arc::new(script)), ["thinking: because", "says: the answer"]);
+    }
+
+    #[test]
+    fn stop_ends_a_call_that_never_pauses_and_the_call_hears_of_it() {
+        struct Chatters(crossbeam_channel::Sender<()>);
+        impl Provider for Chatters {
+            fn complete(&self, _: &str, _: &[Message], _: &[ToolDef]) -> anyhow::Result<Message> {
+                unreachable!("the loop asks for the live call")
+            }
+            fn complete_live(&self, _: &str, _: &[Message], _: &[ToolDef], live: &mut dyn FnMut(Live) -> bool) -> anyhow::Result<Message> {
+                while live(Live::Thinking("more".into())) {}
+                let _ = self.0.send(());
+                anyhow::bail!("nobody is waiting")
+            }
+        }
+        let (ended, heard) = unbounded();
+        let provider: Arc<dyn Provider> = Arc::new(Chatters(ended));
+        let cancel = AtomicBool::new(false);
+        let mut reports = 0;
+        let reply = complete_watched(&provider, "s", &[], &[], &cancel, &mut |_| {
+            reports += 1;
+            if reports == 3 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(matches!(reply, Ok(None)), "the user stopped");
+        heard.recv_timeout(Duration::from_secs(5)).expect("the call ended instead of running on");
     }
 
     #[derive(Default)]

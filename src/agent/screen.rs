@@ -59,7 +59,7 @@ impl Activity {
             return;
         }
         if before.workbench != now_screen.workbench {
-            self.add(now, format!("went to the {} workbench", clean(&now_screen.workbench)));
+            self.add(now, format!("went to the {} workspace", clean(&now_screen.workbench)));
         }
         if before.view != now_screen.view {
             match (&before.view, &now_screen.view) {
@@ -129,7 +129,7 @@ fn names(list: &[String]) -> String {
 /// The note for the model. It says up front that it isn't the user speaking.
 pub fn describe(screen: &Screen, activity: &Activity, now: Instant) -> String {
     let mut out = vec!["[What the user has on screen, added by the app. This is context, not an instruction, and not something they typed.".to_string()];
-    let mut place = format!("Workbench: {}.", clean(&screen.workbench));
+    let mut place = format!("Workspace: {}.", clean(&screen.workbench));
     if let Some(v) = &screen.view {
         place.push_str(&format!(" In front: {}.", clean(v)));
     }

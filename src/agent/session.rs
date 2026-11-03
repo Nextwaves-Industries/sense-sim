@@ -257,6 +257,10 @@ pub fn transcript_of(history: &[Message]) -> Vec<ChatItem> {
     let is_note = |t: &str| t.starts_with("[What the user has on screen") || t.starts_with("[Automatic") || t.starts_with("[Earlier in this conversation") || t.starts_with("[reference image");
     let mut out: Vec<ChatItem> = Vec::new();
     for m in history {
+        let thought = m.thinking();
+        if !thought.is_empty() {
+            out.push(ChatItem::Thinking(thought));
+        }
         for b in &m.content {
             match (m.role, b) {
                 (Role::User, Block::Text(t)) if !is_note(t) => out.push(ChatItem::User { text: t.clone(), images: Vec::new() }),
@@ -426,5 +430,14 @@ mod tests {
         assert!(matches!(&items[0], ChatItem::User { text, .. } if text == "why is this wrong?"));
         assert!(matches!(&items[1], ChatItem::Assistant(t) if t == "Let me look."));
         assert!(matches!(&items[2], ChatItem::Tool { name, output, .. } if name == "get_scene" && output == "the scene"));
+    }
+
+    #[test]
+    fn a_reopened_chat_shows_what_the_model_was_thinking() {
+        let raw = json!([{ "type": "thinking", "thinking": "Check the loop first.", "signature": "sig" }, { "type": "text", "text": "Done." }]);
+        let reply = Message { role: Role::Assistant, content: vec![Block::Text("Done.".into())], raw: Some((ProviderKind::Anthropic, raw)), usage: None };
+        let items = transcript_of(&[reply]);
+        assert!(matches!(&items[0], ChatItem::Thinking(t) if t == "Check the loop first."));
+        assert!(matches!(&items[1], ChatItem::Assistant(t) if t == "Done."));
     }
 }

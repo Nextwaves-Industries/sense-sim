@@ -7,8 +7,9 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::mom::{MomOptions, MomProblem};
@@ -264,10 +265,55 @@ impl Effort {
     }
 }
 
+/// Where a design came from. A list of options has to be plain about which ones are new.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    /// One of `FAMILIES`, or a template, with its sizes searched.
+    #[default]
+    Known,
+    /// Drawn for this job.
+    Drawn,
+    /// Laid out cell by cell by `evolve`.
+    Evolved,
+}
+
+impl Origin {
+    pub fn label(self) -> &'static str {
+        match self {
+            Origin::Known => "Known shape",
+            Origin::Drawn => "Drawn by AI",
+            Origin::Evolved => "Evolved",
+        }
+    }
+
+    /// The word the assistant's tools use for it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Origin::Known => "known_shape",
+            Origin::Drawn => "drawn",
+            Origin::Evolved => "evolved",
+        }
+    }
+}
+
+/// What a small change to one dimension does: how a designer learns what sets what.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Effect {
+    pub var: String,
+    /// The change tried, in the variable's own units: metres for a length.
+    pub step: f64,
+    pub d_resistance: f64,
+    pub d_reactance: f64,
+    pub d_range_m: f64,
+}
+
 /// A design someone could choose.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TagOption {
     pub id: String,
+    #[serde(default)]
+    pub origin: Origin,
     /// The structure, in words.
     pub title: String,
     pub idea: String,
@@ -287,6 +333,17 @@ pub struct TagOption {
     /// Bandwidth over which the range stays above 70 % of its best, from a wide sweep, Hz.
     #[serde(default)]
     pub band: Option<(f64, f64)>,
+    /// Dimensions that ended within 3 % of the end of their range: `(name, at the top)`. The search
+    /// wanted to go further, which says the structure wants to be something else.
+    #[serde(default)]
+    pub pinned: Vec<(String, bool)>,
+    /// What each dimension moves. Only for a structure drawn for the job: it's what the next round
+    /// of designing it is decided on.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
+    /// Where its metal and current are, as text. Also only for one drawn for the job.
+    #[serde(default)]
+    pub map: String,
 }
 
 /// What's been found so far, to read while a search runs.
@@ -296,6 +353,8 @@ pub struct Progress {
     pub done: usize,
     pub total: usize,
     pub best_range_m: f64,
+    /// A design that has just finished, so the list can grow as the search goes.
+    pub found: Option<Box<TagOption>>,
 }
 
 /// A way for a long search to report, and to be told to stop.
@@ -309,6 +368,7 @@ pub struct Control<'a> {
 /// Something to search: a project, and which of its variables may move and how far.
 #[derive(Clone, Debug)]
 pub struct Candidate {
+    pub origin: Origin,
     pub title: String,
     pub idea: String,
     pub good_for: String,
@@ -348,7 +408,7 @@ pub fn candidate(f: &Family, goal: &TagGoal) -> Result<Candidate> {
         }
         vars.push(((*name).to_string(), lo, hi.max(lo * 1.001)));
     }
-    Ok(Candidate { title: f.title.to_string(), idea: f.idea.to_string(), good_for: f.good_for.to_string(), project: p, vars })
+    Ok(Candidate { origin: Origin::Known, title: f.title.to_string(), idea: f.idea.to_string(), good_for: f.good_for.to_string(), project: p, vars })
 }
 
 const NO_GEOMETRY: f64 = 1e4;
@@ -491,13 +551,17 @@ fn readable(c: &Candidate, values: &[(String, f64)]) -> Vec<(String, f64)> {
 /// slotted plate lost 42 % of its range going from the search's mesh to a finer one, while traces
 /// barely moved. So the last steps are taken on the mesh that's reported. Keeps what it started with
 /// unless it finds better.
-pub fn polish(c: &Candidate, values: Vec<(String, f64)>, goal: &TagGoal, solves: usize, ctl: &Control) -> Vec<(String, f64)> {
-    polish_on(c, values, goal, solves, ctl, REPORT_MESH)
+pub fn polish(c: &Candidate, values: Vec<(String, f64)>, goal: &TagGoal, solves: usize, ctl: &Control, step: &(dyn Fn() + Sync)) -> Vec<(String, f64)> {
+    polish_on(c, &values, goal, solves, ctl, REPORT_MESH, None, step).unwrap_or(values)
 }
 
-fn polish_on(c: &Candidate, values: Vec<(String, f64)>, goal: &TagGoal, solves: usize, ctl: &Control, on: Mesh) -> Vec<(String, f64)> {
+/// `within` is the most seconds to spend. If the first solve shows the steps can't fit in that, nothing
+/// changes and `Err` says how long it took, since steps cut off early don't get anywhere: Nelder-Mead
+/// needs one solve per dimension before it moves at all.
+#[allow(clippy::too_many_arguments)]
+fn polish_on(c: &Candidate, values: &[(String, f64)], goal: &TagGoal, solves: usize, ctl: &Control, on: Mesh, within: Option<f64>, step: &(dyn Fn() + Sync)) -> std::result::Result<Vec<(String, f64)>, f64> {
     if values.is_empty() || ctl.cancel.load(Ordering::Relaxed) {
-        return values;
+        return Ok(values.to_vec());
     }
     let mesh = Mesh { far_step: SEARCH_MESH.far_step, ..on };
     let names: Vec<String> = values.iter().map(|v| v.0.clone()).collect();
@@ -506,21 +570,29 @@ fn polish_on(c: &Candidate, values: Vec<(String, f64)>, goal: &TagGoal, solves: 
         let reach = 0.06 * (v.2 - v.1);
         ((x - reach).max(v.1), (x + reach).min(v.2))
     }).collect();
+    let began = Instant::now();
+    let until = within.map(|s| began + Duration::from_secs_f64(s));
     let f = |x: &[f64]| -> f64 {
-        if ctl.cancel.load(Ordering::Relaxed) {
+        if ctl.cancel.load(Ordering::Relaxed) || until.is_some_and(|t| Instant::now() >= t) {
             return NO_GEOMETRY;
         }
         let vals: Vec<(String, f64)> = names.iter().cloned().zip(x.iter().copied()).collect();
-        evaluate(&c.project.with_values(&vals), goal, mesh).map_or(NO_GEOMETRY, |s| penalty(&s, goal))
+        let v = evaluate(&c.project.with_values(&vals), goal, mesh).map_or(NO_GEOMETRY, |s| penalty(&s, goal));
+        step();
+        v
     };
     let start = f(&x0);
     // Too big for this mesh: what it has stands.
     if start >= NO_GEOMETRY {
-        return values;
+        return Ok(values.to_vec());
+    }
+    let one = began.elapsed().as_secs_f64();
+    if within.is_some_and(|w| one * solves as f64 > w) {
+        return Err(one);
     }
     let opts = optimize::Options { method: Method::NelderMead, max_evals: solves, seed: 11, population: None, tol: 1e-3, parallel: ctl.parallel.max(1) };
     let out = optimize::minimize(f, &x0, &bounds, &opts, |_| !ctl.cancel.load(Ordering::Relaxed));
-    if out.value < start { names.into_iter().zip(out.x).collect() } else { values }
+    Ok(if out.value < start { names.into_iter().zip(out.x).collect() } else { values.to_vec() })
 }
 
 /// Fine enough to cross a trace. Against a mesh well under the trace's width, a loop and radiator
@@ -531,6 +603,14 @@ pub const FINAL_MESH: Mesh = Mesh { edges_per_lambda: 384.0, far_step: 5.0, limi
 /// How many options get it, and how many solves each. They're seconds each, not fractions.
 const FINAL_OPTIONS: usize = 4;
 const FINAL_SOLVES: usize = 16;
+/// The most seconds of solving each option's last steps may take. Measured on 64 cores, a solve here
+/// costs 1 to 3 s for traces (1400 to 3300 unknowns), 5 s for a dogbone at 5400 and 12 s at 6600, and
+/// those plates took 100 s or more each, which left a search looking stuck for minutes. Traces are what
+/// need this mesh, as `FINAL_MESH` says, and they fit in this; a plate has settled by the mesh before.
+const FINAL_SECONDS: f64 = 60.0;
+/// What the last stage counts for each option: the first solve, the steps, the figure reported, and
+/// everything that goes with it.
+const FINAL_STEPS: usize = FINAL_SOLVES + 3;
 
 /// The density to run an opened design at: as fine as the search finished on, if it isn't too big.
 pub fn clean_mesh(p: &Project) -> f64 {
@@ -549,7 +629,7 @@ fn check_of(mesh: Mesh) -> Mesh {
 }
 
 /// A design at the reporting mesh, with what it's for and what surrounds it.
-pub fn finish(c: &Candidate, values: Vec<(String, f64)>, goal: &TagGoal, id: String) -> Result<TagOption> {
+pub fn finish(c: &Candidate, values: Vec<(String, f64)>, goal: &TagGoal, id: String, ctl: &Control) -> Result<TagOption> {
     let project = tidied(&c.project, &values);
     let mut warnings = Vec::new();
     let score = match evaluate(&project, goal, REPORT_MESH) {
@@ -560,24 +640,209 @@ pub fn finish(c: &Candidate, values: Vec<(String, f64)>, goal: &TagGoal, id: Str
             evaluate(&project, goal, Mesh { far_step: REPORT_MESH.far_step, ..SEARCH_MESH })?
         }
     };
-    surround(c, values, project, score, goal, id, warnings, REPORT_MESH)
+    surround(c, values, project, score, goal, id, warnings, REPORT_MESH, ctl)
 }
 
-/// A design's last steps, on a mesh fine enough to cross its traces. `None` if it's too big for it,
-/// in which case what it has stands.
-fn finish_final(c: &Candidate, o: &TagOption, goal: &TagGoal, ctl: &Control) -> Option<TagOption> {
-    let vars = o.project.vars().ok()?;
+/// A design's last steps, on a mesh fine enough to cross its traces. If it's too big for that mesh,
+/// or too slow on it, what it has stands: `Err` says what to tell the user, if anything.
+fn finish_final(c: &Candidate, o: &TagOption, goal: &TagGoal, ctl: &Control, step: &(dyn Fn() + Sync)) -> std::result::Result<TagOption, String> {
+    let vars = o.project.vars().map_err(|_| String::new())?;
     let values: Vec<(String, f64)> = c.vars.iter().filter_map(|v| vars.get(&v.0).map(|x| (v.0.clone(), *x))).collect();
-    let values = polish_on(c, values, goal, FINAL_SOLVES, ctl, FINAL_MESH);
+    let values = polish_on(c, &values, goal, FINAL_SOLVES, ctl, FINAL_MESH, Some(FINAL_SECONDS), step).map_err(|one| format!("Last tuning skipped: one solve on the finer mesh took {one:.0} s here. Its figures are from {:.0} edges a wavelength.", REPORT_MESH.edges_per_lambda))?;
+    if ctl.cancel.load(Ordering::Relaxed) {
+        return Err(String::new());
+    }
     let project = tidied(&c.project, &values);
-    let score = evaluate(&project, goal, FINAL_MESH).ok()?;
-    surround(c, values, project, score, goal, o.id.clone(), Vec::new(), FINAL_MESH).ok()
+    let score = evaluate(&project, goal, FINAL_MESH).map_err(|_| String::new())?;
+    step();
+    let out = surround(c, values, project, score, goal, o.id.clone(), Vec::new(), FINAL_MESH, ctl).map_err(|_| String::new());
+    step();
+    out
+}
+
+/// What each dimension of a design moves, from a small step in each. A step that would leave the
+/// range goes the other way, and the change is reported as it was made.
+fn effects_of(c: &Candidate, o: &TagOption, goal: &TagGoal, ctl: &Control) -> Vec<Effect> {
+    let mesh = Mesh { far_step: SEARCH_MESH.far_step, ..REPORT_MESH };
+    let Ok(vars) = o.project.vars() else { return Vec::new() };
+    let Ok(here) = evaluate(&o.project, goal, mesh) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (name, lo, hi) in &c.vars {
+        if ctl.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let Some(&v) = vars.get(name) else { continue };
+        let along = if counts(name) { 1.0 } else if v.abs() > 0.0 { 0.05 * v.abs() } else { 0.05 * (hi - lo) };
+        let to = if v + along <= *hi { v + along } else { v - along };
+        if to < *lo || to == v {
+            continue;
+        }
+        if let Ok(s) = evaluate(&o.project.with_values(&[(name.clone(), to)]), goal, mesh) {
+            out.push(Effect { var: name.clone(), step: to - v, d_resistance: s.z_center.0 - here.z_center.0, d_reactance: s.z_center.1 - here.z_center.1, d_range_m: s.worst_range_m - here.worst_range_m });
+        }
+    }
+    out
+}
+
+/// Which dimensions ran out of room.
+fn pinned_of(c: &Candidate, values: &[(String, f64)]) -> Vec<(String, bool)> {
+    c.vars.iter().filter_map(|(name, lo, hi)| {
+        let v = values.iter().find(|x| &x.0 == name)?.1;
+        let near = 0.03 * (hi - lo);
+        if v >= hi - near {
+            Some((name.clone(), true))
+        } else if v <= lo + near {
+            Some((name.clone(), false))
+        } else {
+            None
+        }
+    }).collect()
+}
+
+/// The widest and tallest a current map gets. A character costs about as much as a word to send to a
+/// model, on every call after it, so this is what fits a tag at a useful size without being much more.
+const MAP_COLUMNS: usize = 56;
+const MAP_ROWS: usize = 28;
+
+/// Where a design's metal is and how much current it carries, as text: what a designer reads off the
+/// Currents view. Metal that carries nothing and arms that fold back on themselves show up here, as
+/// they don't in a list of dimensions.
+pub fn current_map(p: &Project, goal: &TagGoal) -> Result<String> {
+    let g = p.geometry()?;
+    let fc = goal.fc();
+    let problem = MomProblem::new(&g, fc, MomOptions { edges_per_lambda: REPORT_MESH.edges_per_lambda, ..Default::default() })?;
+    let point = problem.solve(fc, false)?;
+    let view = problem.view();
+    if view.tris.len() != point.current.len() || view.tris.is_empty() {
+        bail!("Only a surface model has a current map.");
+    }
+    let (mut x0, mut x1, mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    for v in &view.verts {
+        (x0, x1, y0, y1) = (x0.min(v[0]), x1.max(v[0]), y0.min(v[1]), y1.max(v[1]));
+    }
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    let cell = (dx / MAP_COLUMNS as f64).max(dy / MAP_ROWS as f64).max(1e-6);
+    let cols = ((dx / cell).ceil() as usize).max(1);
+    let rows = ((dy / cell).ceil() as usize).max(1);
+    let index = |x: f64, y: f64| {
+        let col = (((x - x0) / cell) as usize).min(cols - 1);
+        let row = (((y - y0) / cell) as usize).min(rows - 1);
+        row * cols + col
+    };
+    let mut grid = vec![None::<f64>; cols * rows];
+    for (tri, current) in view.tris.iter().zip(&point.current) {
+        let [a, b, c] = tri.map(|k| view.verts[k as usize]);
+        let side = |p: [f64; 3], q: [f64; 3]| (p[0] - q[0]).hypot(p[1] - q[1]);
+        // Enough samples across it that a sliver narrower than a cell still lands in one.
+        let n = (side(a, b).max(side(b, c)).max(side(c, a)) / cell * 2.0).ceil().clamp(1.0, 64.0) as usize;
+        for i in 0..=n {
+            for j in 0..=(n - i) {
+                let (u, v) = (i as f64 / n as f64, j as f64 / n as f64);
+                let w = 1.0 - u - v;
+                let at = index(u * a[0] + v * b[0] + w * c[0], u * a[1] + v * b[1] + w * c[1]);
+                grid[at] = Some(grid[at].map_or(*current, |was: f64| was.max(*current)));
+            }
+        }
+    }
+    let top = grid.iter().flatten().cloned().fold(0.0, f64::max);
+    let mut chars: Vec<char> = grid.iter().map(|c| match c {
+        None => '.',
+        Some(i) => char::from_digit(((10.0 * i / top.max(1e-30)) as u32).min(9), 10).unwrap_or('0'),
+    }).collect();
+    for port in &g.ports {
+        chars[index((port.a[0] + port.b[0]) / 2.0, (port.a[1] + port.b[1]) / 2.0)] = 'F';
+    }
+    let mut out = format!("One character is {:.1} mm square, x across, y up. A digit is metal, 0 to 9 by how much current it carries, 9 the most; a dot is no metal; F is the chip.", cell * 1e3);
+    // The top line first, so it reads as it looks.
+    for row in (0..rows).rev() {
+        out.push('\n');
+        out.extend(&chars[row * cols..(row + 1) * cols]);
+    }
+    Ok(out)
+}
+
+/// Where a design's read range goes: the reading a designer decides the next change on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Limits {
+    /// The conjugate of the chip at the band's centre: what the antenna has to be.
+    pub needed_z: (f64, f64),
+    pub mismatch_centre_db: f64,
+    /// The same at the band's worst frequency.
+    pub mismatch_worst_db: f64,
+    /// Power it accepts and doesn't radiate.
+    pub loss_db: f64,
+    /// How far its directivity falls short of a half-wave dipole's.
+    pub directivity_short_db: f64,
+    /// Antenna reactance short of what's needed at the centre: negative is too much.
+    pub reactance_short_ohm: f64,
+    pub range_if_matched_m: f64,
+    pub range_if_lossless_m: f64,
+    /// The largest of them, in words.
+    pub biggest: String,
+}
+
+/// Reads a finished design. Range goes as the square root of each of these powers, so they compare
+/// directly in dB.
+pub fn limits(o: &TagOption, goal: &TagGoal) -> Limits {
+    const DIPOLE_DBI: f64 = 2.15;
+    let s = &o.score;
+    let fc = goal.fc();
+    let chip = chip_at(goal.chip_z, fc);
+    let needed = (chip.re, -chip.im);
+    let db = |p: f64| -10.0 * p.max(1e-12).log10();
+    let mismatch_worst = db(s.worst_transfer);
+    let mismatch_centre = db(s.center_transfer);
+    let loss = db(s.efficiency);
+    // Peak gain already carries the loss, so what's left is the shape of the pattern.
+    let directivity_short = DIPOLE_DBI - s.gain_dbi - loss;
+    let short = needed.1 - s.z_center.1;
+    let matched = s.worst_range_m * 10f64.powf(mismatch_worst / 20.0);
+    let biggest = if mismatch_worst.max(loss).max(directivity_short) < 1.0 {
+        "Nothing much: within 1 dB of a matched, lossless dipole on every count.".to_string()
+    } else if s.z_center.1 < 0.0 && mismatch_worst >= loss && mismatch_worst >= directivity_short {
+        // Sizes won't fix this, and "short by 1600 ohm" doesn't say so: a real run tuned a loop 0.57
+        // wavelengths round twice over and came back with the same thing.
+        format!("Capacitive: {mismatch_worst:.1} dB lost to mismatch at {:.0}{:+.0}j ohm, when a chip needs an inductive antenna. Either nothing short closes the path across the chip, or the loop is past its parallel resonance, about half a wavelength round ({:.0} mm here). It needs a change of structure, not of size.", s.z_center.0, s.z_center.1, goal.lambda() * 500.0)
+    } else if mismatch_worst >= loss && mismatch_worst >= directivity_short {
+        if mismatch_centre < 1.0 && mismatch_worst - mismatch_centre > 1.0 {
+            format!("Bandwidth: matched at the centre, but {mismatch_worst:.1} dB down at the band's edge. It needs a lower Q or a second resonance, not a different tune.")
+        } else if short.abs() >= (s.z_center.0 - needed.0).abs() {
+            let nh = short / (2.0 * std::f64::consts::PI * fc) * 1e9;
+            let which = if short > 0.0 { "short of" } else { "over" };
+            format!("Reactance: {mismatch_worst:.1} dB lost to mismatch, with the antenna {:.0} ohm {which} what the chip needs, about {:.1} nH.", short.abs(), nh.abs())
+        } else {
+            format!("Resistance: {mismatch_worst:.1} dB lost to mismatch, with {:.0} ohm against the {:.0} ohm the chip needs.", s.z_center.0, needed.0)
+        }
+    } else if loss >= directivity_short {
+        format!("Loss: {loss:.1} dB, with {:.0} % of what it accepts going into its metal and layers instead of radiating.", s.efficiency * 100.0)
+    } else {
+        format!("Pattern: directivity {directivity_short:.1} dB short of a dipole. Currents are probably cancelling, or there's little straight run for them.")
+    };
+    Limits {
+        needed_z: needed,
+        mismatch_centre_db: mismatch_centre,
+        mismatch_worst_db: mismatch_worst,
+        loss_db: loss,
+        directivity_short_db: directivity_short,
+        reactance_short_ohm: short,
+        range_if_matched_m: matched,
+        range_if_lossless_m: matched * 10f64.powf(loss / 20.0),
+        biggest,
+    }
 }
 
 /// What goes with a design's score: how settled its mesh is, what it does if its surroundings change,
 /// and the band it covers.
 #[allow(clippy::too_many_arguments)]
-fn surround(c: &Candidate, values: Vec<(String, f64)>, project: Project, score: TagScore, goal: &TagGoal, id: String, mut warnings: Vec<String>, mesh: Mesh) -> Result<TagOption> {
+fn surround(c: &Candidate, values: Vec<(String, f64)>, project: Project, score: TagScore, goal: &TagGoal, id: String, mut warnings: Vec<String>, mesh: Mesh, ctl: &Control) -> Result<TagOption> {
+    // Every step from here is solves nobody is waiting for, once they've pressed Cancel.
+    let stop = || -> Result<()> {
+        if ctl.cancel.load(Ordering::Relaxed) {
+            bail!("Cancelled");
+        }
+        Ok(())
+    };
+    stop()?;
     let check = check_of(mesh);
     let mesh_shift = evaluate(&project, goal, check).map_or(0.0, |other| if score.worst_range_m > 0.0 { (other.worst_range_m - score.worst_range_m).abs() / score.worst_range_m } else { 1.0 });
     if mesh_shift > 0.05 {
@@ -591,14 +856,17 @@ fn surround(c: &Candidate, values: Vec<(String, f64)>, project: Project, score: 
     }
     let mut if_changed = Vec::new();
     for (name, s) in neighbours(&goal.stack) {
+        stop()?;
         let other = TagGoal { stack: s, ..goal.clone() };
         let q = fitted(&project, &other);
         if let Ok(r) = evaluate(&q, &other, Mesh { far_step: SEARCH_MESH.far_step, ..REPORT_MESH }) {
             if_changed.push((name, r.worst_range_m));
         }
     }
+    stop()?;
     let band = band_of(&project, goal, score.gain_dbi).ok().flatten();
-    Ok(TagOption { id, title: c.title.clone(), idea: c.idea.clone(), good_for: c.good_for.clone(), values: readable(c, &values), project, score, mesh_shift, if_changed, stands_out: Vec::new(), warnings, band })
+    let pinned = pinned_of(c, &values);
+    Ok(TagOption { id, origin: c.origin, title: c.title.clone(), idea: c.idea.clone(), good_for: c.good_for.clone(), values: readable(c, &values), project, score, mesh_shift, if_changed, stands_out: Vec::new(), warnings, band, pinned, effects: Vec::new(), map: String::new() })
 }
 
 /// Says what each option does best, so a list of options is a choice.
@@ -643,11 +911,19 @@ pub fn explore(goal: &TagGoal, templates: &[String], extra: Vec<Candidate>, effo
     if list.is_empty() {
         bail!("Nothing to search: no structure called {}.", templates.join(", "));
     }
+    // A structure drawn for the job comes back with why it can't run, not with an empty list.
+    for c in list.iter().filter(|c| c.origin == Origin::Drawn) {
+        evaluate(&c.project, goal, SEARCH_MESH).with_context(|| format!("{} can't be solved as drawn", c.title))?;
+    }
     // More dimensions need more solves: 240 was two generations for a structure with 16 of them.
     let budget = |c: &Candidate| (effort.solves() as f64 * (c.vars.len() as f64 / 8.0).max(1.0)) as usize;
-    let total: usize = list.iter().map(budget).sum();
+    let finishing = |c: &Candidate| (budget(c) / 6).clamp(10, 60);
+    // Everything still to come is in the total, so 100 % means it's done.
+    let finals = if effort == Effort::Quick { 0 } else { FINAL_OPTIONS.min(list.len()) };
+    let total: usize = list.iter().map(|c| budget(c) + finishing(c)).sum::<usize>() + finals * FINAL_STEPS;
     let spent = AtomicUsize::new(0);
-    let mut options = Vec::new();
+    let mut options: Vec<TagOption> = Vec::new();
+    let publish = |o: &TagOption, done: usize| (ctl.report)(Progress { message: format!("{} done", o.title), done: done.min(total), total, best_range_m: o.score.worst_range_m, found: Some(Box::new(o.clone())) });
     for (k, c) in list.iter().enumerate() {
         if ctl.cancel.load(Ordering::Relaxed) {
             bail!("Cancelled");
@@ -655,15 +931,27 @@ pub fn explore(goal: &TagGoal, templates: &[String], extra: Vec<Candidate>, effo
         let solves = budget(c);
         let before = spent.load(Ordering::Relaxed);
         let on_best = |n: usize, best: f64| {
-            let so_far = before + n;
+            let so_far = (before + n).min(before + solves);
             spent.fetch_max(so_far, Ordering::Relaxed);
-            (ctl.report)(Progress { message: format!("{} of {}: {}", k + 1, list.len(), c.title), done: so_far.min(total), total, best_range_m: best });
+            (ctl.report)(Progress { message: format!("{} of {}: {}", k + 1, list.len(), c.title), done: so_far.min(total), total, best_range_m: best, found: None });
         };
-        let Some((values, coarse)) = search_one(c, goal, solves, ctl, 17 + k as u64, &on_best) else { continue };
-        (ctl.report)(Progress { message: format!("Finishing {} on a finer mesh", c.title), done: before + solves, total, best_range_m: coarse.worst_range_m });
-        spent.store(before + solves, Ordering::Relaxed);
-        let values = polish(c, values, goal, (solves / 6).clamp(10, 60), ctl);
-        if let Ok(o) = finish(c, values, goal, format!("option_{}", k + 1)) {
+        let found = search_one(c, goal, solves, ctl, 17 + k as u64, &on_best);
+        let polishing = finishing(c);
+        let Some((values, coarse)) = found else {
+            spent.store(before + solves + polishing, Ordering::Relaxed);
+            continue;
+        };
+        let at = AtomicUsize::new(before + solves);
+        let message = format!("Finishing {} on a finer mesh", c.title);
+        let step = || {
+            let n = at.fetch_add(1, Ordering::Relaxed) + 1;
+            (ctl.report)(Progress { message: message.clone(), done: n.min(before + solves + polishing), total, best_range_m: coarse.worst_range_m, found: None });
+        };
+        step();
+        let values = polish(c, values, goal, polishing, ctl, &step);
+        spent.store(before + solves + polishing, Ordering::Relaxed);
+        if let Ok(o) = finish(c, values, goal, format!("option_{}", k + 1), ctl) {
+            publish(&o, before + solves + polishing);
             options.push(o);
         }
     }
@@ -675,17 +963,40 @@ pub fn explore(goal: &TagGoal, templates: &[String], extra: Vec<Candidate>, effo
             o.warnings.push(format!("A quick search stops at {:.0} edges a wavelength, where a trace's reactance still reads a few percent high: a normal search finishes finer.", REPORT_MESH.edges_per_lambda));
         }
     } else {
-        for o in options.iter_mut().take(FINAL_OPTIONS) {
+        let base = spent.load(Ordering::Relaxed);
+        let count = options.len().min(FINAL_OPTIONS);
+        for (k, o) in options.iter_mut().take(FINAL_OPTIONS).enumerate() {
             if ctl.cancel.load(Ordering::Relaxed) {
                 break;
             }
             let Some(c) = list.iter().find(|c| c.title == o.title) else { continue };
-            (ctl.report)(Progress { message: format!("Final tuning of {}", c.title), done: total, total, best_range_m: o.score.worst_range_m });
-            if let Some(n) = finish_final(c, o, goal, ctl) {
-                *o = n;
+            let (from, to) = (base + k * FINAL_STEPS, base + (k + 1) * FINAL_STEPS);
+            let at = AtomicUsize::new(from);
+            let message = format!("Final tuning of {} ({} of {count})", c.title, k + 1);
+            let best = o.score.worst_range_m;
+            let step = || {
+                let n = at.fetch_add(1, Ordering::Relaxed) + 1;
+                (ctl.report)(Progress { message: message.clone(), done: n.min(to), total, best_range_m: best, found: None });
+            };
+            (ctl.report)(Progress { message: message.clone(), done: from, total, best_range_m: best, found: None });
+            match finish_final(c, o, goal, ctl, &step) {
+                Ok(n) => *o = n,
+                Err(why) if !why.is_empty() => o.warnings.push(why),
+                Err(_) => {}
             }
+            publish(o, to);
         }
         options.sort_by(|a, b| b.score.worst_range_m.total_cmp(&a.score.worst_range_m));
+    }
+    // What the next round of designing it is decided on. Only for what was drawn: nobody redesigns
+    // a known shape from this, and it's a solve per dimension.
+    for o in options.iter_mut().filter(|o| o.origin == Origin::Drawn) {
+        if let Some(c) = list.iter().find(|c| c.title == o.title) {
+            (ctl.report)(Progress { message: format!("Reading what each dimension of {} does", c.title), done: total, total, best_range_m: o.score.worst_range_m, found: None });
+            o.effects = effects_of(c, o, goal, ctl);
+            // Not having one is no reason to lose the design.
+            o.map = current_map(&o.project, goal).unwrap_or_default();
+        }
     }
     for (k, o) in options.iter_mut().enumerate() {
         o.id = format!("option_{}", k + 1);
@@ -744,7 +1055,7 @@ pub fn retune(p: &Project, goal: &TagGoal, old_stack: &Stack, reach: f64, solves
         }
         let values: Vec<(String, f64)> = names.iter().cloned().zip(x.iter().copied()).collect();
         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-        (ctl.report)(Progress { message: "Retuning".into(), done: n.min(solves), total: solves, best_range_m: 0.0 });
+        (ctl.report)(Progress { message: "Retuning".into(), done: n.min(solves), total: solves, best_range_m: 0.0, found: None });
         evaluate(&moved.with_values(&values), goal, FINE).map_or(NO_GEOMETRY, |s| penalty(&s, goal))
     };
     let opts = optimize::Options { method: Method::Surrogate, max_evals: solves, seed: 5, population: None, tol: 1e-3, parallel: ctl.parallel.max(1) };
@@ -1043,13 +1354,13 @@ pub fn evolve(goal: &TagGoal, nx: usize, ny: usize, solves: usize, ctl: &Control
         pop.extend(scoring(children));
         pop.sort_by(|a, b| a.0.total_cmp(&b.0));
         pop.truncate(POP);
-        (ctl.report)(Progress { message: "Evolving a free-form layout".into(), done: spent.min(solves), total: solves, best_range_m: -pop[0].0 / 1.1 });
+        (ctl.report)(Progress { message: "Evolving a free-form layout".into(), done: spent.min(solves), total: solves, best_range_m: -pop[0].0 / 1.1, found: None });
     }
     let mut best = pop.swap_remove(0).1;
     best.prune();
     let project = best.project(goal)?;
-    let c = Candidate { title: "Evolved free-form layout".into(), idea: format!("Metal laid out cell by cell on a {nx} by {ny} grid and evolved over {spent} solves, with only a loop for the chip assumed."), good_for: "A shape nobody would have drawn, where the area is odd or a known structure doesn't fit".into(), project, vars: Vec::new() };
-    finish(&c, Vec::new(), goal, "evolved".into())
+    let c = Candidate { origin: Origin::Evolved, title: "Evolved free-form layout".into(), idea: format!("Metal laid out cell by cell on a {nx} by {ny} grid and evolved over {spent} solves, with only a loop for the chip assumed."), good_for: "A shape nobody would have drawn, where the area is odd or a known structure doesn't fit".into(), project, vars: Vec::new() };
+    finish(&c, Vec::new(), goal, "evolved".into(), ctl)
 }
 
 /// A sensible goal for a band and chip, for tests and defaults.
@@ -1186,6 +1497,198 @@ mod tests {
         println!("start {:.1} m, found {:.1} m, {:?}", start.worst_range_m, best.worst_range_m, values);
         assert!(best.worst_range_m > start.worst_range_m, "{best:?} vs {start:?}");
         assert!(best.size_x <= 0.095 * 1.02, "{best:?}");
+    }
+
+    /// The bug behind a search that sat at 100 % for minutes: the bar was full before the last stage
+    /// began, and that stage said nothing until it ended.
+    #[test]
+    fn the_bar_is_only_full_when_the_search_is_done_and_every_step_shows() {
+        let goal = ucode9(0.095, 0.03);
+        let seen: Mutex<Vec<Progress>> = Mutex::new(Vec::new());
+        let report = |p: Progress| seen.lock().unwrap().push(p);
+        let cancel = AtomicBool::new(false);
+        let ctl = Control { cancel: &cancel, report: &report, parallel: 4 };
+        let out = explore(&goal, &["tag_bent".to_string()], Vec::new(), Effort::Normal, &ctl).unwrap();
+        assert_eq!(out.len(), 1);
+        let seen = seen.into_inner().unwrap();
+        let finals: Vec<&Progress> = seen.iter().filter(|p| p.message.starts_with("Final tuning")).collect();
+        let first = finals[0];
+        assert!(first.done < first.total, "the bar isn't full as the last stage starts: {} of {}", first.done, first.total);
+        assert!(finals.windows(2).all(|w| w[1].done >= w[0].done), "it only moves forward");
+        assert_eq!(finals[0].message, "Final tuning of Bent arms (1 of 1)");
+        assert!(seen.iter().all(|p| p.done <= p.total), "never past the end");
+        assert!(seen.iter().any(|p| p.found.is_some()), "what's done can be shown before the rest is");
+        // This design's solves sit near the time limit on a busy machine, which then skips its last
+        // steps and says so, leaving little to report. That path has its own test below.
+        let skipped = out[0].warnings.iter().find(|w| w.starts_with("Last tuning skipped"));
+        println!("{} reports; {skipped:?}", finals.len());
+        if skipped.is_none() {
+            assert!(finals.len() > 3, "the last stage says what it's doing as it goes: {} reports", finals.len());
+            assert!(finals.last().unwrap().done > first.done, "it moves");
+        }
+    }
+
+    #[test]
+    fn last_steps_too_slow_to_fit_change_nothing_and_say_how_long_a_solve_took() {
+        let goal = ucode9(0.095, 0.03);
+        let c = candidate(family("tag_bent").unwrap(), &goal).unwrap();
+        let vars = c.project.vars().unwrap();
+        let values: Vec<(String, f64)> = c.vars.iter().map(|v| (v.0.clone(), vars[&v.0])).collect();
+        let (cancel, report) = quiet();
+        let ctl = Control { cancel: &cancel, report: &report, parallel: 2 };
+        let solves = AtomicUsize::new(0);
+        let step = || {
+            solves.fetch_add(1, Ordering::Relaxed);
+        };
+        let one = polish_on(&c, &values, &goal, FINAL_SOLVES, &ctl, SEARCH_MESH, Some(1e-6), &step).expect_err("no solve fits in a microsecond");
+        assert!(one > 0.0, "{one}");
+        assert_eq!(solves.load(Ordering::Relaxed), 1, "it stops after the one solve that showed it");
+        // With time to spare it does get on with it.
+        let kept = polish_on(&c, &values, &goal, 4, &ctl, SEARCH_MESH, Some(3600.0), &step).unwrap();
+        assert_eq!(kept.len(), values.len());
+        assert!(solves.load(Ordering::Relaxed) > 1);
+    }
+
+    #[test]
+    fn cancel_stops_the_checks_after_a_design_not_only_the_search() {
+        let goal = ucode9(0.095, 0.03);
+        let c = candidate(family("tag_bent").unwrap(), &goal).unwrap();
+        let report = |_p: Progress| {};
+        let cancel = AtomicBool::new(true);
+        let ctl = Control { cancel: &cancel, report: &report, parallel: 2 };
+        let e = finish(&c, Vec::new(), &goal, "x".into(), &ctl).unwrap_err();
+        assert!(format!("{e:#}").contains("Cancelled"), "{e:#}");
+    }
+
+    fn drawn(goal: &TagGoal) -> Candidate {
+        let mut p = fitted(&Project::from_template("custom", Some("915MHz")).unwrap(), goal);
+        crate::freeform::draw(&mut p, &serde_json::json!({
+            "vars": { "L": "80mm", "w": "1mm", "gp": "1mm", "hs": "10mm", "xs": "8mm" },
+            "parts": [
+                { "kind": "strip", "name": "arm", "path": [["gp/2", "0"], ["L/2", "0"]], "w": "w", "mirror": "x" },
+                { "kind": "strip", "name": "hairpin", "path": [["xs", "0"], ["xs", "hs"], ["-xs", "hs"], ["-xs", "0"]], "w": "w" }
+            ],
+            "feeds": [{ "a": ["-gp/2", "0"], "b": ["gp/2", "0"], "width": "w" }]
+        })).unwrap();
+        Candidate { origin: Origin::Drawn, title: "Hairpin dipole".into(), idea: "Test".into(), good_for: "Test".into(), project: p, vars: vec![("L".into(), 0.05, 0.09), ("hs".into(), 0.004, 0.025), ("xs".into(), 0.003, 0.03)] }
+    }
+
+    /// What a design round is decided on has to come back with what was drawn, and be labelled as new.
+    #[test]
+    fn a_drawn_structure_comes_back_labelled_with_what_limits_it() {
+        let goal = ucode9(0.095, 0.03);
+        let (cancel, report) = quiet();
+        let ctl = Control { cancel: &cancel, report: &report, parallel: 4 };
+        let out = explore(&goal, &["__none__".to_string()], vec![drawn(&goal)], Effort::Quick, &ctl).unwrap();
+        assert_eq!(out.len(), 1);
+        let o = &out[0];
+        assert_eq!(o.origin, Origin::Drawn);
+        assert_eq!(o.origin.label(), "Drawn by AI");
+        assert_eq!(o.effects.len(), 3, "one for each dimension: {:?}", o.effects);
+        assert!(o.effects.iter().any(|e| e.d_reactance.abs() > 0.1), "a dimension moves its reactance: {:?}", o.effects);
+        let l = limits(o, &goal);
+        assert!((l.needed_z.1 - 231.0).abs() < 25.0 && l.needed_z.0 > 0.0, "the chip's conjugate: {l:?}");
+        assert!(l.range_if_matched_m >= o.score.worst_range_m, "{l:?}");
+        assert!(l.range_if_lossless_m >= l.range_if_matched_m, "{l:?}");
+        assert!(!l.biggest.is_empty());
+    }
+
+    /// Worse than an empty list: a drawing with a mistake in it costs the model a whole round to learn
+    /// nothing from.
+    #[test]
+    fn a_drawing_that_cant_be_solved_says_why_at_once() {
+        let goal = ucode9(0.095, 0.03);
+        let mut c = drawn(&goal);
+        c.project.extra_ports.clear();
+        let (cancel, report) = quiet();
+        let ctl = Control { cancel: &cancel, report: &report, parallel: 2 };
+        let e = explore(&goal, &["__none__".to_string()], vec![c], Effort::Quick, &ctl).unwrap_err();
+        assert!(format!("{e:#}").contains("Hairpin dipole can't be solved as drawn"), "{e:#}");
+    }
+
+    #[test]
+    fn dimensions_at_the_ends_of_their_range_are_named() {
+        let goal = ucode9(0.095, 0.03);
+        let c = drawn(&goal);
+        let values = vec![("L".to_string(), 0.09), ("hs".to_string(), 0.004), ("xs".to_string(), 0.015)];
+        assert_eq!(pinned_of(&c, &values), vec![("L".to_string(), true), ("hs".to_string(), false)]);
+    }
+
+    /// Reads each kind of limit from made-up figures, so what the model is told can be checked by hand.
+    #[test]
+    fn limits_name_what_costs_the_most_range() {
+        let goal = ucode9(0.095, 0.03);
+        let c = candidate(family("tag_bent").unwrap(), &goal).unwrap();
+        let o = |worst: f64, centre: f64, eff: f64, gain: f64, z: (f64, f64)| {
+            let score = TagScore { worst_range_m: 10.0, center_range_m: 10.0, worst_transfer: worst, center_transfer: centre, gain_dbi: gain, efficiency: eff, size_x: 0.09, size_y: 0.03, z_center: z, unknowns: 100 };
+            TagOption { id: "x".into(), origin: Origin::Drawn, title: "x".into(), idea: String::new(), good_for: String::new(), project: c.project.clone(), values: Vec::new(), score, mesh_shift: 0.0, if_changed: Vec::new(), stands_out: Vec::new(), warnings: Vec::new(), band: None, pinned: Vec::new(), effects: Vec::new(), map: String::new() }
+        };
+        let needed = limits(&o(1.0, 1.0, 1.0, 2.15, (15.0, 231.0)), &goal).needed_z;
+        let fine = limits(&o(1.0, 1.0, 1.0, 2.15, needed), &goal);
+        assert!(fine.biggest.starts_with("Nothing much"), "{}", fine.biggest);
+        assert!(fine.mismatch_worst_db.abs() < 1e-9 && fine.directivity_short_db.abs() < 1e-9, "{fine:?}");
+
+        let band = limits(&o(0.3, 0.95, 1.0, 2.15, needed), &goal);
+        assert!(band.biggest.starts_with("Bandwidth"), "{}", band.biggest);
+        // A quarter of the power is 6 dB, which is half the range.
+        let quarter = limits(&o(0.25, 0.25, 1.0, 2.15, (needed.0, needed.1 - 100.0)), &goal);
+        assert!((quarter.mismatch_worst_db - 6.02).abs() < 0.01, "{quarter:?}");
+        assert!((quarter.range_if_matched_m - 20.0).abs() < 0.01, "{quarter:?}");
+        assert!((quarter.reactance_short_ohm - 100.0).abs() < 1e-6, "{quarter:?}");
+        assert!(quarter.biggest.starts_with("Reactance") && quarter.biggest.contains("100 ohm short of"), "{}", quarter.biggest);
+        // 100 ohm at 915 MHz is 17.4 nH.
+        assert!(quarter.biggest.contains("17.4 nH"), "{}", quarter.biggest);
+        let over = limits(&o(0.25, 0.25, 1.0, 2.15, (needed.0, needed.1 + 100.0)), &goal);
+        assert!(over.biggest.contains("100 ohm over"), "{}", over.biggest);
+        let r = limits(&o(0.25, 0.25, 1.0, 2.15, (needed.0 + 80.0, needed.1)), &goal);
+        assert!(r.biggest.starts_with("Resistance"), "{}", r.biggest);
+
+        // Half of it radiated: 3 dB of loss, and gain lower by the same, with the pattern no worse.
+        let lossy = limits(&o(1.0, 1.0, 0.5, 2.15 - 3.01, needed), &goal);
+        assert!((lossy.loss_db - 3.01).abs() < 0.01 && lossy.directivity_short_db.abs() < 0.01, "{lossy:?}");
+        assert!(lossy.biggest.starts_with("Loss"), "{}", lossy.biggest);
+        assert!((lossy.range_if_lossless_m / lossy.range_if_matched_m - 2f64.sqrt()).abs() < 0.01, "{lossy:?}");
+
+        let cancelling = limits(&o(1.0, 1.0, 1.0, -3.0, needed), &goal);
+        assert!(cancelling.biggest.starts_with("Pattern"), "{}", cancelling.biggest);
+
+        // What a real run got from a loop too big to be inductive, and tuned twice to no effect.
+        let capacitive = limits(&o(0.01, 0.01, 0.9, 1.5, (360.0, -1425.0)), &goal);
+        assert!(capacitive.biggest.starts_with("Capacitive"), "{}", capacitive.biggest);
+        assert!(capacitive.biggest.contains("change of structure"), "{}", capacitive.biggest);
+    }
+
+    /// What's on the map has to be where it is on the model: the top line is the top of the tag, the
+    /// chip is at the feed, and metal that nothing drives reads low.
+    #[test]
+    fn the_current_map_shows_the_metal_where_it_is_and_the_chip_at_its_feed() {
+        let goal = ucode9(0.095, 0.03);
+        let c = drawn(&goal);
+        let map = current_map(&c.project, &goal).unwrap();
+        println!("{map}");
+        let mut lines = map.lines();
+        assert!(lines.next().unwrap().contains("F is the chip"));
+        let rows: Vec<&str> = lines.collect();
+        assert!(rows.len() > 2 && rows.len() <= MAP_ROWS, "{map}");
+        let wide = rows[0].len();
+        assert!(wide > 10 && wide <= MAP_COLUMNS, "{map}");
+        assert!(rows.iter().all(|r| r.len() == wide), "a square block of text: {map}");
+        assert!(map.contains('9'), "something carries the most: {map}");
+        // The hairpin rises above the arms, whose line, with the chip on it, is the bottom one.
+        let bottom = rows[rows.len() - 1];
+        assert!(bottom.contains('F'), "the arms and the chip run along the bottom: {map}");
+        let f = bottom.find('F').unwrap();
+        assert!((f as f64 - wide as f64 / 2.0).abs() <= 2.0, "the chip's in the middle: {map}");
+        assert!(!rows[0].starts_with(|ch: char| ch.is_ascii_digit()), "the top is the hairpin only, narrower than the arms: {map}");
+        assert!(rows[0].contains(|ch: char| ch.is_ascii_digit()), "{map}");
+        assert!(rows[rows.len() / 2].contains('.'), "gaps show: {map}");
+
+        // A strip well away with nothing driving it carries next to nothing beside the feed.
+        let mut far = c.project.clone();
+        crate::freeform::draw(&mut far, &serde_json::json!({ "parts": [{ "kind": "strip", "name": "stray", "path": [["0mm", "26mm"], ["4mm", "26mm"]], "w": "1mm" }] })).unwrap();
+        let map = current_map(&far, &goal).unwrap();
+        let top = map.lines().nth(1).unwrap();
+        assert!(top.chars().all(|ch| ch == '.' || ch == '0'), "{map}");
     }
 }
 

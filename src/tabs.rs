@@ -23,7 +23,8 @@ use bevy::prelude::*;
 use crate::prototype::{ProtoState, Prototype, PrototypeCache};
 use crate::rtls::device::{Device, Zone};
 use crate::scene::{Action, Actions, OrbitCamera, PartBvh, PartOf, PartRest, PendingDownloads, PendingSpawns, PlacedObject, Status};
-use crate::ui::UiState;
+use crate::rtls::ui::RtlsUiState;
+use crate::ui::{LeftPanelSlot, ProjectView, UiState};
 use crate::undo::UndoStack;
 
 /// Roots freed per frame after closing a tab, so closing a big scene doesn't hitch.
@@ -127,11 +128,13 @@ pub struct Tab {
     stash: Box<Stash>,
     /// Calibrations live outside the world (every ray cast reads them), so they move by hand.
     cals: crate::rtls::radio::ParkedCals,
+    /// Its workspace and the cards it had open. Holds a blank while the tab shows.
+    view: ProjectView,
 }
 
 impl Tab {
     fn new(id: u64) -> Self {
-        Self { id, title: String::new(), path: None, unsaved: false, lazy: None, frame_after_load: None, camera: CameraPose::default(), stash: Box::default(), cals: Default::default() }
+        Self { id, title: String::new(), path: None, unsaved: false, lazy: None, frame_after_load: None, camera: CameraPose::default(), stash: Box::default(), cals: Default::default(), view: ProjectView::default() }
     }
 
     /// Opened, but its layout has not been read yet.
@@ -234,6 +237,8 @@ impl Tabs {
     /// Parks the showing tab; the world is left with a blank scene.
     fn leave_active(&mut self, world: &mut World) {
         let tab = &mut self.list[self.active];
+        // Before the swap below: the card it notes belongs to this scene.
+        world.resource_scope(|world, mut slot: Mut<LeftPanelSlot>| tab.view = slot.take_view(world.resource::<RtlsUiState>()));
         let (title, path, frame) = world.resource_mut::<UiState>().into_inner().scene_fields();
         tab.title.clone_from(title);
         tab.path.clone_from(path);
@@ -260,6 +265,8 @@ impl Tabs {
         tab.stash.swap(world);
         crate::rtls::radio::MaterialCal::swap_parked(&mut tab.cals);
         unpark_entities(world, tab.id);
+        let view = std::mem::take(&mut tab.view);
+        world.resource_scope(|world, mut slot: Mut<LeftPanelSlot>| slot.show_view(&mut world.resource_mut::<RtlsUiState>(), view));
         // The last message was about the scene just left.
         world.resource_mut::<Status>().0.clear();
         let (title, path, frame) = world.resource_mut::<UiState>().into_inner().scene_fields();
@@ -281,6 +288,7 @@ impl Tabs {
 
     fn open(&mut self, world: &mut World, new: Vec<NewTab>, background: bool) {
         let mut show = None;
+        let asked = std::mem::take(&mut world.resource_mut::<LeftPanelSlot>().bench.opening);
         // The blank scene of a fresh start (or an emptied one) is used up first.
         let mut reuse = !background && self.active_is_blank(world);
         for n in new {
@@ -293,6 +301,12 @@ impl Tabs {
                 let (title, path, _) = world.resource_mut::<UiState>().into_inner().scene_fields();
                 title.clone_from(&n.title);
                 path.clone_from(&n.path);
+                // The user opened it, so it starts over in its own workspace. A scripted
+                // run has already gone to the one it wants.
+                if asked {
+                    let view = ProjectView::fresh(n.load.is_some());
+                    world.resource_scope(|world, mut slot: Mut<LeftPanelSlot>| slot.show_view(&mut world.resource_mut::<RtlsUiState>(), view));
+                }
                 if let Some(load) = n.load {
                     begin_load(world, load);
                 }
@@ -303,6 +317,7 @@ impl Tabs {
             self.next_id += 1;
             tab.title = n.title;
             tab.path = n.path;
+            tab.view = ProjectView::fresh(asked && n.load.is_some());
             tab.lazy = n.load;
             tab.stash.rtls = crate::rtls::RtlsState::new(world.resource::<crate::rtls::RtlsConfig>().settings.seed);
             show.get_or_insert(tab.id);
@@ -564,6 +579,7 @@ mod tests {
         w.init_resource::<crate::wall_tool::WallTool>();
         w.init_resource::<crate::undo::UndoRequest>();
         w.init_resource::<PrototypeCache>();
+        w.init_resource::<LeftPanelSlot>();
         w.spawn(OrbitCamera { focus: Vec3::ZERO, yaw: 0.0, pitch: 0.0, radius: 9.0 });
         w
     }
@@ -599,6 +615,60 @@ mod tests {
         let root = w.spawn((Transform::IDENTITY, Visibility::Visible, PlacedObject { asset: "a.usd".into(), name: name.into(), proto, joints: Vec::new(), locked: false })).id();
         w.spawn((PartOf(root), PartRest(0), PartBvh(bvh), ChildOf(root)));
         root
+    }
+
+    #[test]
+    fn a_tab_comes_back_in_the_workspace_it_was_left_in() {
+        use crate::ui::Workbench;
+        let mut w = world();
+        let a = with_tabs(&mut w, |_, t| t.active_id());
+        // With something in it, so the next project gets a tab of its own.
+        object(&mut w, "a");
+        w.resource_mut::<LeftPanelSlot>().bench.current = Workbench::Factory;
+
+        let b = open(&mut w, "b");
+        assert_ne!(a, b);
+        assert_eq!(w.resource::<LeftPanelSlot>().bench.current, Workbench::Layout, "a new project starts in its own place");
+        w.resource_mut::<LeftPanelSlot>().bench.current = Workbench::Plant;
+
+        with_tabs(&mut w, |w, t| t.activate(w, a));
+        assert_eq!(w.resource::<LeftPanelSlot>().bench.current, Workbench::Factory);
+        with_tabs(&mut w, |w, t| t.activate(w, b));
+        assert_eq!(w.resource::<LeftPanelSlot>().bench.current, Workbench::Plant);
+    }
+
+    #[test]
+    fn only_a_project_the_user_opened_will_pick_its_workspace() {
+        let mut w = world();
+        object(&mut w, "a");
+        open(&mut w, "scripted");
+        assert!(!w.resource::<LeftPanelSlot>().bench.settle_on_load);
+
+        object(&mut w, "b");
+        w.resource_mut::<LeftPanelSlot>().bench.opening = true;
+        open(&mut w, "chosen");
+        let slot = w.resource::<LeftPanelSlot>();
+        assert!(slot.bench.settle_on_load && !slot.bench.opening);
+    }
+
+    #[test]
+    fn a_scripted_load_into_the_blank_scene_keeps_the_workspace_it_went_to() {
+        use crate::ui::Workbench;
+        let mut w = world();
+        w.resource_mut::<LeftPanelSlot>().bench.current = Workbench::Simulation;
+        open(&mut w, "scripted");
+        assert_eq!(w.resource::<LeftPanelSlot>().bench.current, Workbench::Simulation);
+    }
+
+    #[test]
+    fn a_chosen_project_in_the_blank_scene_starts_over() {
+        use crate::ui::Workbench;
+        let mut w = world();
+        let mut slot = w.resource_mut::<LeftPanelSlot>();
+        slot.bench.current = Workbench::Factory;
+        slot.bench.opening = true;
+        open(&mut w, "chosen");
+        assert_eq!(w.resource::<LeftPanelSlot>().bench.current, Workbench::Layout);
     }
 
     fn with_tabs<R>(w: &mut World, f: impl FnOnce(&mut World, &mut Tabs) -> R) -> R {

@@ -44,6 +44,8 @@ pub enum SolverKind {
     Auto,
     /// openEMS time domain (dielectrics, anything).
     Fdtd,
+    /// The built-in finite-integration solver, time domain, CPU or GPU.
+    Fit,
     /// Method of moments on wires.
     MomWire,
     /// Method of moments on conducting surfaces.
@@ -55,9 +57,15 @@ impl SolverKind {
         match self {
             SolverKind::Auto => "Automatic",
             SolverKind::Fdtd => "FDTD time domain (openEMS)",
+            SolverKind::Fit => "FDM time domain (built in)",
             SolverKind::MomWire => "MoM, wires",
             SolverKind::MomSurface => "MoM, surfaces (RWG)",
         }
+    }
+
+    /// Marches a mesh of cells through time, as opposed to solving a matrix per frequency.
+    pub fn is_time_domain(self) -> bool {
+        matches!(self, SolverKind::Fdtd | SolverKind::Fit)
     }
 
     /// What `Auto` means for a geometry.
@@ -100,6 +108,9 @@ pub struct Setup {
     pub threads: usize,
     /// Extra field planes at the design frequency (FDTD).
     pub field_planes: bool,
+    /// Built-in solver: run again, adding cells where the field sits, until S stops changing.
+    #[serde(default)]
+    pub adaptive: bool,
 }
 
 impl Setup {
@@ -120,6 +131,7 @@ impl Setup {
             edges_per_lambda: 12.0,
             threads: 0,
             field_planes: true,
+            adaptive: false,
         }
     }
 
@@ -241,6 +253,9 @@ pub struct Project {
     pub extra: Vec<ExtraSolid>,
     #[serde(default)]
     pub extra_ports: Vec<ExtraPort>,
+    /// Feeds, by name, that are wave ports (see [`Geometry::wave_ports`]).
+    #[serde(default)]
+    pub wave_feeds: Vec<String>,
     /// Template parts the user switched off (by name).
     #[serde(default)]
     pub hidden: Vec<String>,
@@ -259,6 +274,12 @@ pub struct Project {
     /// Beams, direction finding, the receive chain and radar (see [`crate::phased`]).
     #[serde(default)]
     pub phased: crate::phased::PhasedDesign,
+    /// Bodies modelled in 3D: sketches and features in a tree (see [`crate::modeler`]).
+    #[serde(default, skip_serializing_if = "crate::modeler::Model::nothing_to_save")]
+    pub model: crate::modeler::Model,
+    /// Materials the user defined for this project, on top of the library.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<material::Material>,
 }
 
 impl Project {
@@ -279,6 +300,7 @@ impl Project {
             substrate: t.substrate.to_string(),
             extra: Vec::new(),
             extra_ports: Vec::new(),
+            wave_feeds: Vec::new(),
             hidden: Vec::new(),
             setup: Setup::for_band(1.0, 2.0, 1.5),
             drive: Vec::new(),
@@ -286,6 +308,8 @@ impl Project {
             reconfig: Default::default(),
             stack: Default::default(),
             phased: Default::default(),
+            model: Default::default(),
+            materials: Vec::new(),
         };
         pr.reset_band()?;
         if let Some(rc) = crate::reconfig::for_template(id, pr.f0()) {
@@ -345,6 +369,8 @@ impl Project {
 
     /// The material's constants as expression variables.
     fn base_vars(&self) -> Vars {
+        // Everything that builds or solves a project comes through here first.
+        material::remember_user(&self.materials);
         let mut base = Vars::new();
         let m = material::by_name(&self.substrate).unwrap_or_else(|| material::Material::dielectric("Air", 1.0, 0.0));
         base.insert("er".into(), m.eps_r());
@@ -355,6 +381,119 @@ impl Project {
     pub fn vars(&self) -> Result<Vars> {
         let pairs: Vec<(String, String)> = self.params.iter().map(|p| (p.name.clone(), p.expr.clone())).collect();
         expr::resolve(&pairs, &self.base_vars())
+    }
+
+    /// Calls a variable something else, here and everywhere an expression uses it. A template's
+    /// formulas are code and ask for their rows by name, so those can't be renamed.
+    pub fn rename_variable(&mut self, old: &str, new: &str) -> Result<()> {
+        if old == new {
+            return Ok(());
+        }
+        if !self.params.iter().any(|p| p.name == old) {
+            bail!("There's no variable called {old}.");
+        }
+        if expr::names(new).ok().as_deref() != Some(&[new.to_string()][..]) {
+            bail!("'{new}' can't be a variable's name: use letters, digits and _, starting with a letter.");
+        }
+        if self.var_hints().iter().any(|h| h.name == new) {
+            bail!("There's already a variable called {new}.");
+        }
+        if Self::from_template(&self.template, None).is_ok_and(|t| t.params.iter().any(|p| p.name == old)) {
+            bail!("The template's own formulas use {old} by that name, so it stays as it is.");
+        }
+        // Every string that can hold an expression. Names, notes and the like are left alone: a
+        // part called L is no business of a variable called L.
+        fn walk(v: &mut serde_json::Value, old: &str, new: &str) {
+            match v {
+                serde_json::Value::String(s) => *s = rewrite(s, old, new),
+                serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, old, new)),
+                serde_json::Value::Object(o) => {
+                    for (k, x) in o.iter_mut() {
+                        // Only when it's text: a feature's `kind` is the feature itself.
+                        let words = x.is_string() && matches!(k.as_str(), "name" | "note" | "material" | "file" | "template" | "metal" | "substrate" | "type" | "form" | "kind" | "mode" | "extent" | "op");
+                        // An equation curve's own parameter is called t, whatever else is.
+                        let parameter = old == "t" && matches!(k.as_str(), "u" | "v");
+                        if parameter {
+                            continue;
+                        }
+                        if !words && !matches!(k.as_str(), "wave_feeds" | "hidden") {
+                            walk(x, old, new);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn rewrite(s: &str, old: &str, new: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            let mut at = 0;
+            for t in expr::tokens(s, |n| n == old) {
+                if t.kind == expr::TokenKind::Variable && &s[t.start..t.end] == old {
+                    out.push_str(&s[at..t.start]);
+                    out.push_str(new);
+                    at = t.end;
+                }
+            }
+            out.push_str(&s[at..]);
+            out
+        }
+        let mut text = serde_json::to_value(&*self)?;
+        if let Some(o) = text.as_object_mut() {
+            for (k, x) in o.iter_mut() {
+                if matches!(k.as_str(), "params" | "extra" | "extra_ports" | "model") {
+                    walk(x, old, new);
+                }
+            }
+        }
+        let mut p: Project = serde_json::from_value(text)?;
+        if let Some(row) = p.params.iter_mut().find(|r| r.name == old) {
+            row.name = new.to_string();
+        }
+        p.vars()?;
+        *self = p;
+        Ok(())
+    }
+
+    /// A material of the project's own has a new name: what uses it follows.
+    pub fn rename_material(&mut self, old: &str, new: &str) {
+        for e in &mut self.extra {
+            if e.material == old {
+                e.material = new.to_string();
+            }
+        }
+        for f in &mut self.model.features {
+            if let Some(out) = f.kind.output_mut()
+                && out.material == old
+            {
+                out.material = new.to_string();
+            }
+        }
+        if self.metal == old {
+            self.metal = new.to_string();
+        }
+        if self.substrate == old {
+            self.substrate = new.to_string();
+        }
+        for l in self.stack.above.iter_mut().chain(self.stack.below.iter_mut()) {
+            if l.material == old {
+                l.material = new.to_string();
+            }
+        }
+    }
+
+    /// What uses a material, in words, or nothing if nothing does.
+    pub fn uses_of_material(&self, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.metal == name {
+            out.push("the antenna's metal".to_string());
+        }
+        if self.substrate == name {
+            out.push("the antenna's substrate".to_string());
+        }
+        out.extend(self.extra.iter().filter(|e| e.material == name).map(|e| e.name.clone()));
+        out.extend(self.model.features.iter().filter(|f| f.kind.output().is_some_and(|o| o.material == name)).map(|f| f.name.clone()));
+        out.extend(self.stack.above.iter().chain(self.stack.below.iter()).filter(|l| l.material == name).map(|l| l.name.clone()));
+        out
     }
 
     /// What the table comes to with its broken rows, and what uses them, left out. One
@@ -412,30 +551,54 @@ impl Project {
 
     /// Evaluates everything into the geometry the solvers take; it must have a feed.
     pub fn geometry(&self) -> Result<Geometry> {
-        let g = self.scatterer()?;
+        let mut g = self.scatterer()?;
         if g.ports.is_empty() {
-            bail!("The model has no port. Add a feed under Parts and ports.");
+            bail!("The model has no port. Add a feed: Feed on the ribbon's Model tab.");
         }
+        g.wave_ports = g.ports.iter().enumerate().filter(|(_, p)| self.wave_feeds.contains(&p.name)).map(|(i, _)| i).collect();
         Ok(g)
     }
 
     /// The same model when nothing has to feed it: a part list being built, or a
     /// target for a radar cross section.
     pub fn scatterer(&self) -> Result<Geometry> {
+        let vars = self.vars()?;
+        let mut g = self.parts_geometry(&vars)?;
+        if !self.model.is_empty() {
+            let built = self.model.build(&vars);
+            // A solver can't run on a model with a step missing, whatever the canvas can still show.
+            if let Some((id, why)) = built.errors.first() {
+                let name = self.model.feature(*id).map_or("A feature", |f| f.name.as_str());
+                bail!("{name}: {why}");
+            }
+            g.solids.extend(built.solids(&self.metal));
+            g.hints.extend(built.hints(C0 / self.setup.f_hi.max(1.0) / 300.0));
+            g.ports.extend(built.ports);
+        }
+        if !self.stack.is_empty() {
+            self.stack.check()?;
+            g.stack = Some(self.stack.clone());
+        }
+        check(&g)?;
+        Ok(g)
+    }
+
+    /// The template's parts and those added to it, without what's modelled in 3D and with nothing
+    /// checked: what the canvas draws under the bodies while a feature is being worked on.
+    pub fn parts_geometry(&self, vars: &Vars) -> Result<Geometry> {
         // `base_vars` would quietly read an unknown substrate as air.
         if material::by_name(&self.substrate).is_none() {
             bail!("The substrate '{}' isn't in the material library.", self.substrate);
         }
-        let vars = self.vars()?;
         let t = templates::by_id(&self.template).with_context(|| format!("no template '{}'", self.template))?;
-        let ctx = templates::Ctx { v: &vars, metal: &self.metal, substrate: &self.substrate };
+        let ctx = templates::Ctx { v: vars, metal: &self.metal, substrate: &self.substrate };
         let mut g = (t.build)(&ctx)?;
         g.solids.retain(|s| !self.hidden.contains(&s.name));
         // An air substrate is no substrate at all (and keeps MoM available).
         g.solids.retain(|s| s.material != "Air");
         let finest = C0 / self.setup.f_hi.max(1.0) / 300.0;
         for e in &self.extra {
-            let solid = extra_solid(e, &vars)?;
+            let solid = extra_solid(e, vars)?;
             // A drawing has no template to say where its fine detail is.
             if let ExtraPrim::Outline { cell, .. } = &e.prim
                 && *cell > 0.0
@@ -446,13 +609,13 @@ impl Project {
             // Traces ask for cells a third of their own width.
             if let ExtraPrim::Strip { w, .. } | ExtraPrim::Arc { w, .. } | ExtraPrim::Meander { w, .. } = &e.prim {
                 let (min, max) = solid.shape.bounds();
-                g.hints.push(MeshHint { min, max, cell: (expr::eval(w, &vars)? / 3.0).max(finest) });
+                g.hints.push(MeshHint { min, max, cell: (expr::eval(w, vars)? / 3.0).max(finest) });
             }
             // A drawn shape asks for a third of its narrowest feature, holes included.
             if let ExtraPrim::Drawn { form, holes, .. } = &e.prim {
-                let mut rings = vec![form_outline(&e.name, form, &vars)?];
+                let mut rings = vec![form_outline(&e.name, form, vars)?];
                 for h in holes {
-                    rings.push(eval_points(h, &vars)?);
+                    rings.push(eval_points(h, vars)?);
                 }
                 let narrowest = crate::cad::narrowest_of(&rings);
                 if narrowest.is_finite() && narrowest > 0.0 {
@@ -463,21 +626,17 @@ impl Project {
             g.solids.push(solid);
         }
         for p in &self.extra_ports {
-            let e3 = |a: &[String; 3]| -> Result<P3> { Ok([expr::eval(&a[0], &vars)?, expr::eval(&a[1], &vars)?, expr::eval(&a[2], &vars)?]) };
-            g.ports.push(PortDef { name: p.name.clone(), a: e3(&p.a)?, b: e3(&p.b)?, width: expr::eval(&p.width, &vars)?, z0: expr::eval(&p.z0, &vars)? });
+            let e3 = |a: &[String; 3]| -> Result<P3> { Ok([expr::eval(&a[0], vars)?, expr::eval(&a[1], vars)?, expr::eval(&a[2], vars)?]) };
+            g.ports.push(PortDef { name: p.name.clone(), a: e3(&p.a)?, b: e3(&p.b)?, width: expr::eval(&p.width, vars)?, z0: expr::eval(&p.z0, vars)? });
         }
-        if !self.stack.is_empty() {
-            self.stack.check()?;
-            g.stack = Some(self.stack.clone());
-        }
-        check(&g)?;
         Ok(g)
     }
 
     /// The same model with every part and port its own to edit: the template's formulas
     /// are left behind, its variables stay for whatever else uses them.
     pub fn editable_copy(&self) -> Result<Self> {
-        let g = self.geometry().or_else(|_| self.scatterer())?;
+        // What's modelled in 3D is editable already, and stays in its tree.
+        let g = self.parts_geometry(&self.vars()?)?;
         let mut p = self.clone();
         p.template = "custom".into();
         p.hidden.clear();
@@ -514,8 +673,111 @@ impl Project {
         Ok(p)
     }
 
+    /// The same antenna with its template's parts and flat drawings as steps of the 3D model, so
+    /// they can be built on, cut and sketched on. Their sizes become numbers, as in
+    /// [`Self::editable_copy`]; the variables stay for whatever else uses them.
+    pub fn parts_into_model(&self) -> Result<Self> {
+        use crate::modeler::{Anchor, Extent, Kind, Mode, Output, PathRef, PlaneRef, Prim, sketch::Sketch};
+        let vars = self.vars()?;
+        let g = self.parts_geometry(&vars)?;
+        if g.ground {
+            bail!("This antenna stands on an infinite ground plane, which only its template can give it.");
+        }
+        let mut p = self.clone();
+        p.template = "custom".into();
+        p.hidden.clear();
+        p.extra.clear();
+        p.extra_ports.clear();
+        let num = crate::modeler::sketch::mm_text;
+        let n3 = |q: P3| [num(q[0]), num(q[1]), num(q[2])];
+        for s in &g.solids {
+            let (lo, hi) = s.shape.bounds();
+            // What the template asked of the mesh here goes along with the part.
+            let hint = g.hints.iter().filter(|h| (0..3).all(|k| h.min[k] <= hi[k] && lo[k] <= h.max[k])).map(|h| h.cell).fold(f64::INFINITY, f64::min);
+            let out = Output { mode: Mode::New, target: None, material: s.material.clone(), mesh: if hint.is_finite() { num(hint) } else { String::new() }, surface: false, ..Default::default() };
+            let add = |p: &mut Project, kind: Kind| {
+                let id = p.model.fresh_id();
+                p.model.add_named(id, s.name.clone(), kind);
+            };
+            // A flat outline in a sketch of its own, named so the body keeps the part's name.
+            let flat = |p: &mut Project, axis: usize, at: f64, ring: &[[f64; 2]], thick: f64| -> bool {
+                let mut seen: Vec<[f64; 2]> = Vec::with_capacity(ring.len());
+                if ring.iter().any(|q| {
+                    let repeat = seen.iter().any(|o| (o[0] - q[0]).abs() + (o[1] - q[1]).abs() < 1e-12);
+                    seen.push(*q);
+                    repeat
+                }) {
+                    // A hole joined in by a keyhole: triangles find their own way back to an outline.
+                    return false;
+                }
+                // Solver axes for this plane are the next two along, so z-x is a front sketch turned over.
+                let (plane, to_uv): (PlaneRef, fn([f64; 2]) -> [f64; 2]) = match axis {
+                    2 => (PlaneRef::Base { axis: 2, offset: num(at) }, |q| q),
+                    0 => (PlaneRef::Base { axis: 0, offset: num(at) }, |q| q),
+                    _ => (PlaneRef::Base { axis: 1, offset: num(-at) }, |q| [q[1], q[0]]),
+                };
+                let mut sk = Sketch::default();
+                let ids: Vec<u32> = ring.iter().map(|q| sk.add_point(to_uv(*q))).collect();
+                for k in 0..ids.len() {
+                    sk.add_line(ids[k], ids[(k + 1) % ids.len()]);
+                }
+                let sid = p.model.fresh_id();
+                p.model.add_named(sid, format!("{} outline", s.name), Kind::Sketch { plane, sketch: sk });
+                let id = p.model.fresh_id();
+                let kind = if thick > 0.0 {
+                    // Along +axis, whichever way the plane's own normal faces.
+                    let extent = if axis == 1 { Extent::Reverse } else { Extent::One };
+                    Kind::Extrude { sketch: sid, depth: num(thick), extent, out: out.clone() }
+                } else {
+                    Kind::Sheet { sketch: sid, out: out.clone() }
+                };
+                p.model.add_named(id, s.name.clone(), kind);
+                true
+            };
+            let done = match &s.shape {
+                Shape::Box { min, max } => match (0..3).find(|k| max[*k] - min[*k] <= 0.0) {
+                    Some(axis) => {
+                        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                        flat(&mut p, axis, min[axis], &[[min[u], min[v]], [max[u], min[v]], [max[u], max[v]], [min[u], max[v]]], 0.0)
+                    }
+                    None => {
+                        add(&mut p, Kind::Solid { shape: Prim::Box { min: n3(*min), max: n3(*max) }, out: out.clone() });
+                        true
+                    }
+                },
+                Shape::Cylinder { a, b, r } => {
+                    add(&mut p, Kind::Solid { shape: Prim::Cylinder { a: n3(*a), b: n3(*b), r: num(*r) }, out: out.clone() });
+                    true
+                }
+                Shape::Sphere { c, r } => {
+                    add(&mut p, Kind::Solid { shape: Prim::Sphere { c: n3(*c), r: num(*r) }, out: out.clone() });
+                    true
+                }
+                Shape::Wire { pts, r } => {
+                    add(&mut p, Kind::Wire { path: PathRef::Points { pts: pts.iter().map(|q| n3(*q)).collect() }, radius: num(*r), out: out.clone() });
+                    true
+                }
+                Shape::Polygon { axis, at, pts, thick } => flat(&mut p, *axis, *at, pts, *thick),
+                Shape::Tris { .. } => false,
+            };
+            if !done {
+                let (tris, _) = crate::geometry::tessellate(&s.shape);
+                add(&mut p, Kind::Import { file: s.name.clone(), tris, out });
+            }
+        }
+        for port in &g.ports {
+            let id = p.model.fresh_id();
+            p.model.add_named(id, port.name.clone(), Kind::Feed { a: Anchor::Xyz { at: n3(port.a) }, b: Anchor::Xyz { at: n3(port.b) }, width: num(port.width), z0: format!("{}", port.z0) });
+        }
+        Ok(p)
+    }
+
     /// The solver a run of this geometry will really use.
     pub fn solver_for(&self, geom: &Geometry) -> SolverKind {
+        // Only the built-in solver has them, so asking for one chooses it.
+        if self.setup.solver == SolverKind::Auto && !geom.wave_ports.is_empty() {
+            return SolverKind::Fit;
+        }
         let chosen = self.setup.solver.resolve(geom.solver_fit());
         if self.setup.solver == SolverKind::Auto && chosen == SolverKind::MomSurface {
             let opts = crate::mom::MomOptions { edges_per_lambda: self.setup.edges_per_lambda, segments_per_lambda: self.setup.segments_per_lambda, ..Default::default() };
@@ -670,7 +932,7 @@ fn stroked(name: &str, path: &[[f64; 2]], w: f64) -> Result<Vec<[f64; 2]>> {
     if !(w > 0.0) {
         bail!("Trace '{name}' needs a width above zero.");
     }
-    crate::cad::stroke(path, w, false).into_iter().next().with_context(|| format!("Trace '{name}' needs a path of two different points."))
+    crate::cad::strip_outline(path, w).with_context(|| format!("Trace '{name}' needs a path of two different points."))
 }
 
 /// Rejects what no solver could run, in terms a user can act on.
@@ -964,6 +1226,72 @@ pub fn wavelength(f: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renaming_a_variable_follows_it_into_every_expression_and_leaves_names_alone() {
+        use crate::modeler::{Kind, Prim};
+        let mut p = Project::from_template("custom", Some("1GHz")).unwrap();
+        p.params.push(Param::new("L", "40mm", "L as a note"));
+        p.params.push(Param::new("half", "L/2", ""));
+        p.params.push(Param::new("Long", "L+LL", ""));
+        p.params.push(Param::new("LL", "1mm", ""));
+        p.model.add_named(1, "L".into(), Kind::Solid { shape: Prim::Cuboid { p0: ["0".into(), "0".into(), "0".into()], size: ["L".into(), "half".into(), "L*0.1+LL".into()] }, out: Default::default() });
+        let size = |p: &Project| {
+            let b = p.model.build(&p.vars().unwrap());
+            assert!(b.errors.is_empty(), "{:?}", b.errors);
+            let (lo, hi) = b.bodies[0].mesh.bounds();
+            std::array::from_fn::<f64, 3, _>(|k| hi[k] - lo[k])
+        };
+        let before = size(&p);
+
+        p.rename_variable("L", "Len").unwrap();
+        assert!(p.params.iter().any(|r| r.name == "Len" && r.expr == "40mm" && r.note == "L as a note"));
+        assert_eq!(p.params.iter().find(|r| r.name == "half").unwrap().expr, "Len/2");
+        assert_eq!(p.params.iter().find(|r| r.name == "Long").unwrap().expr, "Len+LL", "whole names only");
+        assert_eq!(p.model.features[0].name, "L", "a part called L is its own business");
+        let Kind::Solid { shape: Prim::Cuboid { size: s, .. }, .. } = &p.model.features[0].kind else { panic!() };
+        assert_eq!(s[2], "Len*0.1+LL");
+        assert_eq!(size(&p), before);
+
+        let same = p.clone();
+        assert!(p.rename_variable("Len", "half").is_err(), "taken");
+        assert!(p.rename_variable("Len", "2 bad").is_err(), "not a name");
+        assert!(p.rename_variable("nope", "x").is_err(), "not there");
+        assert_eq!(p, same, "a refused rename changes nothing");
+    }
+
+    #[test]
+    fn a_templates_own_rows_cannot_be_renamed_because_its_formulas_ask_for_them() {
+        let mut p = Project::from_template("dipole", None).unwrap();
+        let row = p.params.iter().find(|r| r.name != "f0" && !r.derived).unwrap().name.clone();
+        assert!(p.rename_variable(&row, "renamed").unwrap_err().to_string().contains("template"));
+    }
+
+    #[test]
+    fn a_project_can_define_a_material_of_its_own_and_parts_can_use_it() {
+        let mut p = Project::from_template("custom", Some("1GHz")).unwrap();
+        p.materials.push(material::Material::dielectric("Test laminate 7", 7.5, 0.01));
+        p.vars().unwrap();
+        let m = material::by_name("Test laminate 7").expect("found by name, as the solvers look it up");
+        assert_eq!(m.eps_r(), 7.5);
+        assert!(!material::built_in().iter().any(|b| b.name == "Test laminate 7"));
+        assert!(material::library().iter().any(|b| b.name == "Test laminate 7"));
+
+        // Saved with the project, and read back.
+        let text = serde_json::to_string(&p).unwrap();
+        assert!(text.contains("Test laminate 7"));
+        let q: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(q.materials, p.materials);
+        // Changing it changes what's found; renaming takes its users along.
+        p.materials[0] = material::Material::dielectric("Test laminate 7", 8.0, 0.01);
+        p.vars().unwrap();
+        assert_eq!(material::by_name("Test laminate 7").unwrap().eps_r(), 8.0);
+        p.substrate = "Test laminate 7".into();
+        p.rename_material("Test laminate 7", "Test laminate 8");
+        assert_eq!(p.substrate, "Test laminate 8");
+        // A project with none writes nothing new, so saved files don't churn.
+        assert!(!serde_json::to_string(&Project::from_template("dipole", None).unwrap()).unwrap().contains("\"materials\""));
+    }
 
     #[test]
     fn expressions_are_offered_every_name_they_may_use() {

@@ -98,6 +98,7 @@ fn main() {
     let mut plant_test: Option<String> = None;
     let mut probe_ports: Vec<String> = Vec::new();
     let mut sim_test: Option<String> = None;
+    let mut double_clicked = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--sim-test" => sim_test = args.next(),
@@ -125,7 +126,10 @@ fn main() {
             "--rtls-deploy" => rtls_deploy = true,
             "--sample" => sample = args.next().and_then(|n| n.parse::<usize>().ok()).map(|n| n.saturating_sub(1)),
             // Double-clicking a project file arrives here.
-            _ if project_file::is_project_path(std::path::Path::new(&a)) => layouts.push(a),
+            _ if project_file::is_project_path(std::path::Path::new(&a)) || project_file::holds_antenna(std::path::Path::new(&a)) => {
+                layouts.push(a);
+                double_clicked = true;
+            }
             _ => root = Some(a),
         }
     }
@@ -292,10 +296,17 @@ fn main() {
         app.world_mut().resource_mut::<ui::UiState>().skip_start(sample);
     }
     let mut layouts = layouts.into_iter().map(std::path::PathBuf::from);
-    if let Some(path) = layouts.next() {
-        ui::open_at_launch(app.world_mut(), path);
+    if let Some(path) = layouts.next()
+        && ui::open_at_launch(app.world_mut(), path)
+        && double_clicked
+    {
+        ui::settle_when_loaded(app.world_mut());
     }
-    let more: Vec<tabs::NewTab> = layouts.map(|p| tabs::NewTab { title: tabs::title_of(&p), path: Some(p.clone()), load: Some(p) }).collect();
+    let (antennas, scenes): (Vec<_>, Vec<_>) = layouts.partition(|p| project_file::holds_antenna(p));
+    for p in antennas {
+        ui::open_antenna(app.world_mut(), p);
+    }
+    let more: Vec<tabs::NewTab> = scenes.into_iter().map(|p| tabs::NewTab { title: tabs::title_of(&p), path: Some(p.clone()), load: Some(p) }).collect();
     if !more.is_empty() {
         app.world_mut().resource_mut::<tabs::Tabs>().request(tabs::Request::OpenInBackground(more));
     }

@@ -3,7 +3,7 @@
 //! scripted runs (with `--screenshot`) without touching the real pointer.
 //!
 //! Steps, separated by `;`, in logical points: `wait:SECONDS`, `move:X,Y`,
-//! `click:X,Y`, `rclick:X,Y`, `drag:X,Y,X2,Y2`, `rdrag:X,Y,X2,Y2`, `wheel:LINES`,
+//! `click:X,Y`, `ctrlclick:X,Y`, `rclick:X,Y`, `drag:X,Y,X2,Y2`, `rdrag:X,Y,X2,Y2`, `wheel:LINES`,
 //! `type:TEXT` for characters, `key:NAME` for a named key, as in `key:Enter`,
 //! `key:ArrowDown`, `key:Tab`, `key:Escape`, `key:Backspace` or `key:ctrl+Space`,
 //! and `probe`, which prints whether the UI claims the pointer.
@@ -27,6 +27,8 @@ enum Step {
     Button(MouseButton, ButtonState),
     Wheel(f32),
     Key(KeyCode, Key, ButtonState),
+    /// A file dropped on the window, the way a photo reaches the assistant.
+    Drop(std::path::PathBuf),
     Probe,
 }
 
@@ -64,6 +66,13 @@ impl Drive {
             match op {
                 "wait" => steps.push_back(Step::Wait(n.first().copied().unwrap_or(0.0))),
                 "move" => steps.push_back(Step::Move(at(0))),
+                "ctrlclick" => {
+                    steps.push_back(Step::Move(at(0)));
+                    steps.push_back(Step::Key(KeyCode::ControlLeft, Key::Control, ButtonState::Pressed));
+                    steps.push_back(Step::Button(MouseButton::Left, ButtonState::Pressed));
+                    steps.push_back(Step::Button(MouseButton::Left, ButtonState::Released));
+                    steps.push_back(Step::Key(KeyCode::ControlLeft, Key::Control, ButtonState::Released));
+                }
                 "click" | "rclick" => {
                     let b = if op == "click" { MouseButton::Left } else { MouseButton::Right };
                     steps.push_back(Step::Move(at(0)));
@@ -102,6 +111,7 @@ impl Drive {
                         steps.push_back(Step::Key(KeyCode::ControlLeft, Key::Control, ButtonState::Released));
                     }
                 }
+                "drop" => steps.push_back(Step::Drop(rest.into())),
                 "probe" => steps.push_back(Step::Probe),
                 other => warn!("--drive: unknown step {other}"),
             }
@@ -122,6 +132,7 @@ pub fn play(
     mut wheel: MessageWriter<MouseWheel>,
     mut keys: MessageWriter<KeyboardInput>,
     mut window_events: MessageWriter<WindowEvent>,
+    mut files: MessageWriter<bevy::window::FileDragAndDrop>,
 ) {
     drive.wait -= time.delta_secs();
     if drive.wait > 0.0 {
@@ -152,6 +163,9 @@ pub fn play(
         }
         Step::Key(key_code, logical_key, state) => {
             keys.write(KeyboardInput { key_code, logical_key, state, text: None, repeat: false, window: *window });
+        }
+        Step::Drop(path_buf) => {
+            files.write(bevy::window::FileDragAndDrop::DroppedFile { window: *window, path_buf });
         }
         Step::Probe => println!("probe at {:?}: pointer over UI = {}", drive.at, block.pointer),
     }

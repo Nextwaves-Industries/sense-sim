@@ -58,7 +58,7 @@ pub struct Projector {
 }
 
 impl Projector {
-    fn new(cam: &Camera, rect: Rect, center: P3, extent: f64) -> Self {
+    pub(super) fn new(cam: &Camera, rect: Rect, center: P3, extent: f64) -> Self {
         let (sy, cy) = cam.yaw.sin_cos();
         let (sp, cp) = cam.pitch.sin_cos();
         // Screen right, screen up, towards the viewer. Antenna z is up on screen.
@@ -69,17 +69,42 @@ impl Projector {
         Self { center, scale, origin: rect.center() + cam.pan, r: [right, up, toward] }
     }
     /// Screen position and depth (larger is nearer).
-    fn project(&self, p: P3) -> (Pos2, f32) {
+    pub(super) fn project(&self, p: P3) -> (Pos2, f32) {
         let d = [(p[0] - self.center[0]) as f32, (p[1] - self.center[1]) as f32, (p[2] - self.center[2]) as f32];
         let dot = |a: [f32; 3]| a[0] * d[0] + a[1] * d[1] + a[2] * d[2];
         (self.origin + vec2(dot(self.r[0]) * self.scale, -dot(self.r[1]) * self.scale), dot(self.r[2]))
     }
-    fn toward(&self) -> [f64; 3] {
+    pub(super) fn toward(&self) -> [f64; 3] {
         let t = self.r[2];
         [t[0] as f64, t[1] as f64, t[2] as f64]
     }
+    pub(super) fn right(&self) -> [f64; 3] {
+        self.r[0].map(f64::from)
+    }
+    pub(super) fn up(&self) -> [f64; 3] {
+        self.r[1].map(f64::from)
+    }
+    pub(super) fn center(&self) -> P3 {
+        self.center
+    }
+    /// Everything the view depends on, for telling whether a picture is still good.
+    pub(super) fn signature(&self) -> [f32; 13] {
+        let r = &self.r;
+        [r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2], self.scale, self.origin.x, self.origin.y, 0.0]
+    }
+    /// How far in depth counts as the same surface: a tenth of a screen point, in world units.
+    pub(super) fn depth_bias(&self) -> f32 {
+        0.6 / self.scale.max(1e-6)
+    }
+    #[cfg(test)]
+    pub(super) fn for_test(cam: &Camera, rect: Rect, center: P3, extent: f64) -> Self {
+        Self::new(cam, rect, center, extent)
+    }
     pub fn screen(&self, p: P3) -> Pos2 {
         self.project(p).0
+    }
+    pub(super) fn points_per_metre(&self) -> f32 {
+        self.scale
     }
     /// The line of sight through a screen point: a point well in front of the model
     /// and the direction into the screen.
@@ -311,14 +336,23 @@ pub struct Scene<'a> {
     pub plane_tex: Option<egui::TextureId>,
     pub transparent: bool,
     pub show_ports: bool,
+    /// The variables that are distances on the model, to write on it. Empty: none shown.
+    pub dims: &'a [antenna_core::dims::Dim],
+    /// The variable whose row is being pointed at, shown even if it isn't one of the main ones.
+    pub dim_focus: Option<&'a str>,
     /// Reconfigurable parts: a port by name, its colour and its label.
     pub part_marks: &'a [(String, Color32, String)],
+    /// What goes through the depth buffer. Empty: the older painting by parts, for markers.
+    pub parts: &'a [super::raster::Part],
+    pub look: super::raster::Look,
+    /// A sketch plane's grid, in place of `grid`, for a plane at any angle.
+    pub sketch_grid: Option<(antenna_core::modeler::mesh::Frame, f64)>,
 }
 
 const METAL: Color32 = Color32::from_rgb(214, 168, 92);
 const WIRE: Color32 = Color32::from_rgb(160, 110, 40);
 
-fn solid_color(name: &str) -> Color32 {
+pub(super) fn solid_color(name: &str) -> Color32 {
     match material::by_name(name) {
         Some(m) if !m.is_conductor() => {
             let er = m.eps_r();
@@ -402,10 +436,16 @@ fn axes(painter: &egui::Painter, pj: &Projector, rect: Rect) {
     }
 }
 
-/// How far below a model its floor lies: on the ground plane if it has one, otherwise a little
-/// under it, so its shadow shows apart from it.
-fn floor_of(g: &Geometry, extent: f64) -> f64 {
-    if g.ground { 0.0 } else { g.bounds().0[2] - extent * 0.35 }
+/// The dashed line from a model held up off the floor down to it, from the corner of its base.
+/// A model that's up there on purpose should say so, rather than look adrift.
+fn height_mark(base: P3, extent: f64) -> Option<[P3; 2]> {
+    (base[2] > extent * 0.01).then(|| [base, [base[0], base[1], 0.0]])
+}
+
+/// What that line says: to the nearest millimetre once that's close enough.
+fn height_text(metres: f64) -> String {
+    let mm = metres * 1e3;
+    if mm >= 10.0 { format!("{mm:.0} mm above z = 0") } else { format!("{mm:.1} mm above z = 0") }
 }
 
 /// A round grid step for a model this big.
@@ -438,6 +478,83 @@ fn shadow(painter: &egui::Painter, pj: &Projector, tess: &[Tessellated], floor: 
     for l in tess.iter().flat_map(|(_, l)| l) {
         painter.line_segment([on_floor(l[0]), on_floor(l[1])], Stroke::new(2.5, Color32::from_black_alpha(55)));
     }
+}
+
+/// The same, for what goes through the depth buffer.
+fn parts_shadow(painter: &egui::Painter, pj: &Projector, parts: &[super::raster::Part], floor: f64) {
+    const MOST_TRIANGLES: usize = 20_000;
+    if parts.iter().map(|p| p.mesh.tris.len()).sum::<usize>() > MOST_TRIANGLES {
+        return;
+    }
+    let dark = Color32::from_black_alpha(22);
+    let mut mesh = Mesh::default();
+    for p in parts {
+        for t in 0..p.mesh.tris.len() {
+            let c = p.mesh.corners(t);
+            // Only one side of a closed solid, or it would count twice.
+            if !p.two_sided && normal(&c)[2] < 0.0 {
+                continue;
+            }
+            let n = mesh.vertices.len() as u32;
+            for q in c {
+                mesh.colored_vertex(pj.project([q[0], q[1], floor]).0, dark);
+            }
+            mesh.add_triangle(n, n + 1, n + 2);
+        }
+    }
+    if !mesh.is_empty() {
+        painter.add(EShape::mesh(mesh));
+    }
+}
+
+/// A sketch plane's grid across the view, at any angle. Every fifth line is stronger, and the
+/// plane's own axes stand out, so it reads as graph paper.
+fn sketch_grid(painter: &egui::Painter, pj: &Projector, rect: Rect, frame: &antenna_core::modeler::mesh::Frame, step: f64) -> Option<f64> {
+    use antenna_core::geometry::{dot, sub};
+    let facing = dot(frame.n, pj.toward()).abs();
+    if facing < GRID_EDGE_ON as f64 {
+        return None;
+    }
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for c in [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()] {
+        let (o, d) = pj.ray(c);
+        let t = dot(sub(frame.o, o), frame.n) / dot(d, frame.n);
+        let (q, _) = frame.local(antenna_core::geometry::add(o, antenna_core::geometry::scale(d, t)));
+        for k in 0..2 {
+            lo[k] = lo[k].min(q[k]);
+            hi[k] = hi[k].max(q[k]);
+        }
+    }
+    let squash = (facing as f32).max(0.05);
+    let gap = pj.scale * squash;
+    let every = grid_every(step.max(1e-9), gap);
+    let shown = ((facing as f32 - GRID_EDGE_ON) / 0.2).clamp(0.0, 1.0);
+    let at = |q: [f64; 2]| pj.screen(frame.at(q, 0.0));
+    let mut mesh = Mesh::default();
+    let feather = 1.0 / painter.ctx().pixels_per_point();
+    for k in 0..2 {
+        let (a, b) = ((lo[k] / every).floor() as i64, (hi[k] / every).ceil() as i64);
+        if b - a > 800 {
+            continue;
+        }
+        for i in a..=b {
+            let x = i as f64 * every;
+            let (p, q) = if k == 0 { ([x, lo[1]], [x, hi[1]]) } else { ([lo[0], x], [hi[0], x]) };
+            let (color, ink, width) = if i == 0 {
+                (if k == 0 { theme::AXIS[1] } else { theme::AXIS[0] }, 0.75, 1.5)
+            } else {
+                (GRID_INK, grid_ink(grid_rank(i) * gap * every as f32), 0.8)
+            };
+            if ink * shown < 0.01 {
+                continue;
+            }
+            ribbon(&mut mesh, at(p), at(q), width, feather, 1, |_| (mix(theme::BG, color, ink * shown), theme::BG));
+        }
+    }
+    if !mesh.is_empty() {
+        painter.add(EShape::mesh(mesh));
+    }
+    Some(every)
 }
 
 /// A wire's colour at a depth: nearer is brighter, `near` from 0 to 1.
@@ -707,12 +824,13 @@ fn floor_grid(painter: &egui::Painter, pj: &Projector, center: P3, radius: f64, 
 /// Draws the scene over all of `canvas`, framed on `rect`, the part the cards leave
 /// free: a zoomed model runs on under the cards. Dragging orbits, right-drag pans,
 /// the wheel zooms. Returns the canvas's response and how it projects, for a tool on top.
-pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene: &Scene) -> (egui::Response, Projector) {
+pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene: &Scene, picture: &mut super::raster::Canvas) -> (egui::Response, Projector) {
     let id = ui.make_persistent_id("antenna_view3d");
     let resp = ui.interact(canvas, id, Sense::click_and_drag());
     // While drawing, the left button is the tool's, so the middle one orbits instead of panning.
     let middle = resp.dragged_by(egui::PointerButton::Middle);
-    if (resp.dragged_by(egui::PointerButton::Primary) && (!scene.drawing || ui.input(|i| i.modifiers.alt))) || (scene.drawing && middle) {
+    let orbiting = (resp.dragged_by(egui::PointerButton::Primary) && (!scene.drawing || ui.input(|i| i.modifiers.alt))) || (scene.drawing && middle);
+    if orbiting {
         let d = resp.drag_delta();
         cam.yaw -= d.x * 0.008;
         cam.pitch = (cam.pitch + d.y * 0.008).clamp(-1.55, 1.55);
@@ -720,12 +838,21 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
     if resp.dragged_by(egui::PointerButton::Secondary) || (middle && !scene.drawing) {
         cam.pan += resp.drag_delta();
     }
+    let mut zooming = false;
     if resp.hovered() {
         let z = ui.input(|i| i.smooth_scroll_delta.y);
         if z != 0.0 {
+            zooming = true;
+            let before = cam.zoom;
             cam.zoom = (cam.zoom * (z * 0.0018).exp()).clamp(0.1, 40.0);
+            // Towards the pointer, so what's under it stays under it.
+            if let Some(at) = resp.hover_pos() {
+                let from_middle = at - (rect.center() + cam.pan);
+                cam.pan -= from_middle * (cam.zoom / before - 1.0);
+            }
         }
     }
+    let hurry = orbiting || zooming || resp.dragged_by(egui::PointerButton::Secondary);
     if resp.double_clicked() && !scene.drawing {
         *cam = Camera::default();
     }
@@ -744,8 +871,34 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
         center = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
         extent = antenna_core::geometry::norm(antenna_core::geometry::sub(hi, lo)) / 2.0;
     }
+    // Bodies count towards the framing as much as parts do.
+    let mut base = scene.geometry.filter(|g| !g.solids.is_empty()).map(|g| g.bounds().0);
+    if !scene.parts.is_empty() {
+        let (mut lo, mut hi): (P3, P3) = match scene.geometry.filter(|g| !g.solids.is_empty()) {
+            Some(g) => g.bounds(),
+            None => ([f64::MAX; 3], [f64::MIN; 3]),
+        };
+        let mut any = lo[0] <= hi[0];
+        for p in scene.parts.iter().filter(|p| !p.mesh.is_empty()) {
+            let (a, b) = p.mesh.bounds();
+            for k in 0..3 {
+                lo[k] = lo[k].min(a[k]);
+                hi[k] = hi[k].max(b[k]);
+            }
+            any = true;
+        }
+        if any {
+            center = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
+            extent = (antenna_core::geometry::norm(antenna_core::geometry::sub(hi, lo)) / 2.0).max(1e-4);
+            base = Some(lo);
+        }
+    }
     if let Some((c, e)) = scene.frame {
         (center, extent) = (c, e);
+    } else if let Some(b) = base.filter(|b| b[2] > 0.0 && b[2] <= extent) {
+        // Held up off the floor, and framed with the floor in view to show it.
+        center[2] -= b[2] / 2.0;
+        extent += b[2] / 2.0;
     }
     // A far-field solid is drawn around the model and sized to frame both.
     let pattern = scene.far.filter(|_| scene.mode == ViewMode::Pattern);
@@ -754,15 +907,30 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
     let mut tris: Vec<Tri> = Vec::new();
 
     // A drawing plane, or else a floor under the model: what the eye judges it against.
-    let drawn_step = if let Some((axis, at, step)) = scene.grid {
+    let drawn_step = if let Some((frame, step)) = scene.sketch_grid {
+        sketch_grid(&painter, &pj, canvas, &frame, step)
+    } else if let Some((axis, at, step)) = scene.grid {
         drawing_grid(&painter, &pj, canvas, axis, at, step)
-    } else if let Some(g) = scene.geometry.filter(|g| !g.solids.is_empty()) {
-        let floor = floor_of(g, extent);
+    } else if let (Some(low), Some(g)) = (base, scene.geometry) {
+        // The world's z = 0, so where its red and green lines cross is the true origin.
+        let floor = 0.0;
         // Over the FDTD mesh, the solver's own lines are the ones to read.
         let fdtd_mesh = scene.mode == ViewMode::Mesh && scene.mom_mesh.is_none() && scene.plan.is_some();
         let spacing = floor_grid(&painter, &pj, center, view_extent * FLOOR_REACH, (floor, floor_step(extent)), g.ground, !fdtd_mesh);
         if pj.r[2][2].abs() >= GRID_EDGE_ON {
-            shadow(&painter, &pj, scene.tess, floor);
+            if scene.parts.is_empty() {
+                shadow(&painter, &pj, scene.tess, floor);
+            } else {
+                parts_shadow(&painter, &pj, scene.parts, floor);
+            }
+        }
+        // Over a ground plane, the height is one of the model's own dimensions already.
+        if let Some([from, to]) = height_mark(low, extent).filter(|_| !g.ground) {
+            let (a, b) = (pj.screen(from), pj.screen(to));
+            painter.extend(EShape::dashed_line(&[a, b], Stroke::new(1.0, theme::WEAK), 4.0, 3.0));
+            // On the side away from the model, where its dimensions aren't.
+            let (side, align) = if a.x < pj.screen(center).x { (-6.0, Align2::RIGHT_CENTER) } else { (6.0, Align2::LEFT_CENTER) };
+            painter.text(a.lerp(b, 0.5) + vec2(side, 0.0), align, height_text(low[2]), FontId::proportional(12.5), theme::WEAK);
         }
         spacing
     } else {
@@ -817,8 +985,25 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
         }
     }
 
-    // The model.
-    if let Some(g) = scene.geometry.filter(|_| cur.is_none()) {
+    // The model, through the depth buffer: right wherever things cross, and it's what a tool picks from.
+    if cur.is_none() && !scene.parts.is_empty() {
+        picture.paint(ui.ctx(), &painter, canvas, scene.parts, &pj, &scene.look, hurry);
+        let ink = Stroke::new(1.0, Color32::from_rgb(48, 52, 60));
+        let faint = if scene.look.see_through { Stroke::new(0.7, Color32::from_rgb(120, 126, 136)) } else { Stroke::NONE };
+        let cut = scene.look.section;
+        let kept = |l: [P3; 2]| super::raster::clip_to_section(l, cut);
+        super::raster::paint_lines(&painter, picture, &pj, scene.parts.iter().flat_map(|p| p.edges.iter().copied()).filter_map(kept), ink, faint);
+        super::raster::paint_lines(&painter, picture, &pj, super::raster::section_outline(scene.parts, cut), ink, Stroke::NONE);
+        super::raster::paint_silhouettes(&painter, picture, &pj, super::raster::silhouettes(scene.parts, &pj).filter_map(kept), ink);
+        if let Some(g) = scene.geometry {
+            for s in &g.solids {
+                if let Shape::Wire { pts, r } = &s.shape {
+                    let w = (*r as f32 * pj.scale * 2.0).clamp(2.0, 12.0);
+                    super::raster::paint_lines(&painter, picture, &pj, pts.windows(2).map(|q| [q[0], q[1]]).filter_map(kept), Stroke::new(w, Color32::from_rgb(176, 122, 48)), Stroke::new(w * 0.5, Color32::from_rgba_unmultiplied(176, 122, 48, 70)));
+                }
+            }
+        }
+    } else if let Some(g) = scene.geometry.filter(|_| cur.is_none()) {
         paint_solids(
             &painter,
             &pj,
@@ -879,11 +1064,19 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
     if let Some((m, _)) = mom {
         flush(&painter, &mut tris);
         let line = Stroke::new(0.8, Color32::from_rgba_unmultiplied(30, 60, 150, 170));
-        for t in &m.tris {
-            let p: Vec<Pos2> = t.iter().map(|i| pj.project(m.verts[*i as usize]).0).collect();
-            painter.line_segment([p[0], p[1]], line);
-            painter.line_segment([p[1], p[2]], line);
-            painter.line_segment([p[2], p[0]], line);
+        if !scene.parts.is_empty() {
+            // Each edge once, and only what's in sight: a mesh seen through itself is unreadable.
+            let mut edges: Vec<(u32, u32)> = m.tris.iter().flat_map(|t| [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]).map(|(a, b)| (a.min(b), a.max(b))).collect();
+            edges.sort_unstable();
+            edges.dedup();
+            super::raster::paint_lines(&painter, picture, &pj, edges.into_iter().map(|(a, b)| [m.verts[a as usize], m.verts[b as usize]]), line, Stroke::NONE);
+        } else {
+            for t in &m.tris {
+                let p: Vec<Pos2> = t.iter().map(|i| pj.project(m.verts[*i as usize]).0).collect();
+                painter.line_segment([p[0], p[1]], line);
+                painter.line_segment([p[1], p[2]], line);
+                painter.line_segment([p[2], p[0]], line);
+            }
         }
         for s in &m.segments {
             let (a, _) = pj.project(m.verts[s[0] as usize]);
@@ -964,6 +1157,11 @@ pub fn show(ui: &mut egui::Ui, canvas: Rect, rect: Rect, cam: &mut Camera, scene
             let label = format!("{}", i + 1);
             painter.text(m, Align2::CENTER_CENTER, label, FontId::proportional(9.0), Color32::WHITE);
         }
+    }
+    if !scene.dims.is_empty() {
+        // The toolbar floats over the top of the view.
+        let open = Rect::from_min_max(pos2(rect.left(), rect.top() + 56.0), rect.max);
+        super::dim_lines::paint(&painter, &pj, scene.dims, scene.dim_focus, pj.screen(center), open);
     }
     axes(&painter, &pj, rect);
 
@@ -1148,14 +1346,15 @@ mod tests {
         assert!(mesh.vertices.iter().all(|v| v.color.a() == 255));
     }
 
-    /// A floor under a model, unless it has a ground plane to stand on.
+    /// One standing on the floor, or through it, has nothing to explain.
     #[test]
-    fn a_model_stands_on_its_ground_plane_or_floats_above_the_floor() {
-        let mut g = Geometry::default();
-        g.solids.push(antenna_core::geometry::Solid { name: "w".into(), material: "PEC".into(), shape: Shape::Wire { pts: vec![[0.0, 0.0, 0.01], [0.0, 0.0, 0.03]], r: 1e-3 } });
-        assert!(floor_of(&g, 0.01) < 0.01, "below its lowest point, so its shadow shows");
-        g.ground = true;
-        assert_eq!(floor_of(&g, 0.01), 0.0);
+    fn only_a_model_held_up_off_the_floor_is_marked() {
+        assert_eq!(height_mark([0.01, 0.02, 0.0], 0.05), None, "on it");
+        assert_eq!(height_mark([0.0, 0.0, -0.03], 0.05), None, "through it");
+        assert_eq!(height_mark([0.0, 0.0, 1e-5], 0.05), None, "too little to see");
+        assert_eq!(height_mark([0.0, -0.2, 0.22], 0.75), Some([[0.0, -0.2, 0.22], [0.0, -0.2, 0.0]]));
+        assert_eq!(height_text(0.222635), "223 mm above z = 0");
+        assert_eq!(height_text(0.0025), "2.5 mm above z = 0");
     }
 
     /// What a colour comes out as on the canvas, blended in linear light as the window does.

@@ -394,7 +394,7 @@ fn solve_and_results(ui: &mut egui::Ui, st: &mut Studio, geometry: &Geometry, po
     let fit = geometry.solver_fit();
     let fdtd = format!("FDTD, one run per port ({ports} runs): minutes, more for a big aisle.");
     let about = match st.project.setup.solver {
-        antenna_core::project::SolverKind::Fdtd => fdtd,
+        antenna_core::project::SolverKind::Fdtd | antenna_core::project::SolverKind::Fit => fdtd,
         antenna_core::project::SolverKind::Auto if !(fit.wire_mom || fit.surface_mom) => format!("It has dielectrics. {fdtd}"),
         antenna_core::project::SolverKind::Auto => "Metal only, so the method of moments if it stays small enough at this frequency: seconds. Otherwise FDTD: minutes.".to_string(),
         s => s.label().to_string(),

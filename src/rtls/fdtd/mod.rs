@@ -44,6 +44,66 @@ pub fn exe() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// What runs a finite-difference model written here.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Runner {
+    /// The solver inside the app. Nothing to install.
+    BuiltIn,
+    /// openEMS, at this path.
+    OpenEms(PathBuf),
+}
+
+impl Runner {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Runner::BuiltIn => "FDM (built in)",
+            Runner::OpenEms(_) => "FDTD (openEMS)",
+        }
+    }
+}
+
+fn choice_file() -> PathBuf {
+    base_dir().with_file_name("field-solver.txt")
+}
+
+/// `SENSESIM_FDTD`, for a test or a one-off run: `builtin` or `openems`.
+fn forced() -> Option<bool> {
+    match std::env::var("SENSESIM_FDTD").ok()?.trim().to_ascii_lowercase().as_str() {
+        "builtin" | "fdm" | "fit" => Some(false),
+        "openems" => Some(true),
+        _ => None,
+    }
+}
+
+/// Whether openEMS is wanted where the choice is left open. The built-in solver is the default.
+pub fn prefers_openems() -> bool {
+    forced().unwrap_or_else(|| std::fs::read_to_string(choice_file()).is_ok_and(|t| t.trim() == "openems"))
+}
+
+pub fn set_prefers_openems(on: bool) {
+    let path = choice_file();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, if on { "openems" } else { "builtin" });
+}
+
+/// What runs a model when nobody named a solver for it.
+pub fn runner() -> Runner {
+    match exe() {
+        Some(e) if prefers_openems() => Runner::OpenEms(e),
+        _ => Runner::BuiltIn,
+    }
+}
+
+/// What runs a model when openEMS was asked for by name: it, if it's here.
+pub fn runner_for_openems() -> Runner {
+    match exe() {
+        Some(e) if forced() != Some(false) => Runner::OpenEms(e),
+        _ => Runner::BuiltIn,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     Idle,
@@ -254,7 +314,7 @@ impl Fdtd {
 
     pub fn run_antenna(&mut self, design: Design) {
         self.spawn(move |ctx| {
-            let exe = ensure_installed(ctx)?;
+            let exe = runner();
             let t0 = Instant::now();
             let sim = design.sim();
             let dir = job_dir("antenna")?;
@@ -282,7 +342,7 @@ impl Fdtd {
 
     pub fn run_region(&mut self, req: region::Request) {
         self.spawn(move |ctx| {
-            let exe = ensure_installed(ctx)?;
+            let exe = runner();
             let t0 = Instant::now();
             ctx.set(Status::Busy("Voxelising the scene…".into(), -1.0));
             let (with, free, layout) = region::build(&req)?;
@@ -326,7 +386,7 @@ impl Fdtd {
     pub fn run_scene(&mut self, req: scene::SceneRequest) {
         let prev = self.scene(req.tech);
         self.spawn(move |ctx| {
-            let exe = ensure_installed(ctx)?;
+            let exe = runner();
             let t0 = Instant::now();
             ctx.set(Status::Busy("Voxelising the scene…".into(), -1.0));
             let plan = scene::plan(&req);
@@ -419,14 +479,6 @@ fn job_dir(kind: &str) -> Result<PathBuf> {
     Ok(d)
 }
 
-fn ensure_installed(ctx: &Ctx) -> Result<PathBuf> {
-    if let Some(e) = exe() {
-        return Ok(e);
-    }
-    install(ctx)?;
-    exe().ok_or_else(|| anyhow::anyhow!("openEMS.exe missing after install"))
-}
-
 fn install(ctx: &Ctx) -> Result<()> {
     let dir = base_dir();
     std::fs::create_dir_all(&dir)?;
@@ -496,9 +548,35 @@ fn energy_db_of(line: &str) -> Option<f64> {
     line.rsplit('(').next()?.trim_end_matches(')').trim_end_matches("dB").replace(' ', "").parse().ok()
 }
 
-/// Writes `sim.xml` into `dir` and runs openEMS there, reporting progress from
-/// its energy decay towards the end criterion.
-fn run(ctx: &Ctx, exe: &Path, dir: &Path, sim: &csx::Sim, label: &str) -> Result<RunEnd> {
+/// Writes `sim.xml` into `dir` and runs it, reporting progress from its energy decay towards the end
+/// criterion.
+fn run(ctx: &Ctx, runner: &Runner, dir: &Path, sim: &csx::Sim, label: &str) -> Result<RunEnd> {
+    match runner {
+        Runner::OpenEms(exe) => run_openems(ctx, exe, dir, sim, label),
+        Runner::BuiltIn => run_built_in(ctx, dir, sim, label),
+    }
+}
+
+/// The same XML and the same result files, on the solver inside the app.
+fn run_built_in(ctx: &Ctx, dir: &Path, sim: &csx::Sim, label: &str) -> Result<RunEnd> {
+    std::fs::write(dir.join("sim.xml"), sim.to_xml())?;
+    let target_db = -10.0 * sim.end_criteria.log10();
+    ctx.log(format!("{label}: {} cells, on the built-in solver", sim.cells()));
+    let tick = |step: u64, db: f64, speed: f64| {
+        let done = (-db / target_db).max(step as f64 / sim.max_timesteps.max(1) as f64).clamp(0.0, 1.0) as f32;
+        ctx.set(Status::Busy(format!("{label}: timestep {step} · {speed:.0} MC/s · energy {db:.0} of -{target_db:.0} dB"), done));
+    };
+    let log = |m: String| ctx.log(format!("{label}: {m}"));
+    let out = antenna_core::fit::csxrun::run_dir(dir, 0, antenna_core::fit::Backend::Auto, &ctx.cancel, &tick, &log)?;
+    ctx.log(format!("{label}: {} steps at {:.0} MC/s", out.steps, out.speed));
+    if out.truncated {
+        ctx.log(format!("{label}: stopped at the step limit of {} before the energy reached -{target_db:.0} dB", sim.max_timesteps));
+    }
+    Ok(RunEnd { truncated: out.truncated, energy_db: Some(out.energy_db) })
+}
+
+/// Runs openEMS on `sim.xml` in `dir`.
+fn run_openems(ctx: &Ctx, exe: &Path, dir: &Path, sim: &csx::Sim, label: &str) -> Result<RunEnd> {
     std::fs::write(dir.join("sim.xml"), sim.to_xml())?;
     let target_db = -10.0 * sim.end_criteria.log10();
     ctx.log(format!("{label}: {} cells, est. {:.0} s", sim.cells(), sim.estimate_s()));
@@ -1146,7 +1224,7 @@ mod tests {
     #[ignore]
     fn fdtd_wall_uwb_edge_study() {
         use crate::rtls::radio::Material;
-        let exe = exe().expect("openEMS installed");
+        let exe = runner_for_openems();
         let base = std::env::temp_dir().join(format!("sensesim_edge_study_{}", std::process::id()));
         let w = solid("wall", Vec3::new(-2.0, 0.0, -0.1), Vec3::new(2.0, 3.0, 0.1), Material::Concrete);
         let req = region::Request { band: antenna::Band::Uwb5, quality: antenna::Quality::Fast, target: w.name.clone(), target_min: w.min, target_max: w.max, objects: vec![w], wall_db: 6.0 };
@@ -1285,7 +1363,7 @@ mod tests {
     #[ignore]
     fn fdtd_scene_stop_study() {
         use crate::rtls::radio::Material;
-        let exe = exe().expect("openEMS installed");
+        let exe = runner_for_openems();
         let base = std::env::temp_dir().join(format!("sensesim_stop_study_{}", std::process::id()));
         let shell = |lo: Vec2, hi: Vec2, h: f32, m: Material| {
             vec![

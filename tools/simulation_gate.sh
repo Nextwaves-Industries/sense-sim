@@ -6,8 +6,8 @@
 #   tools/simulation_gate.sh --quick   unit tests only, no solvers
 #   tools/simulation_gate.sh --full    also the OpenFOAM and LBM benchmarks, which take much longer
 #
-# Needs openEMS (Setup page in Antenna Studio), and CalculiX, Gmsh and Elmer (Simulation workbench)
-# for the benchmarks. Build output goes to CARGO_TARGET_DIR if set. The report goes to
+# Needs openEMS (Setup page in Antenna Studio) to check against, and CalculiX, Gmsh and Elmer (Simulation
+# workbench), for the benchmarks. Build output goes to CARGO_TARGET_DIR if set. The report goes to
 # output/gate/<time>/report.md. Check nothing else is building first: this machine is shared.
 set -u
 cd "$(dirname "$0")/.."
@@ -90,7 +90,12 @@ stage core cargo test --no-fail-fast -p antenna_core -p proof -p sim-core
 stage app cargo test --no-fail-fast --bin SenseSim
 if [ "$quick" -eq 0 ]; then
   stage structural_elmer cargo test --release --no-fail-fast -p sim-core --test structural --test elmer -- --ignored --nocapture --test-threads=1
-  stage benchmarks cargo test --no-fail-fast --bin SenseSim -- --ignored --exact --nocapture --test-threads=1 "${benchmarks[@]}"
+  stage benchmarks env SENSESIM_FDTD=openems cargo test --no-fail-fast --bin SenseSim -- --ignored --exact --nocapture --test-threads=1 "${benchmarks[@]}"
+  # The same benchmarks with every one of those runs on the built-in solver, no openEMS involved.
+  stage benchmarks_builtin env SENSESIM_FDTD=builtin cargo test --no-fail-fast --bin SenseSim -- --ignored --exact --nocapture --test-threads=1 "${benchmarks[@]}"
+  # The built-in solver: exact answers first, then the antenna benchmarks the openEMS path meets.
+  stage fit_exact cargo test --release --no-fail-fast -p fdtd_kernel --features gpu --lib -- --include-ignored --nocapture --test-threads=1
+  stage fit_antennas cargo test --release --no-fail-fast -p antenna_core --features gpu --lib fit:: -- --include-ignored --nocapture --test-threads=1 --skip study_ --skip fit_write_measurement_kit
   # The figures a person reads next to the verdict.
   grep -E 'FDTD:|FDTD |deficit vs Friis|resonance |S21 with|two ports:' "$out/benchmarks.log" 2>/dev/null | cut -c1-220 > "$out/figures.txt"
 fi

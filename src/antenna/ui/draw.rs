@@ -53,13 +53,21 @@ pub struct DrawUi {
     /// The wire in progress, in space: the plane can change between its points.
     pub wire: Vec<P3>,
     pub selected: Option<usize>,
+    /// What else is selected, by Ctrl or Shift, in the order it was picked.
+    pub also: Vec<usize>,
+    /// The names at those places when they were picked, all of them, the first one first.
+    also_names: Vec<String>,
+    pub(super) editing_vars: bool,
     drag: Option<Drag>,
     undo: Vec<Project>,
     redo: Vec<Project>,
     /// The canvas stays put while the model grows.
     pub frame: Option<(P3, f64)>,
     pub note: Option<String>,
-    typed: [f64; 2],
+    /// What's in the Exact point fields.
+    typed: [String; 2],
+    /// The points of the shape in progress that were typed: where each landed, and how it was written.
+    typed_points: Vec<(P2, [String; 2])>,
     editing_corner: bool,
     /// The next feed drawn is this switch or varactor instead.
     pub next_part: Option<antenna_core::reconfig::Device>,
@@ -84,12 +92,16 @@ impl Default for DrawUi {
             points: Vec::new(),
             wire: Vec::new(),
             selected: None,
+            also: Vec::new(),
+            also_names: Vec::new(),
+            editing_vars: false,
             drag: None,
             undo: Vec::new(),
             redo: Vec::new(),
             frame: None,
             note: None,
-            typed: [0.0; 2],
+            typed: ["0".to_string(), "0".to_string()],
+            typed_points: Vec::new(),
             editing_corner: false,
             next_part: None,
             naming: String::new(),
@@ -110,7 +122,7 @@ const PLANES: [(usize, &str); 3] = [(2, "x–y"), (0, "y–z"), (1, "z–x")];
 /// Points within this of a corner land on it.
 const SNAP_PX: f32 = 8.0;
 
-pub(super) fn remember(st: &mut Studio) {
+pub fn remember(st: &mut Studio) {
     let copy = st.project.clone();
     let d = &mut st.ui.draw;
     d.undo.push(copy);
@@ -120,8 +132,9 @@ pub(super) fn remember(st: &mut Studio) {
     d.redo.clear();
 }
 
-fn undo(st: &mut Studio) {
+pub(super) fn undo(st: &mut Studio) {
     if let Some(p) = st.ui.draw.undo.pop() {
+        st.ui.m3.forget_what_was_in_hand();
         let now = std::mem::replace(&mut st.project, p);
         st.ui.draw.redo.push(now);
         st.ui.draw.selected = None;
@@ -129,8 +142,9 @@ fn undo(st: &mut Studio) {
     }
 }
 
-fn redo(st: &mut Studio) {
+pub(super) fn redo(st: &mut Studio) {
     if let Some(p) = st.ui.draw.redo.pop() {
+        st.ui.m3.forget_what_was_in_hand();
         let now = std::mem::replace(&mut st.project, p);
         st.ui.draw.undo.push(now);
         st.ui.draw.selected = None;
@@ -279,6 +293,12 @@ fn finish_shape(st: &mut Studio, base: &str, shape: Finished) {
             st.ui.draw.note = None;
             if !cut {
                 st.ui.draw.selected = st.project.extra.len().checked_sub(1);
+                st.ui.draw.also.clear();
+                // Points typed as expressions stay expressions, so the shape follows its variables.
+                let typed = std::mem::take(&mut st.ui.draw.typed_points);
+                if let (Ok(vars), Some(part)) = (st.project.vars(), st.project.extra.last_mut()) {
+                    sketch::keep_typed(&mut part.prim, &typed, &vars);
+                }
             }
         }
         Err(e) => {
@@ -287,6 +307,21 @@ fn finish_shape(st: &mut Studio, base: &str, shape: Finished) {
         }
     }
     st.ui.draw.points.clear();
+    st.ui.draw.typed_points.clear();
+}
+
+/// The point in the Exact point fields, for the tool in hand. It says so if they don't work out.
+fn add_typed_point(st: &mut Studio) {
+    let vars = st.project.vars().unwrap_or_default();
+    let read = |t: &str| sketch::typed_length(t, &vars);
+    match (read(&st.ui.draw.typed[0]), read(&st.ui.draw.typed[1])) {
+        (Ok((u, wu)), Ok((v, wv))) => {
+            st.ui.draw.note = None;
+            st.ui.draw.typed_points.push(([u, v], [wu, wv]));
+            add_point(st, [u, v]);
+        }
+        (Err(e), _) | (_, Err(e)) => st.ui.draw.note = Some(format!("{e:#}")),
+    }
 }
 
 /// The wire in progress becomes a part. It has to conduct, whatever the sheet material is.
@@ -303,6 +338,7 @@ fn finish_wire(st: &mut Studio) {
     let prim = ExtraPrim::Wire { pts: pts.iter().map(|p| p.map(mm)).collect(), r: mm(st.ui.draw.strip_mm * 0.5e-3) };
     st.project.extra.push(ExtraSolid { name, material, prim });
     st.ui.draw.selected = st.project.extra.len().checked_sub(1);
+    st.ui.draw.also.clear();
     st.ui.draw.note = None;
 }
 
@@ -426,10 +462,87 @@ fn plane_of(prim: &ExtraPrim) -> Option<(usize, &String)> {
 
 fn select_part(st: &mut Studio, part: Option<usize>) {
     st.ui.draw.selected = part;
+    st.ui.draw.also.clear();
     if let Some((axis, at)) = part.and_then(|i| st.project.extra.get(i)).and_then(|e| plane_of(&e.prim)) {
         // The plane follows, so edits and the grid are on the part you're looking at.
         st.ui.draw.axis = axis;
         st.ui.draw.at = at.clone();
+    }
+}
+
+/// In if it's out, out if it's in. Leaving the first one out makes the next the first.
+fn toggle_part(st: &mut Studio, part: usize) {
+    let d = &mut st.ui.draw;
+    if d.selected == Some(part) {
+        let next = (!d.also.is_empty()).then(|| d.also.remove(0));
+        d.selected = next;
+    } else if let Some(at) = d.also.iter().position(|i| *i == part) {
+        d.also.remove(at);
+    } else if d.selected.is_none() {
+        select_part(st, Some(part));
+    } else {
+        d.also.push(part);
+    }
+    st.ui.draw.also_names = names_chosen(st);
+}
+
+fn names_chosen(st: &Studio) -> Vec<String> {
+    st.ui.draw.selected.into_iter().chain(st.ui.draw.also.iter().copied()).map(|i| st.project.extra.get(i).map_or(String::new(), |e| e.name.clone())).collect()
+}
+
+/// The shapes selected, first picked first. They're held by place in the list, and the list can
+/// change under them: another project opened, a part removed on another page, an undo. Then the
+/// names no longer match, and what's selected along with the first is let go, so nothing can be
+/// joined or deleted that nobody picked.
+fn chosen_parts(st: &mut Studio) -> Vec<usize> {
+    if !st.ui.draw.also.is_empty() && names_chosen(st) != st.ui.draw.also_names {
+        st.ui.draw.also.clear();
+    }
+    st.ui.draw.selected.into_iter().chain(st.ui.draw.also.iter().copied()).collect()
+}
+
+/// Combines the shapes selected, which become what's left of them, selected.
+pub fn combine_selected(st: &mut Studio, op: antenna_core::modeler::CombineOp) {
+    let parts = chosen_parts(st);
+    if parts.len() < 2 {
+        st.ui.draw.note = Some("Ctrl+click at least two shapes first, on the canvas or in the Shapes list. Then choose this again.".into());
+        return;
+    }
+    remember(st);
+    match sketch::combine_parts(&mut st.project, &parts, op) {
+        Ok(made) => {
+            st.ui.draw.selected = made.first().copied();
+            st.ui.draw.also = made.get(1..).unwrap_or_default().to_vec();
+            st.ui.draw.also_names = names_chosen(st);
+            st.ui.draw.note = None;
+        }
+        Err(e) => {
+            st.ui.draw.undo.pop();
+            st.ui.draw.note = Some(format!("{e:#}"));
+        }
+    }
+}
+
+/// Several shapes selected: what they are, and what can be done with them together.
+fn selection_card(ui: &mut egui::Ui, st: &mut Studio) {
+    use antenna_core::modeler::CombineOp;
+    let parts = chosen_parts(st);
+    let names: Vec<String> = parts.iter().filter_map(|i| st.project.extra.get(*i).map(|e| e.name.clone())).collect();
+    let mut ask = None;
+    group(ui, |ui| {
+        theme::caption(ui, &format!("{} shapes selected", names.len()));
+        weak(ui, names.join(", "));
+        ui.horizontal(|ui| {
+            for (op, word, what) in [(CombineOp::Add, "Join", "Everything selected, as one"), (CombineOp::Cut, "Subtract", "The first selected, less the others"), (CombineOp::Common, "Intersect", "Only where all of them overlap"), (CombineOp::Exclude, "Exclude", "Where they don't overlap")] {
+                if ui.button(word).on_hover_text(what).clicked() {
+                    ask = Some(op);
+                }
+            }
+        });
+        weak(ui, format!("Subtract keeps {} and takes the others from it. The result's sizes are numbers: it no longer follows any variable the shapes used.", names.first().map_or("the first", String::as_str)));
+    });
+    if let Some(op) = ask {
+        combine_selected(st, op);
     }
 }
 
@@ -464,6 +577,7 @@ pub fn canvas(ui: &mut egui::Ui, st: &mut Studio, area: Rect, view: Rect, resp: 
     {
         st.ui.draw.selected = None;
     }
+    chosen_parts(st);
     let pointer = ctx.input(|i| i.pointer.latest_pos()).filter(|_| resp.contains_pointer() || resp.dragged());
     let raw = pointer.and_then(|p| on_plane(pj, p, axis, h));
     let cursor = raw.map(|q| snapped(st, pj, q, h));
@@ -492,9 +606,17 @@ pub fn canvas(ui: &mut egui::Ui, st: &mut Studio, area: Rect, view: Rect, resp: 
                 st.ui.draw.points.pop();
             } else if st.ui.draw.wire.pop().is_some() {
                 // One point of the wire back.
-            } else if let Some(i) = st.ui.draw.selected.take() {
+            } else if st.ui.draw.selected.is_some() {
                 remember(st);
-                st.project.extra.remove(i);
+                let mut gone = chosen_parts(st);
+                gone.sort_unstable();
+                for i in gone.into_iter().rev() {
+                    if i < st.project.extra.len() {
+                        st.project.extra.remove(i);
+                    }
+                }
+                st.ui.draw.selected = None;
+                st.ui.draw.also.clear();
             }
         }
     }
@@ -524,7 +646,7 @@ pub fn canvas(ui: &mut egui::Ui, st: &mut Studio, area: Rect, view: Rect, resp: 
     let vars = st.project.vars().unwrap_or_default();
     for f in sketch::flat_parts(&st.project, &vars) {
         let (a, part_h) = (f.axis, f.at);
-        let sel = st.ui.draw.selected == Some(f.index);
+        let sel = st.ui.draw.selected == Some(f.index) || st.ui.draw.also.contains(&f.index);
         let stroke = if sel { Stroke::new(2.0, theme::ACCENT) } else { outline };
         for (_, p, q) in edges(&f.outline) {
             painter.line_segment([pj.screen(plane_point(a, part_h, p)), pj.screen(plane_point(a, part_h, q))], stroke);
@@ -639,7 +761,7 @@ fn hint_for(st: &Studio, plane_visible: bool) -> String {
     let begun = !d.points.is_empty();
     let what = if d.cut { "the hole" } else { "the shape" };
     match d.tool {
-        Tool::Select => "Click a shape, then type its dimensions in the panel or drag it and its corners. Double-click an edge for a new corner; right-click a corner to remove it.".to_string(),
+        Tool::Select => "Click a shape to edit it, Ctrl+click for several. Double-click an edge for a new corner; right-click a corner to remove it.".to_string(),
         Tool::Rect if begun => format!("Click the opposite corner of {what}. Esc cancels."),
         Tool::Rect => "Click one corner, or drag from corner to corner.".to_string(),
         Tool::Circle if begun => "Click the edge. Esc cancels.".to_string(),
@@ -727,7 +849,13 @@ fn select_tool(st: &mut Studio, resp: &Response, pj: &Projector, q: P2, pointer:
     } else if resp.clicked() {
         let (o, d) = pointer.map_or(([0.0; 3], [0.0, 0.0, -1.0]), |p| pj.ray(p));
         let picked = sketch::pick(&st.project, o, d).map(|x| x.0);
-        select_part(st, picked);
+        if resp.ctx.input(|i| i.modifiers.ctrl || i.modifiers.shift) {
+            if let Some(i) = picked {
+                toggle_part(st, i);
+            }
+        } else {
+            select_part(st, picked);
+        }
     }
     if resp.secondary_clicked()
         && let (Some((i, ..)), Some(at)) = (&sel, pointer)
@@ -750,7 +878,10 @@ const DIM_W: f32 = 104.0;
 fn dim(ui: &mut egui::Ui, st: &mut Studio, salt: &str, label: &str, text: &mut String, table: &super::expr_field::VarTable, vars: &Vars) {
     ui.label(label);
     ui.horizontal(|ui| {
-        super::expr_field::expr_line(ui, ("draw_dim", salt), text, table, DIM_W);
+        // An arc's bare number is degrees, where `deg` would convert to radians, and a count has no unit.
+        let bare = label == "Periods" || label.ends_with("degrees");
+        let line = if bare { super::expr_field::expr_line } else { super::expr_field::length_line };
+        line(ui, ("draw_dim", salt), text, table, DIM_W);
         name_it(ui, st, salt, label, text);
         if !sketch::is_free(text) {
             let read = expr::eval(text, vars).map(|v| format!("= {} mm", (v * 1e6).round() / 1e3));
@@ -764,7 +895,7 @@ fn dim(ui: &mut egui::Ui, st: &mut Studio, salt: &str, label: &str, text: &mut S
 }
 
 /// A small menu that makes a new variable from what's in a field, and puts its name there.
-fn name_it(ui: &mut egui::Ui, st: &mut Studio, salt: &str, note: &str, text: &mut String) {
+pub(super) fn name_it(ui: &mut egui::Ui, st: &mut Studio, salt: &str, note: &str, text: &mut String) {
     ui.push_id(("name_it", salt), |ui| {
         // A menu shuts on any click by default, even in its own text field.
         let stay_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
@@ -803,8 +934,8 @@ fn point_rows(ui: &mut egui::Ui, salt: &str, heads: (&str, &str), pts: &mut [[St
         egui::Grid::new(("draw_pt_grid", salt)).num_columns(3).spacing(vec2(8.0, 3.0)).show(ui, |ui| {
             for (k, q) in pts.iter_mut().enumerate() {
                 ui.label(RichText::new(format!("{}", k + 1)).size(11.5).color(theme::WEAK));
-                super::expr_field::expr_line(ui, (salt, k, 0), &mut q[0], table, DIM_W);
-                super::expr_field::expr_line(ui, (salt, k, 1), &mut q[1], table, DIM_W);
+                super::expr_field::length_line(ui, (salt, k, 0), &mut q[0], table, DIM_W);
+                super::expr_field::length_line(ui, (salt, k, 1), &mut q[1], table, DIM_W);
                 ui.end_row();
             }
         });
@@ -942,7 +1073,11 @@ fn dimensions(ui: &mut egui::Ui, st: &mut Studio, i: usize, table: &super::expr_
     }
 }
 
-fn properties(ui: &mut egui::Ui, st: &mut Studio) {
+pub(super) fn properties(ui: &mut egui::Ui, st: &mut Studio) {
+    if chosen_parts(st).len() > 1 {
+        selection_card(ui, st);
+        return;
+    }
     let Some(i) = st.ui.draw.selected.filter(|i| *i < st.project.extra.len()) else { return };
     let names: Vec<String> = material::library().into_iter().map(|m| m.name).collect();
     let table = super::expr_field::VarTable::of(&st.project);
@@ -1085,7 +1220,7 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
             });
             ui.end_row();
             ui.label("Height");
-            super::expr_field::expr_line(ui, "draw height", &mut st.ui.draw.at, &table, 100.0).on_hover_text("Where the plane sits. An expression: 0, h, 1.6mm");
+            super::expr_field::length_line(ui, "draw height", &mut st.ui.draw.at, &table, 100.0).on_hover_text("Where the plane sits. An expression: 0, h, 1.6mm");
             ui.end_row();
             ui.label("Material");
             let now = if st.ui.draw.material.is_empty() { st.project.metal.clone() } else { st.ui.draw.material.clone() };
@@ -1099,7 +1234,7 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
             ui.end_row();
             if names.iter().any(|(n, metal)| *n == now && !*metal) {
                 ui.label("Thickness");
-                super::expr_field::expr_line(ui, "draw thickness", &mut st.ui.draw.thick, &table, 100.0);
+                super::expr_field::length_line(ui, "draw thickness", &mut st.ui.draw.thick, &table, 100.0);
                 ui.end_row();
             }
             ui.label("Grid");
@@ -1121,11 +1256,12 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
             let axis = st.ui.draw.axis;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Exact point, {} and {}", AXIS[(axis + 1) % 3], AXIS[(axis + 2) % 3])).size(12.5).color(theme::WEAK));
-                ui.add(egui::DragValue::new(&mut st.ui.draw.typed[0]).speed(0.1).suffix(" mm").max_decimals(3));
-                ui.add(egui::DragValue::new(&mut st.ui.draw.typed[1]).speed(0.1).suffix(" mm").max_decimals(3));
+                let table = super::expr_field::VarTable::of(&st.project);
+                let tip = "A number in mm, or an expression over your variables, like a1+2mm. A strip or polygon keeps it, so the point follows the variable.";
+                super::expr_field::length_line(ui, "draw typed u", &mut st.ui.draw.typed[0], &table, 72.0).on_hover_text(tip);
+                super::expr_field::length_line(ui, "draw typed v", &mut st.ui.draw.typed[1], &table, 72.0).on_hover_text(tip);
                 if ui.small_button("Add").clicked() {
-                    let q = [st.ui.draw.typed[0] * 1e-3, st.ui.draw.typed[1] * 1e-3];
-                    add_point(st, q);
+                    add_typed_point(st);
                 }
             });
         }
@@ -1181,7 +1317,7 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
     let mut drop_part = None;
     egui::Grid::new("draw_shapes").num_columns(3).spacing(vec2(10.0, 2.0)).striped(true).show(ui, |ui| {
         for (i, name, mat) in &shapes {
-            if ui.selectable_label(st.ui.draw.selected == Some(*i), name).clicked() {
+            if ui.selectable_label(st.ui.draw.selected == Some(*i) || st.ui.draw.also.contains(i), name).clicked() {
                 pick_part = Some(*i);
             }
             ui.label(RichText::new(mat).size(12.0).color(theme::WEAK));
@@ -1192,13 +1328,18 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
         }
     });
     if let Some(i) = pick_part {
-        select_part(st, Some(i));
+        if ui.input(|i| i.modifiers.ctrl || i.modifiers.shift) {
+            toggle_part(st, i);
+        } else {
+            select_part(st, Some(i));
+        }
         st.ui.draw.tool = Tool::Select;
     }
     if let Some(i) = drop_part {
         remember(st);
         st.project.extra.remove(i);
         st.ui.draw.selected = None;
+        st.ui.draw.also.clear();
     }
 
     theme::caption(ui, "Feeds");
@@ -1214,6 +1355,7 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
     let table = super::expr_field::VarTable::of(&st.project);
     let vars = st.project.vars().unwrap_or_default();
     let mut edited = st.project.extra_ports.clone();
+    let mut wave_feeds = st.project.wave_feeds.clone();
     for (i, port) in edited.iter_mut().enumerate() {
         egui::CollapsingHeader::new(RichText::new(port.name.clone()).size(12.5)).id_salt(("draw_feed", i)).show(ui, |ui| {
             egui::Grid::new(("draw_feed_grid", i)).num_columns(2).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
@@ -1233,10 +1375,29 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
                 super::expr_field::expr_line(ui, ("draw_feed_z0", i), &mut port.z0, &table, DIM_W);
                 ui.end_row();
             });
+            let mut wave = wave_feeds.contains(&port.name);
+            let hint = "Launches the line's own mode instead of driving a gap, and reads what comes back, as a connector would see it. The feed has to sit on the outer edge of the model, across a line that runs straight into it. It sets the impedance from the line, and only the built-in FDM solver has it: others run it as a gap.";
+            if ui.checkbox(&mut wave, "Wave port").on_hover_text(hint).changed() {
+                if wave {
+                    wave_feeds.push(port.name.clone());
+                } else {
+                    wave_feeds.retain(|f| f != &port.name);
+                }
+            }
             if ui.button(theme::label(icon::TRASH, "Remove this feed")).clicked() {
                 drop_port = Some(i);
             }
         });
+    }
+    // A wave port stays one when its feed is renamed.
+    for (old, new) in st.project.extra_ports.iter().zip(&edited) {
+        if old.name != new.name {
+            wave_feeds.iter_mut().filter(|f| **f == old.name).for_each(|f| *f = new.name.clone());
+        }
+    }
+    if wave_feeds != st.project.wave_feeds {
+        remember(st);
+        st.project.wave_feeds = wave_feeds;
     }
     if edited != st.project.extra_ports {
         if !st.ui.draw.editing_corner {
@@ -1246,7 +1407,7 @@ pub fn page(ui: &mut egui::Ui, st: &mut Studio) {
         st.project.extra_ports = edited;
     }
     // One undo step per field: the next edit after leaving it is a new one.
-    if !ui.ctx().egui_wants_keyboard_input() {
+    if !ui.ctx().egui_wants_keyboard_input() && !super::expr_field::scrubbing(ui.ctx()) {
         st.ui.draw.editing_corner = false;
     }
     if let Some(i) = drop_port {
@@ -1319,6 +1480,84 @@ mod tests {
         assert_eq!(st.project.extra.len(), parts + 1);
     }
 
+    fn two_shapes() -> Studio {
+        let mut st = Studio::default();
+        st.project = Project::from_template("custom", Some("1GHz")).unwrap();
+        st.ui.draw.axis = 2;
+        st.ui.draw.tool = Tool::Rect;
+        for (a, b) in [([0.0, 0.0], [0.04, 0.04]), ([0.02, 0.02], [0.06, 0.06]), ([0.1, 0.1], [0.12, 0.12])] {
+            add_point(&mut st, a);
+            add_point(&mut st, b);
+        }
+        select_part(&mut st, None);
+        st
+    }
+
+    #[test]
+    fn shapes_are_selected_with_ctrl_and_combined_into_what_is_left() {
+        let mut st = two_shapes();
+        toggle_part(&mut st, 0);
+        toggle_part(&mut st, 1);
+        assert_eq!(chosen_parts(&mut st), vec![0, 1]);
+        combine_selected(&mut st, antenna_core::modeler::CombineOp::Add);
+        assert_eq!(st.project.extra.len(), 2, "two became one, and the third is untouched");
+        assert_eq!(chosen_parts(&mut st), vec![0], "what's left is selected");
+        undo(&mut st);
+        assert_eq!(st.project.extra.len(), 3, "one undo takes it back");
+    }
+
+    #[test]
+    fn asking_to_combine_one_shape_says_so_and_changes_nothing() {
+        let mut st = two_shapes();
+        let steps = st.ui.draw.undo.len();
+        toggle_part(&mut st, 0);
+        combine_selected(&mut st, antenna_core::modeler::CombineOp::Add);
+        assert_eq!(st.project.extra.len(), 3);
+        assert!(st.ui.draw.note.is_some());
+        assert_eq!(st.ui.draw.undo.len(), steps, "nothing to undo was added");
+    }
+
+    #[test]
+    fn a_refused_combination_leaves_no_undo_step() {
+        let mut st = two_shapes();
+        let steps = st.ui.draw.undo.len();
+        // Subtracting a shape from itself's twin leaves nothing, which is refused.
+        st.project.extra[1] = st.project.extra[0].clone();
+        st.project.extra[1].name = "twin".into();
+        toggle_part(&mut st, 0);
+        toggle_part(&mut st, 1);
+        combine_selected(&mut st, antenna_core::modeler::CombineOp::Cut);
+        assert_eq!(st.project.extra.len(), 3);
+        assert_eq!(st.ui.draw.undo.len(), steps);
+        assert!(st.ui.draw.note.as_ref().is_some_and(|n| n.contains("Nothing would be left")));
+    }
+
+    /// Nothing may be joined or deleted that nobody picked: the list can change under a selection.
+    #[test]
+    fn shapes_selected_together_are_let_go_when_the_list_changes() {
+        let mut st = two_shapes();
+        toggle_part(&mut st, 1);
+        toggle_part(&mut st, 2);
+        // A part removed on another page moves everything along one.
+        st.project.extra.remove(0);
+        assert_eq!(chosen_parts(&mut st).len(), 1);
+        assert!(st.ui.draw.also.is_empty());
+
+        // Another project, whose first parts happen to sit at the same places.
+        let mut st = two_shapes();
+        toggle_part(&mut st, 0);
+        toggle_part(&mut st, 1);
+        let mut other = Project::from_template("custom", Some("1GHz")).unwrap();
+        for name in ["x", "y", "z"] {
+            let mut part = st.project.extra[0].clone();
+            part.name = name.into();
+            other.extra.push(part);
+        }
+        st.project = other;
+        combine_selected(&mut st, antenna_core::modeler::CombineOp::Add);
+        assert_eq!(st.project.extra.len(), 3, "nothing happened to the new project's parts");
+    }
+
     /// What the tools draw keeps its dimensions, and is selected ready to type them.
     #[test]
     fn a_drawn_shape_keeps_its_dimensions_and_is_selected() {
@@ -1345,6 +1584,27 @@ mod tests {
         finish_path(&mut st);
         let ExtraPrim::Strip { w, path, .. } = &st.project.extra[2].prim else { panic!("{:?}", st.project.extra[2].prim) };
         assert_eq!((w.as_str(), path.len()), ("1.5mm", 2));
+
+        // Points typed as expressions stay written that way, so the strip follows the variable, and a
+        // plain number still means millimetres. A click between them stays a number.
+        sketch::add_variable(&mut st.project, "a1", "5mm", "Test").unwrap();
+        st.ui.draw.typed = ["a1".to_string(), "0".to_string()];
+        add_typed_point(&mut st);
+        st.ui.draw.typed = ["a1+2mm".to_string(), "3".to_string()];
+        add_typed_point(&mut st);
+        add_point(&mut st, [0.02, 0.003]);
+        finish_path(&mut st);
+        let ExtraPrim::Strip { path, .. } = st.project.extra.remove(3).prim else { panic!() };
+        assert_eq!(path[0], ["a1".to_string(), "0mm".to_string()]);
+        assert_eq!(path[1], ["a1+2mm".to_string(), "3mm".to_string()]);
+        assert_eq!(path[2], ["20mm".to_string(), "3mm".to_string()]);
+        assert!(st.ui.draw.typed_points.is_empty(), "nothing carries over to the next shape");
+        // Something that doesn't work out says so, and adds nothing.
+        st.ui.draw.typed = ["nope".to_string(), "0".to_string()];
+        add_typed_point(&mut st);
+        assert!(st.ui.draw.note.as_deref().is_some_and(|n| n.contains("nope")), "{:?}", st.ui.draw.note);
+        assert!(st.ui.draw.points.is_empty());
+        st.ui.draw.note = None;
 
         st.ui.draw.tool = Tool::Polygon;
         for q in [[0.3, 0.0], [0.34, 0.0], [0.3, 0.03]] {

@@ -8,7 +8,7 @@ use antenna_core::report::param_text;
 use antenna_core::templates::{self, Category};
 use bevy_egui::egui::{self, RichText, vec2};
 
-use super::expr_field::{VarTable, expr_field, expr_line};
+use super::expr_field::{VarTable, expr_field, expr_line, length_line};
 use super::{group, view3d, weak};
 use crate::antenna::Studio;
 use crate::theme::{self, icon};
@@ -117,10 +117,12 @@ fn var_header(ui: &mut egui::Ui) {
 
 /// One variable. A long formula wraps inside its field rather than scrolling out
 /// of sight, and the meaning sits under it, where it can't squeeze the field.
-fn param_row(ui: &mut egui::Ui, row: usize, p: &mut Param, value: Option<f64>, table: &VarTable) -> bool {
+/// One row: whether to remove it, and whether it's being pointed at or typed in.
+fn param_row(ui: &mut egui::Ui, row: usize, p: &mut Param, value: Option<f64>, table: &VarTable) -> (bool, bool) {
     let mut remove = false;
+    let mut typing = false;
     let stripe = if row % 2 == 0 { ui.visuals().faint_bg_color } else { egui::Color32::TRANSPARENT };
-    egui::Frame::new().fill(stripe).corner_radius(3).inner_margin(egui::Margin::same(VAR_PAD)).show(ui, |ui| {
+    let framed = egui::Frame::new().fill(stripe).corner_radius(3).inner_margin(egui::Margin::same(VAR_PAD)).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             var_cell(ui, VAR_NAME_W, |ui| {
                 ui.add(egui::Label::new(RichText::new(&p.name).monospace()).truncate());
@@ -129,7 +131,7 @@ fn param_row(ui: &mut egui::Ui, row: usize, p: &mut Param, value: Option<f64>, t
             ui.vertical(|ui| {
                 ui.set_width(w);
                 ui.spacing_mut().item_spacing.y = 2.0;
-                let field = expr_field(ui, ("var", &p.name), &mut p.expr, table, Some(&p.name), |t| {
+                let field = expr_field(ui, ("var", &p.name), &mut p.expr, table, Some(&p.name), None, |t| {
                     egui::TextEdit::multiline(t).desired_rows(1).desired_width(w).min_size(vec2(0.0, VAR_LINE_H)).vertical_align(egui::Align::Center).return_key(None)
                 });
                 // Still one line of text: Enter finishes, and a pasted line break goes.
@@ -139,6 +141,7 @@ fn param_row(ui: &mut egui::Ui, row: usize, p: &mut Param, value: Option<f64>, t
                 if field.changed() {
                     p.expr.retain(|c| c != '\n' && c != '\r');
                 }
+                typing = field.has_focus();
                 ui.add(egui::Label::new(RichText::new(&p.note).size(12.0).color(theme::WEAK)).wrap());
             });
             var_cell(ui, VAR_VALUE_W, |ui| {
@@ -154,25 +157,61 @@ fn param_row(ui: &mut egui::Ui, row: usize, p: &mut Param, value: Option<f64>, t
             });
         });
     });
-    remove
+    (remove, typing || ui.rect_contains_pointer(framed.response.rect))
 }
 
-/// The rows of the variable table, without the helper values. The Draw page shows them too.
+/// The rows of the variable table, without the helper values. The Draw page shows them too. When
+/// a drawing has named every corner, those fold away under the sizes.
 pub(super) fn variable_rows(ui: &mut egui::Ui, st: &mut Studio, table: &VarTable) {
+    let corners = antenna_core::dims::corner_rows(&st.project);
+    let before = st.project.params.clone();
     let mut remove = None;
+    let mut focus = None;
+    let mut rows_where = |ui: &mut egui::Ui, st: &mut Studio, folded: bool| {
+        let rows = st.project.params.iter_mut().enumerate().filter(|(_, p)| !p.derived && corners.contains(&p.name) == folded);
+        for (row, (i, p)) in rows.enumerate() {
+            let v = table.value(&p.name);
+            let (gone, pointed) = param_row(ui, row, p, v, table);
+            if gone {
+                remove = Some(i);
+            }
+            if pointed {
+                focus = Some(p.name.clone());
+            }
+        }
+    };
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         var_header(ui);
-        let rows = st.project.params.iter_mut().enumerate().filter(|(_, p)| !p.derived);
-        for (row, (i, p)) in rows.enumerate() {
-            let v = table.value(&p.name);
-            if param_row(ui, row, p, v, table) {
-                remove = Some(i);
-            }
-        }
+        rows_where(ui, st, false);
     });
+    if !corners.is_empty() {
+        let title = RichText::new(format!("Corner positions ({})", corners.len())).color(theme::WEAK);
+        egui::CollapsingHeader::new(title).id_salt("variable_corners").show(ui, |ui| {
+            weak(ui, "Where each corner of the drawing sits. Point at a row to see it on the model.");
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                rows_where(ui, st, true);
+            });
+        });
+    }
     if let Some(i) = remove {
         st.project.params.remove(i);
+    }
+    if focus.is_some() {
+        st.ui.dim_focus = focus;
+    }
+    // A stray drag on a variable moves everything that uses it, so it has to be possible to take
+    // back. One undo step for each row typed in or dragged, as on the other fields.
+    if st.project.params != before {
+        if !st.ui.draw.editing_vars {
+            let now = std::mem::replace(&mut st.project.params, before);
+            super::draw::remember(st);
+            st.project.params = now;
+            st.ui.draw.editing_vars = true;
+        }
+    } else if !ui.ctx().egui_wants_keyboard_input() && !super::expr_field::scrubbing(ui.ctx()) {
+        st.ui.draw.editing_vars = false;
     }
 }
 
@@ -232,7 +271,7 @@ pub fn variables(ui: &mut egui::Ui, st: &mut Studio) {
             ui.spacing_mut().item_spacing.y = 0.0;
             for (row, p) in st.project.params.iter_mut().filter(|p| p.derived).enumerate() {
                 let v = table.value(&p.name);
-                param_row(ui, row, p, v, &table);
+                let _ = param_row(ui, row, p, v, &table);
             }
         });
     }
@@ -282,13 +321,13 @@ fn xyz(ui: &mut egui::Ui, whose: &str, label: &str, v: &mut [String; 3], table: 
     ui.horizontal(|ui| {
         let w = (ui.available_width() - 16.0) / 3.0;
         for (k, s) in v.iter_mut().enumerate() {
-            expr_line(ui, (whose, label, k), s, table, w.max(40.0));
+            length_line(ui, (whose, label, k), s, table, w.max(40.0));
         }
     });
     ui.end_row();
 }
 
-fn shape_word(s: &Shape) -> &'static str {
+pub(super) fn shape_word(s: &Shape) -> &'static str {
     match s {
         Shape::Box { min, max } => {
             if (0..3).any(|k| max[k] - min[k] <= 0.0) {
@@ -381,13 +420,13 @@ pub fn parts(ui: &mut egui::Ui, st: &mut Studio) {
                     xyz(ui, "part", "Start x y z", &mut np.a, &table);
                     xyz(ui, "part", "End x y z", &mut np.b, &table);
                     ui.label("Radius");
-                    expr_line(ui, "part radius", &mut np.r, &table, 100.0);
+                    length_line(ui, "part radius", &mut np.r, &table, 100.0);
                     ui.end_row();
                 }
                 2 => {
                     xyz(ui, "part", "Centre x y z", &mut np.a, &table);
                     ui.label("Radius");
-                    expr_line(ui, "part radius", &mut np.r, &table, 100.0);
+                    length_line(ui, "part radius", &mut np.r, &table, 100.0);
                     ui.end_row();
                 }
                 _ => {
@@ -471,7 +510,7 @@ pub fn parts(ui: &mut egui::Ui, st: &mut Studio) {
             xyz(ui, "port", "From x y z", &mut np.a, &table);
             xyz(ui, "port", "To x y z", &mut np.b, &table);
             ui.label("Width");
-            expr_line(ui, "port width", &mut np.width, &table, 100.0);
+            length_line(ui, "port width", &mut np.width, &table, 100.0);
             ui.end_row();
             ui.label("Impedance");
             expr_line(ui, "port z0", &mut np.z0, &table, 100.0);

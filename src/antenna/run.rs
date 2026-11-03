@@ -19,6 +19,7 @@ use antenna_core::reconfig::{Setting, Solved};
 use antenna_core::sparam::{self, Network};
 use antenna_core::{C0, C64, ETA0, linspace};
 use anyhow::{Context, Result, bail};
+use crate::rtls::fdtd::Runner;
 use rayon::prelude::*;
 
 use crate::rtls::fdtd::post::{self, Grid};
@@ -129,6 +130,44 @@ pub fn threads_for(cells: u64, share: usize) -> usize {
     let n = std::thread::available_parallelism().map_or(8, |n| n.get());
     let by_mesh = (cells / 80_000).clamp(2, 24) as usize;
     by_mesh.min((n / 2 / share.max(1)).max(1))
+}
+
+/// Runs `sim.xml` in `dir` on whichever solver this run uses. Returns whether it hit the time-step
+/// limit before the energy had decayed.
+#[allow(clippy::too_many_arguments)]
+fn run_model(ctx: &JobCtx, runner: &Runner, dir: &Path, end_db: f64, threads: usize, built_in_threads: usize, label: &str, report: bool) -> Result<bool> {
+    match runner {
+        Runner::OpenEms(exe) => run_openems(ctx, exe, dir, end_db, threads, label, report),
+        Runner::BuiltIn => {
+            let tick = |_: u64, db: f64, speed: f64| {
+                ctx.live.lock().unwrap().speed_mcs = speed;
+                if report {
+                    ctx.busy(format!("{label}energy {db:.0} of -{end_db:.0} dB · {speed:.0} MC/s"), (-db / end_db).clamp(0.0, 1.0) as f32);
+                }
+            };
+            let log = |m: String| ctx.log(m);
+            let out = antenna_core::fit::csxrun::run_dir(dir, built_in_threads, built_in_backend(built_in_threads), &ctx.cancel, &tick, &log)?;
+            ctx.log(format!("{label}{} steps at {:.0} MC/s", out.steps, out.speed));
+            Ok(out.truncated)
+        }
+    }
+}
+
+/// Threads for a built-in run: zero lets it decide, unless several run at once. Its workers spin
+/// between half steps rather than sleep, so they can't share a core.
+fn built_in_threads(asked: usize, share: usize) -> usize {
+    if asked > 0 {
+        asked
+    } else if share > 1 {
+        (std::thread::available_parallelism().map_or(8, |n| n.get()) / 2 / share).max(1)
+    } else {
+        0
+    }
+}
+
+/// A thread count set for sharing is a run that shouldn't queue up behind others on the GPU.
+fn built_in_backend(threads: usize) -> antenna_core::fit::Backend {
+    if threads > 0 { antenna_core::fit::Backend::Cpu } else { antenna_core::fit::Backend::Auto }
 }
 
 /// Runs openEMS on `sim.xml` in `dir`. Returns whether it hit the time-step
@@ -364,11 +403,17 @@ pub fn plane_title(name: &str) -> &'static str {
 }
 
 fn simulate_fdtd(project: &Project, geom: &Geometry, ctx: &JobCtx, opts: &RunOptions) -> Result<SimResult> {
-    let Some(exe) = crate::rtls::fdtd::exe() else {
-        bail!("The openEMS field solver is not installed yet. Use Install on the Setup page.");
-    };
-    let t0 = Instant::now();
     let setup = &project.setup;
+    // Named openEMS, it's openEMS if that's here. Anything else takes the default.
+    let runner = match setup.solver {
+        SolverKind::Fit => Runner::BuiltIn,
+        SolverKind::Fdtd => crate::rtls::fdtd::runner_for_openems(),
+        _ => crate::rtls::fdtd::runner(),
+    };
+    if setup.solver == SolverKind::Fdtd && runner == Runner::BuiltIn {
+        ctx.log("openEMS isn't in use here, so this runs on the built-in solver.".to_string());
+    }
+    let t0 = Instant::now();
     let design_f = project.f0();
     let plan = csx::plan(geom, setup, design_f)?;
     for w in &plan.warnings {
@@ -397,7 +442,7 @@ fn simulate_fdtd(project: &Project, geom: &Geometry, ctx: &JobCtx, opts: &RunOpt
         std::fs::create_dir_all(&d)?;
         std::fs::write(d.join("sim.xml"), csx::to_xml(geom, &plan, j))?;
         let label = if n > 1 { format!("{}port {} of {n}: ", opts.label, j + 1) } else { opts.label.clone() };
-        if run_openems(ctx, &exe, &d, plan.end_db, threads, &label, opts.report)? {
+        if run_model(ctx, &runner, &d, plan.end_db, threads, built_in_threads(if opts.threads > 0 { opts.threads } else { setup.threads }, opts.share), &label, opts.report)? {
             warnings.push(format!("{} of {} before the energy decayed to -{:.0} dB: narrow-band results may be off. Raise the step limit.", antenna_core::project::STOPPED_SHORT, setup.max_steps, plan.end_db));
         }
         if opts.report {
@@ -464,7 +509,7 @@ fn simulate_fdtd(project: &Project, geom: &Geometry, ctx: &JobCtx, opts: &RunOpt
     warnings.extend(checks::balance_warnings(&network, &far, lossless, "The far field isn't converged: refine the mesh or lower the stop level."));
     Ok(SimResult {
         label: project.name.clone(),
-        solver: SolverKind::Fdtd.label().to_string(),
+        solver: if runner == Runner::BuiltIn { SolverKind::Fit.label().to_string() } else { SolverKind::Fdtd.label().to_string() },
         network,
         far_f: plan.far_freqs.clone(),
         far,
@@ -547,6 +592,9 @@ fn simulate_mom(project: &Project, geom: &Geometry, ctx: &JobCtx, opts: &RunOpti
     };
     let lossless = antenna_core::mom::models_no_loss(geom);
     let mut warnings = problem.warnings();
+    if !geom.wave_ports.is_empty() {
+        warnings.push("Wave ports are only in the built-in FDM solver: this solver ran them as ordinary gaps.".to_string());
+    }
     warnings.extend(sampling_warnings(&sweep, &network));
     warnings.extend(checks::passivity_warnings(&network, 2e-3));
     warnings.extend(checks::balance_warnings(&network, &far, lossless, "The solve or the far-field grid isn't converged: refine the mesh or the grid step."));
@@ -608,7 +656,7 @@ pub fn simulate(project: &Project, ctx: &JobCtx, opts: &RunOptions) -> Result<Si
     // Redrawing the currents costs a factorisation, which only a run someone looks at needs.
     if opts.keep
         && let Some(f) = basis.far_f.first()
-        && project.solver_for(&geom) != SolverKind::Fdtd
+        && !project.solver_for(&geom).is_time_domain()
     {
         r.currents = state_currents(project, &geom, &solved, &rc.settings_of(&state), *f).ok();
     }
@@ -620,9 +668,34 @@ pub fn simulate_ports(project: &Project, ctx: &JobCtx, opts: &RunOptions) -> Res
     project.setup.check_band()?;
     let geom = project.geometry()?;
     match project.solver_for(&geom) {
+        // Left to choose, the built-in solver: nothing to download, and it needs fewer cells.
+        SolverKind::Fdtd if project.setup.solver == SolverKind::Auto && crate::rtls::fdtd::runner() == Runner::BuiltIn => simulate_fit(project, &geom, ctx, opts),
         SolverKind::Fdtd => simulate_fdtd(project, &geom, ctx, opts),
+        SolverKind::Fit => simulate_fit(project, &geom, ctx, opts),
         _ => simulate_mom(project, &geom, ctx, opts),
     }
+}
+
+/// The built-in time-domain solver, on the GPU when that's worth it.
+fn simulate_fit(project: &Project, geom: &Geometry, ctx: &JobCtx, opts: &RunOptions) -> Result<SimResult> {
+    let report = opts.report;
+    let busy = |m: String, p: f32| {
+        if report {
+            ctx.busy(m, p);
+        }
+    };
+    let log = |m: String| ctx.log(m);
+    let hooks = antenna_core::fit::Hooks { cancel: &ctx.cancel, busy: &busy, log: &log };
+    let threads = built_in_threads(if opts.threads > 0 { opts.threads } else { project.setup.threads }, opts.share);
+    let fit_opts = antenna_core::fit::Options { threads, backend: built_in_backend(threads), label: opts.label.clone(), ..Default::default() };
+    if project.setup.adaptive {
+        let (r, passes) = antenna_core::fit::simulate_adaptive(project, geom, &fit_opts, &hooks, Default::default())?;
+        for (n, q) in passes.iter().enumerate() {
+            ctx.log(format!("{}pass {}: {:.2} M cells, {:.0} s, S moved {}", opts.label, n + 1, q.cells as f64 / 1e6, q.seconds, q.change.map_or("-".to_string(), |c| format!("{c:.4}"))));
+        }
+        return Ok(r);
+    }
+    antenna_core::fit::simulate(project, geom, &fit_opts, &hooks)
 }
 
 /// The surface or wire currents of one reconfigurable state, with 1 W incident at the first
@@ -650,7 +723,7 @@ pub fn gate_field(project: &Project, spec: &GateSpec, ctx: &JobCtx) -> Result<Ga
     let fit = geom.solver_fit();
     let use_mom = match setup.solver {
         SolverKind::Auto => (fit.wire_mom || fit.surface_mom) && MomProblem::new(&geom, spec.f, opts).is_ok_and(|m| m.unknowns() <= antenna_core::project::AUTO_MOM_LIMIT),
-        SolverKind::Fdtd => false,
+        SolverKind::Fdtd | SolverKind::Fit => false,
         _ => true,
     };
     if use_mom {
@@ -670,6 +743,7 @@ pub fn gate_field(project: &Project, spec: &GateSpec, ctx: &JobCtx) -> Result<Ga
     let keep_out = [(std::array::from_fn(|k| plan.nf_min[k] - clear), std::array::from_fn(|k| plan.nf_max[k] + clear))];
     let samples = gate::samples(&geom, spec, &keep_out)?;
     let r = simulate_fdtd(&p, &geom, ctx, &RunOptions::default())?;
+    let solver = r.solver.clone();
     let k = 2.0 * std::f64::consts::PI * f / C0;
     let root = PathBuf::from(&r.dir);
     let mut e = Vec::with_capacity(geom.ports.len());
@@ -695,7 +769,7 @@ pub fn gate_field(project: &Project, spec: &GateSpec, ctx: &JobCtx) -> Result<Ga
         }
     }
     let network = r.network.interpolate(&[f]);
-    Ok(GateField { f, solver: "FDTD (openEMS)".into(), size: r.size, seconds: t0.elapsed().as_secs_f64(), samples, e, network, far, ports: geom.ports.iter().map(|x| x.name.clone()).collect() })
+    Ok(GateField { f, solver, size: r.size, seconds: t0.elapsed().as_secs_f64(), samples, e, network, far, ports: geom.ports.iter().map(|x| x.name.clone()).collect() })
 }
 
 #[cfg(test)]
@@ -848,7 +922,8 @@ mod tests {
     #[ignore]
     fn antenna_fdtd_step_limit_is_reported() {
         let mut p = project("strip_dipole", "1GHz", 12.0);
-        p.setup.max_steps = 1500;
+        // Past the pulse, short of the decay. The built-in solver's time step is longer, so that's fewer steps.
+        p.setup.max_steps = if crate::rtls::fdtd::runner_for_openems() == Runner::BuiltIn { 800 } else { 1500 };
         let r = fdtd(p);
         assert!(r.warnings.iter().any(|w| w.contains("step limit")), "{:?}", r.warnings);
         assert!(r.stopped_short(), "recipes refuse a run on this: {:?}", r.warnings);
@@ -869,7 +944,10 @@ mod tests {
         assert!((m.rad_efficiency - 1.0).abs() < 0.01, "a lossless antenna radiates what it accepts: {}", m.rad_efficiency);
         // Over 24 to 81 cells per λ this settles near 1003.7 MHz, first-order in the cell.
         assert!((x0 / 1.0037e9 - 1.0).abs() < 0.017, "X = 0 at {x0}");
-        assert!((z - C64::new(74.6, 4.3)).norm() < 2.0, "{z}");
+        // Each solver's own figure on this mesh, to catch a change. openEMS puts metal edges on lines by
+        // the thirds rule and reads about 4 ohms further from the converged reactance.
+        let pinned = if r.solver == SolverKind::Fit.label() { C64::new(74.6, 1.7) } else { C64::new(74.6, 4.3) };
+        assert!((z - pinned).norm() < 2.0, "{z}");
     }
 
     /// Infinite ground: PEC boundary and image currents in the transform.

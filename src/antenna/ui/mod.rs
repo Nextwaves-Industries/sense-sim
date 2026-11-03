@@ -1,20 +1,30 @@
-//! The Studio's shell: a full-canvas workspace with the design tree on the left,
-//! the 3D canvas in the middle and the selected page on the right.
+//! The Studio's shell, laid out like a CAD package: the project tree and the parameters of what's
+//! picked in it on the left, variables, messages and jobs along the bottom, the 3D canvas in the
+//! middle. Every tool is on the app's ribbon. A page with more to say, like a plot, opens on the right.
 
 pub(crate) mod analysis;
 pub mod charts;
 mod design;
+mod dim_lines;
+mod dock;
 pub mod draw;
 pub mod expr_field;
 pub mod gate;
 pub mod import;
+pub mod model3d;
+pub mod model_ribbon;
+mod params;
 pub mod phased;
+pub mod place;
+mod project_tree;
+pub mod raster;
 pub mod reconfig;
 mod results;
 pub mod samples;
 pub(crate) mod solve;
 pub mod tagdesign;
 pub mod tagtune;
+mod tuning;
 mod view3d;
 
 use std::collections::HashMap;
@@ -32,7 +42,7 @@ use bevy_egui::EguiContexts;
 use super::{Status, Studio};
 use crate::rtls::antenna::AntennaLibrary;
 use crate::rtls::planning::AppliedAntenna;
-use crate::theme::{self, Dot, TreeRow, icon};
+use crate::theme::{self, icon};
 use view3d::{Camera, ViewMode};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -63,6 +73,7 @@ pub enum Page {
     Gate,
     Sweep,
     Optimize,
+    Tuning,
     Converge,
     Yield,
     Export,
@@ -97,12 +108,27 @@ impl Page {
             "gate" => Page::Gate,
             "sweep" => Page::Sweep,
             "optimize" => Page::Optimize,
+            "tuning" => Page::Tuning,
             "converge" => Page::Converge,
             "yield" => Page::Yield,
             "export" => Page::Export,
             _ => return None,
         })
     }
+}
+
+/// Which variables change each part, by the part's name.
+pub type Drivers = std::collections::BTreeMap<String, Vec<String>>;
+
+/// A part from a template or the flat tools, as the tree and the parameters show it.
+#[derive(Clone, Debug)]
+pub struct PartRow {
+    pub name: String,
+    pub material: String,
+    pub word: &'static str,
+    pub hidden: bool,
+    pub lo: antenna_core::geometry::P3,
+    pub hi: antenna_core::geometry::P3,
 }
 
 /// Editing state of the Studio's pages.
@@ -116,6 +142,35 @@ pub struct StudioUi {
     /// A view asked for by a scripted run, applied after the page sets its own.
     pub script_view: Option<ViewMode>,
     pub show_ports: bool,
+    /// Write the variables on the model, in the views that show its shape.
+    pub show_dims: bool,
+    dims: Vec<antenna_core::dims::Dim>,
+    /// The row of the variable table being pointed at or typed in, last frame.
+    dim_focus: Option<String>,
+    /// The project changed since `dims` were worked out.
+    dims_stale: bool,
+    // In a mutex because the Studio is a resource, and a receiver alone can't be shared.
+    dims_job: Option<std::sync::Mutex<std::sync::mpsc::Receiver<(Vec<antenna_core::dims::Dim>, Drivers)>>>,
+    /// Which variables change each part, by the part's name.
+    pub drivers: Drivers,
+    /// Everything from the template and the flat tools, switched off or not, for the tree.
+    pub all_parts: Vec<PartRow>,
+    pub tree: project_tree::TreeUi,
+    pub dock: dock::DockUi,
+    /// The Add variable dialog, while it's up.
+    pub add_var: Option<params::AddVar>,
+    /// What that dialog named, for the field that asked: `(salt, name)`.
+    pub named: Option<(String, String)>,
+    /// A body was hidden or shown, so the canvas's list needs doing again.
+    pub hidden_changed: bool,
+    /// Width of the tree and parameters card.
+    pub left_w: f32,
+    /// How much of that card the tree takes.
+    pub tree_share: f32,
+    /// Height of the variables strip.
+    pub bottom_h: f32,
+    pub tune_auto: bool,
+    pub tune_dirty: bool,
     // Model cache: the geometry of the current project, or why it can't be built.
     cached_for: Option<antenna_core::project::Project>,
     pub geometry: Result<Geometry, String>,
@@ -124,6 +179,18 @@ pub struct StudioUi {
     pub model: Option<Geometry>,
     /// Each solid as triangles and lines, ready to draw.
     tess: Vec<view3d::Tessellated>,
+    /// What's modelled in 3D, as it stands, with a failed step marked rather than the lot lost.
+    pub built: antenna_core::modeler::Built,
+    /// Everything on the canvas, ready for the depth buffer.
+    pub parts: Vec<raster::Part>,
+    pub raster: raster::Canvas,
+    /// Goes up whenever `parts` changes.
+    pub revision: u64,
+    /// Metal bodies that touch without being joined, worked out once per change.
+    pub touching: Vec<(String, String)>,
+    /// Who has the left mouse button on the drawing page.
+    pub pointer: model3d::Pointer,
+    pub m3: model3d::ModelUi,
     /// The solver a run would use, and its mesh when that is MoM.
     pub chosen: antenna_core::project::SolverKind,
     mom_mesh: Option<(antenna_core::mom::MeshView, usize)>,
@@ -219,17 +286,41 @@ impl Default for StudioUi {
     fn default() -> Self {
         Self {
             file: None,
-            page: Page::Variables,
+            page: Page::Draw,
             cam: Camera::default(),
             view: ViewMode::Model,
             transparent: false,
             script_view: None,
             show_ports: true,
+            show_dims: true,
+            dims: Vec::new(),
+            dim_focus: None,
+            dims_stale: true,
+            dims_job: None,
+            drivers: Default::default(),
+            all_parts: Vec::new(),
+            tree: Default::default(),
+            dock: Default::default(),
+            add_var: None,
+            named: None,
+            hidden_changed: false,
+            left_w: 320.0,
+            tree_share: 0.48,
+            bottom_h: 205.0,
+            tune_auto: true,
+            tune_dirty: false,
             cached_for: None,
             geometry: Err(String::new()),
             plan: None,
             model: None,
             tess: Vec::new(),
+            built: Default::default(),
+            parts: Vec::new(),
+            raster: Default::default(),
+            revision: 0,
+            touching: Vec::new(),
+            pointer: Default::default(),
+            m3: Default::default(),
             chosen: antenna_core::project::SolverKind::Auto,
             mom_mesh: None,
             setup_problem: None,
@@ -308,8 +399,54 @@ impl Default for StudioUi {
 impl StudioUi {
     /// Only what the canvas draws, for each step of a drag: the mesh waits for the drop.
     fn refresh_shapes(&mut self, project: &antenna_core::project::Project) {
-        self.model = project.scatterer().ok();
-        self.tess = self.model.as_ref().map_or(Vec::new(), |g| g.solids.iter().map(|s| antenna_core::geometry::tessellate(&s.shape)).collect());
+        let vars = project.vars().ok();
+        self.built = vars.as_ref().map_or_else(Default::default, |v| project.model.build(v));
+        self.model = vars.as_ref().and_then(|v| project.parts_geometry(v).ok()).map(|mut g| {
+            g.ports.extend(self.built.ports.iter().cloned());
+            g
+        });
+        let hidden = &self.m3.hidden_parts;
+        self.tess = self.model.as_ref().map_or(Vec::new(), |g| g.solids.iter().map(|s| if hidden.contains(&s.name) { (Vec::new(), Vec::new()) } else { antenna_core::geometry::tessellate(&s.shape) }).collect());
+        self.rebuild_parts(project);
+    }
+
+    /// The canvas's list from the parts and bodies. A body that came through the build unchanged
+    /// keeps what was worked out for it, so editing one step doesn't redo the normals of them all.
+    fn rebuild_parts(&mut self, project: &antenna_core::project::Project) {
+        use std::sync::Arc;
+        let colour = |name: &str| {
+            let [r, g, b, a] = view3d::solid_color(name).to_srgba_unmultiplied();
+            ([r, g, b], a)
+        };
+        let old = std::mem::take(&mut self.parts);
+        let mut parts = Vec::with_capacity(self.tess.len() + self.built.bodies.len());
+        if let Some(g) = &self.model {
+            for (s, (tris, _)) in g.solids.iter().zip(&self.tess) {
+                if tris.is_empty() {
+                    continue;
+                }
+                let mut m = antenna_core::modeler::mesh::Mesh::default();
+                for t in tris {
+                    m.push_tri(t[0], t[1], t[2], 0);
+                }
+                let (rgb, alpha) = colour(&s.material);
+                let mut part = raster::Part::new(Arc::new(m.welded(1e-10)), rgb, alpha, None);
+                part.solid = Some(s.name.clone());
+                parts.push(part);
+            }
+        }
+        for b in &self.built.bodies {
+            if b.mesh.is_empty() || self.m3.hidden.contains(&b.id) {
+                continue;
+            }
+            let (rgb, alpha) = colour(if b.material.is_empty() { &project.metal } else { &b.material });
+            match old.iter().find(|p| p.body == Some(b.id) && Arc::ptr_eq(&p.mesh, &b.mesh) && p.rgb == rgb && p.alpha == alpha) {
+                Some(p) => parts.push(p.clone()),
+                None => parts.push(raster::Part::new(b.mesh.clone(), rgb, alpha, Some(b.id))),
+            }
+        }
+        self.parts = parts;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Rebuilds the geometry and mesh when the project changed.
@@ -317,16 +454,40 @@ impl StudioUi {
         if self.cached_for.as_ref() == Some(project) {
             return;
         }
+        // Another antenna gets framed. Not one with a new name: that's the same antenna.
+        if self.cached_for.as_ref().is_some_and(|old| old.template != project.template) {
+            self.m3.frame = None;
+            self.m3.hidden_parts.clear();
+            self.m3.sel = Default::default();
+            self.tree.pick = Default::default();
+            if self.page == Page::Draw {
+                self.shown_page = None;
+            }
+        }
         self.cached_for = Some(project.clone());
+        self.all_parts = {
+            let mut p = project.clone();
+            p.hidden.clear();
+            p.vars().ok().and_then(|v| p.parts_geometry(&v).ok()).map_or(Vec::new(), |g| {
+                g.solids
+                    .iter()
+                    .map(|s| {
+                        let (lo, hi) = s.shape.bounds();
+                        PartRow { name: s.name.clone(), material: s.material.clone(), word: design::shape_word(&s.shape), hidden: project.hidden.contains(&s.name), lo, hi }
+                    })
+                    .collect()
+            })
+        };
+        self.dims_stale = true;
         self.geometry = project.geometry().map_err(|e| format!("{e:#}"));
         let plan = self.geometry.as_ref().ok().map(|g| antenna_core::csx::plan(g, &project.setup, project.f0()));
-        self.model = project.scatterer().ok();
-        self.tess = self.model.as_ref().map_or(Vec::new(), |g| g.solids.iter().map(|s| antenna_core::geometry::tessellate(&s.shape)).collect());
+        self.refresh_shapes(project);
+        self.touching = self.built.touching_unjoined();
         // Choosing the solver can mean meshing, so it happens here, not per frame.
         self.chosen = self.geometry.as_ref().map_or(antenna_core::project::SolverKind::Fdtd, |g| project.solver_for(g));
         self.mom_mesh = None;
         self.setup_problem = project.setup.check_band().err().map(|e| e.to_string());
-        if self.chosen != antenna_core::project::SolverKind::Fdtd
+        if !self.chosen.is_time_domain()
             && let Ok(g) = &self.geometry
         {
             let s = &project.setup;
@@ -341,6 +502,92 @@ impl StudioUi {
             self.setup_problem.get_or_insert(format!("{e:#}"));
         }
         self.plan = plan.and_then(Result::ok);
+        self.drop_what_is_gone(project);
+    }
+
+    /// Undo, a delete or another antenna can take away what the panels have hold of.
+    fn drop_what_is_gone(&mut self, project: &antenna_core::project::Project) {
+        let is_step = |id: u32| project.model.feature(id).is_some();
+        let bodies: Vec<u32> = self.built.bodies.iter().map(|b| b.id).collect();
+        let m3 = &mut self.m3;
+        if m3.sel.feature.is_some_and(|f| !is_step(f)) {
+            m3.sel = Default::default();
+        }
+        if m3.sel.body.is_some_and(|b| !is_step(b) && !bodies.contains(&b)) {
+            m3.sel.body = None;
+        }
+        m3.sel.more.retain(|p| is_step(p.feature));
+        // A hidden id with nothing behind it mustn't hide whatever's next to be given it.
+        m3.hidden.retain(|b| is_step(*b) || bodies.contains(b));
+        if m3.coord.is_some_and(|c| project.model.coord(c).is_none()) {
+            m3.coord = None;
+        }
+        m3.forget_gone_steps(project);
+        if self.draw.selected.is_some_and(|i| i >= project.extra.len()) {
+            self.draw.selected = None;
+        }
+        use project_tree::Pick;
+        // A flat part picked and renamed is still the one picked.
+        if let (Pick::Part(_), Some(i)) = (&self.tree.pick, self.draw.selected) {
+            self.tree.pick = Pick::Part(project.extra[i].name.clone());
+        }
+        let still_there = match &self.tree.pick {
+            Pick::Part(name) => self.all_parts.iter().any(|p| &p.name == name),
+            Pick::Port(name) => self.model.as_ref().is_some_and(|g| g.ports.iter().any(|p| &p.name == name)),
+            Pick::Coord(Some(c)) => project.model.coord(*c).is_some(),
+            Pick::Material(name) => antenna_core::material::built_in().iter().any(|m| &m.name == name) || project.materials.iter().any(|m| &m.name == name),
+            _ => true,
+        };
+        if !still_there {
+            self.tree.pick = Pick::Nothing;
+        }
+    }
+
+    /// A variable has a new name: what the pages hold by name follows it.
+    pub(crate) fn variable_renamed(&mut self, old: &str, new: &str) {
+        for v in &mut self.opt_vars {
+            if v.0 == old {
+                v.0 = new.to_string();
+            }
+        }
+        for v in &mut self.tol {
+            if v.0 == old {
+                v.0 = new.to_string();
+            }
+        }
+        if self.sweep_var == old {
+            self.sweep_var = new.to_string();
+        }
+        if self.sweep_var2 == old {
+            self.sweep_var2 = new.to_string();
+        }
+    }
+
+    /// Picks up the variables' places when they're ready, and starts on the next if the project
+    /// has moved on. Finding them builds the model once per variable, so it's off the frame.
+    fn follow_dims(&mut self) {
+        use std::sync::mpsc::{TryRecvError, channel};
+        if let Some(job) = self.dims_job.as_mut().and_then(|j| j.get_mut().ok()) {
+            match job.try_recv() {
+                Ok((list, drivers)) => {
+                    self.dims = list;
+                    self.drivers = drivers;
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        self.dims_job = None;
+        if self.dims_stale
+            && let Some(project) = self.cached_for.clone()
+        {
+            self.dims_stale = false;
+            let (tx, rx) = channel();
+            let started = std::thread::Builder::new().name("antenna variables".into()).spawn(move || {
+                let _ = tx.send((antenna_core::dims::of_project(&project), antenna_core::dims::drivers(&project)));
+            });
+            self.dims_job = started.ok().map(|_| std::sync::Mutex::new(rx));
+        }
     }
 }
 
@@ -408,100 +655,6 @@ pub fn ghz_field(ui: &mut egui::Ui, v: &mut f64) -> egui::Response {
     r
 }
 
-struct NavRow {
-    page: Page,
-    text: &'static str,
-    glyph: &'static str,
-    /// Available without a result.
-    always: bool,
-}
-
-const NAV: [(&str, &[NavRow]); 6] = [
-    (
-        "Design",
-        &[
-            NavRow { page: Page::Samples, text: "Sample projects", glyph: icon::PACKAGE, always: true },
-            NavRow { page: Page::Gallery, text: "Antenna templates", glyph: icon::SQUARES_FOUR, always: true },
-            NavRow { page: Page::TagDesign, text: "Design an RFID tag", glyph: icon::SPARKLE, always: true },
-            NavRow { page: Page::Draw, text: "Draw", glyph: icon::NOTE_PENCIL, always: true },
-            NavRow { page: Page::Variables, text: "Variables", glyph: icon::SLIDERS_HORIZONTAL, always: true },
-            NavRow { page: Page::Parts, text: "Parts and ports", glyph: icon::CUBE, always: true },
-            NavRow { page: Page::Reconfig, text: "Reconfigurable", glyph: icon::LIGHTNING, always: true },
-            NavRow { page: Page::Materials, text: "Materials", glyph: icon::STACK, always: true },
-        ],
-    ),
-    ("Solve", &[NavRow { page: Page::Setup, text: "Solver setup and run", glyph: icon::PLAY_CIRCLE, always: true }]),
-    (
-        "Results",
-        &[
-            NavRow { page: Page::SParams, text: "S-parameters", glyph: icon::CHART_LINE, always: false },
-            NavRow { page: Page::Smith, text: "Smith chart", glyph: icon::TARGET, always: false },
-            NavRow { page: Page::FarField, text: "Far field", glyph: icon::BROADCAST, always: false },
-            NavRow { page: Page::Fields, text: "Fields and currents", glyph: icon::WAVE_SINE, always: false },
-        ],
-    ),
-    (
-        "Analysis",
-        &[
-            NavRow { page: Page::Array, text: "Array synthesis", glyph: icon::GRID_FOUR, always: false },
-            NavRow { page: Page::Matching, text: "Matching network", glyph: icon::PLUGS, always: false },
-            NavRow { page: Page::Mimo, text: "MIMO and coupling", glyph: icon::SHARE_NETWORK, always: false },
-            NavRow { page: Page::Link, text: "Link budget", glyph: icon::PULSE, always: false },
-            NavRow { page: Page::Rcs, text: "Radar cross section", glyph: icon::CROSSHAIR, always: true },
-            NavRow { page: Page::Gate, text: "RFID gate test", glyph: icon::DOOR_OPEN, always: true },
-        ],
-    ),
-    (
-        "Arrays and signals",
-        &[
-            NavRow { page: Page::Phased, text: "Phased array", glyph: icon::GRID_FOUR, always: true },
-            NavRow { page: Page::DirectionFinding, text: "Direction finding", glyph: icon::CROSSHAIR, always: true },
-            NavRow { page: Page::SignalChain, text: "Signal chain", glyph: icon::CPU, always: true },
-            NavRow { page: Page::Radar, text: "Radar", glyph: icon::BROADCAST, always: true },
-        ],
-    ),
-    (
-        "Automate",
-        &[
-            NavRow { page: Page::Sweep, text: "Parameter sweep", glyph: icon::FADERS, always: true },
-            NavRow { page: Page::Optimize, text: "Optimizer", glyph: icon::ROCKET_LAUNCH, always: true },
-            NavRow { page: Page::Converge, text: "Mesh convergence", glyph: icon::GAUGE, always: true },
-            NavRow { page: Page::Yield, text: "Tolerance and yield", glyph: icon::LIST_CHECKS, always: true },
-            NavRow { page: Page::Export, text: "Save and export", glyph: icon::EXPORT, always: true },
-        ],
-    ),
-];
-
-fn nav_card(ui: &mut egui::Ui, st: &mut Studio, width: f32, has_result: bool) {
-    let busy = st.busy();
-    egui::ScrollArea::vertical().id_salt("studio_nav").show(ui, |ui| {
-        for (title, rows) in NAV {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                ui.label(RichText::new(title.to_uppercase()).size(11.5).color(theme::WEAK));
-            });
-            ui.add_space(2.0);
-            for row in rows {
-                let dim = !row.always && !has_result;
-                let dot = match row.page {
-                    Page::Setup if busy => Dot::Busy,
-                    Page::Setup if has_result => Dot::Done,
-                    _ => Dot::None,
-                };
-                let (c, r) = theme::tree_row(ui, width, &TreeRow { depth: 0, text: row.text, glyph: row.glyph, dot, selected: st.ui.page == row.page, expander: None, guide: false, last: false, note: "", dim });
-                if dim {
-                    r.on_hover_text("Run a simulation first");
-                }
-                if c.row {
-                    st.ui.page = row.page;
-                }
-            }
-        }
-        ui.add_space(8.0);
-    });
-}
-
 /// On arriving at a page, puts the canvas on what that page is about. After
 /// that the view toolbar is the user's.
 fn canvas_for_page(st: &mut Studio) {
@@ -511,13 +664,13 @@ fn canvas_for_page(st: &mut Studio) {
     st.ui.shown_page = Some(st.ui.page);
     st.ui.message = None;
     match st.ui.page {
-        Page::Draw => draw::entered(st),
+        Page::Draw => model3d::entered(st),
         Page::FarField | Page::Array | Page::Phased | Page::Link => st.ui.view = ViewMode::Pattern,
         Page::Fields => {
             let has_field = st.latest().is_some_and(|r| !r.planes.is_empty());
             st.ui.view = if has_field { ViewMode::Field } else { ViewMode::Currents };
         }
-        Page::Variables | Page::Parts | Page::Reconfig | Page::Materials | Page::Samples | Page::Gallery | Page::Gate | Page::TagDesign if !matches!(st.ui.view, ViewMode::Model | ViewMode::Mesh) => st.ui.view = ViewMode::Model,
+        Page::Parts | Page::Reconfig | Page::Materials | Page::Samples | Page::Gallery | Page::Gate | Page::TagDesign if !matches!(st.ui.view, ViewMode::Model | ViewMode::Mesh) => st.ui.view = ViewMode::Model,
         _ => {}
     }
 }
@@ -574,6 +727,7 @@ fn page_ui(ui: &mut egui::Ui, st: &mut Studio, lib: (&mut AntennaLibrary, &mut A
         Page::Samples => samples::page(ui, st),
         Page::Gallery => design::gallery(ui, st),
         Page::TagDesign => tagdesign::page(ui, st),
+        // Only the flat tools: the 3D model's numbers are in the Parameters panel.
         Page::Draw => draw::page(ui, st),
         Page::Variables => design::variables(ui, st),
         Page::Parts => design::parts(ui, st),
@@ -596,6 +750,7 @@ fn page_ui(ui: &mut egui::Ui, st: &mut Studio, lib: (&mut AntennaLibrary, &mut A
         Page::Gate => gate::page(ui, st),
         Page::Sweep => solve::sweep(ui, st),
         Page::Optimize => solve::optimize(ui, st),
+        Page::Tuning => tuning::page(ui, st),
         Page::Converge => solve::converge(ui, st),
         Page::Yield => solve::yield_page(ui, st),
         Page::Export => analysis::export(ui, st, lib.0, lib.1),
@@ -749,6 +904,9 @@ pub fn studio_ui(
             StudioFile::Open => analysis::open_project(&mut studio),
         }
     }
+    if let Some(path) = slot.studio_open_file.take() {
+        analysis::open_project_at(&mut studio, path);
+    }
     // Scripted runs: `--open antenna-<page>`, `--open antenna-run-<template>`.
     for name in std::mem::take(&mut slot.studio_goto) {
         slot.studio_open = true;
@@ -795,9 +953,20 @@ pub fn studio_ui(
                 studio.ui.page = Page::Gate;
                 studio.run_gate(spec);
             }
+        } else if name == "flat-parts" {
+            studio.ui.page = Page::Draw;
+            model3d::choose_flat(&mut studio, true);
         } else if let Some(p) = Page::from_name(&name) {
             studio.ui.page = p;
         }
+    }
+    // The variables have their own strip, always there. Asking for them only makes sure it shows.
+    if studio.ui.page == Page::Variables {
+        studio.ui.page = Page::Draw;
+        slot.studio_hide_bottom = false;
+    }
+    for cmd in std::mem::take(&mut slot.model_asks) {
+        model3d::ribbon_command(&mut studio, cmd);
     }
     let Some(canvas) = slot.studio_rect.filter(|_| slot.studio_open && hide.0 == 0) else {
         return Ok(());
@@ -814,25 +983,48 @@ pub fn studio_ui(
     let mut project = st.project.clone();
     // Array settings don't change the model, so they mustn't re-mesh it at each step of a drag.
     project.phased = Default::default();
-    if st.ui.draw.dragging() {
+    // Nor does the range a variable may be optimized over.
+    for row in &mut project.params {
+        row.range = None;
+    }
+    let dragging = st.ui.draw.dragging() || st.ui.m3.dragging();
+    if dragging {
         st.ui.refresh_shapes(&project);
     } else {
         st.ui.refresh(&project);
     }
+    let show_dims = st.ui.show_dims && matches!(st.ui.view, ViewMode::Model | ViewMode::Mesh);
+    // The canvas goes first and the table after it, so this is the table's word from last frame.
+    let dim_focus = st.ui.dim_focus.take();
+    if !dragging {
+        st.ui.follow_dims();
+        if st.ui.dims_job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
     follow_new_result(st);
     canvas_for_page(st);
+    if st.ui.page == Page::Draw {
+        model3d::animate(st, &ctx);
+    }
     if let Some(v) = st.ui.script_view.take() {
         st.ui.view = v;
     }
     let latest = st.latest();
-    let has_result = latest.is_some();
 
-    const M: f32 = 10.0;
-    let left_w = 232.0;
-    let detail_w = st.ui.detail_w.min(canvas.width() - left_w - 120.0).max(320.0);
+    const M: f32 = 8.0;
+    let hide_left = slot.studio_hide_left;
+    let hide_bottom = slot.studio_hide_bottom;
+    let has_card = st.ui.page != Page::Draw || st.ui.m3.flat;
+    let left_w = st.ui.left_w.min(canvas.width() * 0.42).max(220.0);
     let left = egui::Rect::from_min_size(canvas.min + vec2(M, M), vec2(left_w, canvas.height() - 2.0 * M));
+    let left_edge = if hide_left { canvas.left() } else { left.right() };
+    let detail_w = st.ui.detail_w.min(canvas.width() - left_w - 120.0).max(320.0);
     let detail = egui::Rect::from_min_size(pos2(canvas.right() - M - detail_w, canvas.top() + M), vec2(detail_w, canvas.height() - 2.0 * M));
-    let view = egui::Rect::from_min_max(pos2(left.right() + M, canvas.top()), pos2(detail.left() - M, canvas.bottom()));
+    let right_edge = if has_card { detail.left() } else { canvas.right() };
+    let bottom_h = if hide_bottom { 0.0 } else { st.ui.bottom_h.clamp(96.0, (canvas.height() * 0.6).max(120.0)) };
+    let bottom = egui::Rect::from_min_max(pos2(left_edge + M, canvas.bottom() - M - bottom_h), pos2(right_edge - M, canvas.bottom() - M));
+    let view = egui::Rect::from_min_max(pos2(left_edge + M, canvas.top()), pos2(right_edge - M, if hide_bottom { canvas.bottom() } else { bottom.top() - M }));
 
     // Canvas, under the cards. On a lower order than they are, because pressing an
     // area raises it over the others of its order, and this one would hide them all.
@@ -869,13 +1061,21 @@ pub fn studio_ui(
             _ => Vec::new(),
         };
         let part_marks = reconfig::canvas_marks(st);
-        let drawing = st.ui.page == Page::Draw && matches!(st.ui.view, ViewMode::Model | ViewMode::Mesh);
+        let on_draw = st.ui.page == Page::Draw && matches!(st.ui.view, ViewMode::Model | ViewMode::Mesh);
+        let flat = st.ui.m3.flat;
+        let drawing = model3d::drawing(st);
+        let look = model3d::look(st);
+        let parts = std::mem::take(&mut st.ui.parts);
+        let mut picture = std::mem::take(&mut st.ui.raster);
         let scene = view3d::Scene {
+            parts: if markers.is_some() { &[] } else { &parts },
+            look,
+            sketch_grid: if on_draw && !flat { model3d::canvas_grid(st) } else { None },
             part_marks: &part_marks,
             boxes: &boxes,
             drawing,
-            frame: if drawing { st.ui.draw.frame } else { None },
-            grid: if drawing { draw::canvas_grid(st) } else { None },
+            frame: if !on_draw { None } else if flat { st.ui.draw.frame } else { st.ui.m3.frame },
+            grid: if on_draw && flat && drawing { draw::canvas_grid(st) } else { None },
             geometry: geom.as_ref(),
             tess: markers.as_ref().map_or(&tess[..], |m| &m.1[..]),
             mom_mesh: st.ui.mom_mesh.as_ref(),
@@ -890,11 +1090,23 @@ pub fn studio_ui(
             plane_tex,
             transparent: st.ui.transparent,
             show_ports: st.ui.show_ports,
+            // Not on an array's markers, nor over a sketch being edited, whose dimensions are its
+            // own, nor mid-drag, when they'd still be where the part was.
+            dims: if show_dims && markers.is_none() && !dragging && (flat || !(on_draw && drawing)) { &st.ui.dims } else { &[] },
+            dim_focus: dim_focus.as_deref(),
         };
-        let (resp, pj) = view3d::show(ui, canvas, view, &mut st.ui.cam, &scene);
+        let (resp, pj) = view3d::show(ui, canvas, view, &mut st.ui.cam, &scene, &mut picture);
         drop(scene);
         st.ui.tess = tess;
-        draw::canvas(ui, st, canvas, view, &resp, &pj);
+        st.ui.parts = parts;
+        st.ui.raster = picture;
+        if flat {
+            if st.ui.pointer == model3d::Pointer::Draw {
+                draw::canvas(ui, st, canvas, view, &resp, &pj);
+            }
+        } else {
+            model3d::canvas(ui, st, canvas, view, &resp, &pj);
+        }
     });
 
     // View toolbar, over the canvas.
@@ -902,14 +1114,22 @@ pub fn studio_ui(
         theme::floating_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                if st.ui.page == Page::Draw {
+                    model3d::pointer_switch(ui, st);
+                    ui.add_space(6.0);
+                }
                 let mut v = st.ui.view;
                 theme::segmented(ui, &mut v, &ViewMode::ALL);
                 st.ui.view = v;
                 ui.add_space(4.0);
                 theme::icon_toggle(ui, &mut st.ui.transparent, icon::CUBE_TRANSPARENT, "See-through model");
                 theme::icon_toggle(ui, &mut st.ui.show_ports, icon::PLUG, "Show ports");
+                theme::icon_toggle(ui, &mut st.ui.show_dims, icon::RULER, "Show the main sizes on the model. A length or width set by a variable gets a dimension line, and pointing at a row in the variable table shows that one. Model and Mesh views.");
                 if theme::icon_button(ui, icon::FRAME_CORNERS, "Reset the view (double-click the canvas)").clicked() {
                     st.ui.cam = Camera::default();
+                    if st.ui.page == Page::Draw && !st.ui.m3.flat {
+                        model3d::fit(st);
+                    }
                 }
                 ui.add_space(4.0);
                 for (name, tip, yaw, pitch) in Camera::VIEWS {
@@ -921,45 +1141,167 @@ pub fn studio_ui(
         });
     });
 
-    // Project name and how to leave, top left of the canvas.
-    egui::Area::new(egui::Id::new("studio_left")).order(egui::Order::Middle).constrain(false).fixed_pos(left.min).show(&ctx, |ui| {
-        theme::fixed_card(ui, left_w, left.height(), |ui| {
-            ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-            let (r, _) = ui.allocate_exact_size(vec2(left_w, 44.0), egui::Sense::hover());
-            ui.painter().text(r.left_top() + vec2(12.0, 7.0), Align2::LEFT_TOP, "Antenna Studio", theme::bold(15.0), theme::TEXT);
-            let name = st.project.name.clone();
-            let g = ui.painter().layout(name, egui::FontId::proportional(12.0), theme::WEAK, left_w - 50.0);
-            ui.painter().galley(r.left_top() + vec2(12.0, 25.0), g, theme::WEAK);
-            let close = egui::Rect::from_center_size(r.right_center() - vec2(20.0, 0.0), vec2(24.0, 24.0));
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(close));
-            if theme::close_button(&mut child, "Leave Antenna Design").clicked() {
-                slot.studio_open = false;
-            }
-            theme::hairline(ui);
-            nav_card(ui, st, left_w, has_result);
-        });
-    });
-
-    // The selected page.
-    egui::Area::new(egui::Id::new("studio_detail")).order(egui::Order::Middle).constrain(false).fixed_pos(detail.min).show(&ctx, |ui| {
-        theme::fixed_card(ui, detail_w, detail.height(), |ui| {
-            egui::ScrollArea::vertical().id_salt(("studio_page", st.ui.page as u8)).max_height(detail.height()).show(ui, |ui| {
-                egui::Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
-                    ui.set_width(detail_w - 24.0);
-                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                    status_strip(ui, st);
-                    if let Some((m, good)) = st.ui.message.clone() {
-                        verdict(ui, good, &m);
-                    }
-                    page_ui(ui, st, (&mut library, &mut applied));
+    // The tree of what the antenna is, and the numbers of what's picked in it.
+    if !hide_left {
+        egui::Area::new(egui::Id::new("studio_left")).order(egui::Order::Middle).constrain(false).fixed_pos(left.min).show(&ctx, |ui| {
+            theme::fixed_card(ui, left_w, left.height(), |ui| {
+                ui.set_min_height(left.height());
+                let total = left.height();
+                let head = |ui: &mut egui::Ui, title: &str| {
+                    let (r, _) = ui.allocate_exact_size(vec2(left_w, 24.0), egui::Sense::hover());
+                    ui.painter().text(r.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, title, theme::bold(13.0), theme::TEXT);
+                    theme::hairline(ui);
+                    r
+                };
+                let r = head(ui, "Project");
+                let mut buttons = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(6.0, 1.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+                buttons.spacing_mut().item_spacing.x = 0.0;
+                if theme::icon_button(&mut buttons, icon::ARROW_U_UP_RIGHT, "Redo (Ctrl+Y)").clicked() {
+                    draw::redo(st);
+                }
+                if theme::icon_button(&mut buttons, icon::ARROW_U_UP_LEFT, "Undo (Ctrl+Z)").clicked() {
+                    draw::undo(st);
+                }
+                let tree_h = (total * st.ui.tree_share).clamp(90.0, (total - 170.0).max(90.0));
+                egui::ScrollArea::vertical().id_salt("studio_tree").max_height(tree_h).min_scrolled_height(tree_h).auto_shrink([false, false]).show(ui, |ui| {
+                    let w = ui.available_width();
+                    project_tree::show(ui, st, w);
+                });
+                // The line between the two: dragging it gives one the other's room.
+                let (bar, grip) = ui.allocate_exact_size(vec2(left_w, 7.0), egui::Sense::drag());
+                ui.painter().hline(bar.x_range(), bar.center().y, egui::Stroke::new(1.0, if grip.hovered() || grip.dragged() { theme::WEAK } else { theme::STROKE }));
+                if grip.dragged() {
+                    st.ui.tree_share = ((tree_h + grip.drag_delta().y) / total).clamp(0.1, 0.9);
+                }
+                grip.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                head(ui, "Parameters");
+                let rest = (total - tree_h - 24.0 - 24.0 - 9.0).max(40.0);
+                egui::ScrollArea::vertical().id_salt("studio_params").max_height(rest).min_scrolled_height(rest).auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+                        ui.set_width(left_w - 26.0);
+                        params::panel(ui, st);
+                    });
                 });
             });
         });
-    });
-    let (mut w, range) = (st.ui.detail_w, 340.0..=820.0);
-    theme::width_grip(&ctx, "studio_detail", pos2(detail.left() - 5.0, detail.top() + 120.0), &mut w, range, -1.0);
-    st.ui.detail_w = w;
+        let mut w = st.ui.left_w;
+        theme::width_grip(&ctx, "studio_left", pos2(left.right() + 4.0, left.top() + 120.0), &mut w, 220.0..=560.0, 1.0);
+        st.ui.left_w = w;
+    }
+
+    // Variables, messages and what's running.
+    if !hide_bottom {
+        let (w, h) = (bottom.width().max(200.0), bottom.height());
+        egui::Area::new(egui::Id::new("studio_bottom")).order(egui::Order::Middle).constrain(false).fixed_pos(bottom.min).show(&ctx, |ui| {
+            theme::fixed_card(ui, w, h, |ui| {
+                ui.set_min_height(h);
+                dock::show(ui, st, w, h);
+            });
+        });
+        let mut h = st.ui.bottom_h;
+        theme::height_grip(&ctx, "studio_bottom", pos2(bottom.center().x, bottom.top() - 4.0), &mut h, 96.0..=(canvas.height() * 0.6).max(120.0), -1.0);
+        st.ui.bottom_h = h;
+    }
+
+    // A page that has more to say than a row of numbers: a plot, a template gallery, a solver's setup.
+    if has_card {
+        egui::Area::new(egui::Id::new("studio_detail")).order(egui::Order::Middle).constrain(false).fixed_pos(detail.min).show(&ctx, |ui| {
+            theme::fixed_card(ui, detail_w, detail.height(), |ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(detail_w, 30.0), egui::Sense::hover());
+                ui.painter().text(r.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, page_title(st), theme::bold(14.0), theme::TEXT);
+                let close = egui::Rect::from_center_size(r.right_center() - vec2(20.0, 0.0), vec2(24.0, 24.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(close));
+                if theme::close_button(&mut child, "Close this page").clicked() {
+                    if st.ui.m3.flat {
+                        model3d::choose_flat(st, false);
+                    }
+                    st.ui.page = Page::Draw;
+                    st.ui.shown_page = Some(Page::Draw);
+                    // Closing a page isn't asking for the modeler's tools: the ribbon stays where it is.
+                    slot.ribbon_studio_page = Some(Page::Draw);
+                }
+                theme::hairline(ui);
+                egui::ScrollArea::vertical().id_salt(("studio_page", st.ui.page as u8)).max_height(detail.height() - 32.0).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
+                        ui.set_width(detail_w - 24.0);
+                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                        status_strip(ui, st);
+                        if let Some((m, good)) = st.ui.message.clone() {
+                            verdict(ui, good, &m);
+                        }
+                        page_ui(ui, st, (&mut library, &mut applied));
+                    });
+                });
+            });
+        });
+        let (mut w, range) = (st.ui.detail_w, 340.0..=820.0);
+        theme::width_grip(&ctx, "studio_detail", pos2(detail.left() - 5.0, detail.top() + 120.0), &mut w, range, -1.0);
+        st.ui.detail_w = w;
+    }
+
+    place::strip(&ctx, st, view);
+    note_strip(&ctx, st, view);
+    params::add_var_dialog(&ctx, st);
+    dock::follow_jobs(st);
+    if std::mem::take(&mut st.ui.hidden_changed) {
+        let p = st.project.clone();
+        st.ui.refresh_shapes(&p);
+    }
     slot.studio_page = st.ui.page;
+    slot.model_bar = model3d::ribbon_state(st);
     publish_doc(st, &mut slot);
     Ok(())
+}
+
+/// What the modeler wants said, over the canvas, until it's dealt with.
+fn note_strip(ctx: &egui::Context, st: &mut Studio, view: egui::Rect) {
+    let Some(note) = st.ui.m3.note.clone() else { return };
+    let above = if matches!(st.ui.m3.picking, model3d::Picking::Place(_)) { 52.0 } else { 12.0 };
+    egui::Area::new(egui::Id::new("studio_note")).order(egui::Order::Middle).pivot(Align2::CENTER_BOTTOM).fixed_pos(pos2(view.center().x, view.bottom() - above)).show(ctx, |ui| {
+        egui::Frame::new().fill(theme::WARNING.gamma_multiply(0.14)).stroke(egui::Stroke::new(1.0, theme::WARNING.gamma_multiply(0.5))).corner_radius(4).inner_margin(Margin::symmetric(10, 5)).show(ui, |ui| {
+            ui.set_max_width((view.width() - 40.0).max(200.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::WARNING_CIRCLE).color(theme::WARNING));
+                ui.add(egui::Label::new(RichText::new(note).color(theme::TEXT)).wrap());
+                if theme::icon_button(ui, icon::X, "Dismiss").clicked() {
+                    st.ui.m3.note = None;
+                }
+            });
+        });
+    });
+}
+
+/// The heading of the page on the right.
+fn page_title(st: &Studio) -> &'static str {
+    match st.ui.page {
+        Page::Samples => "Sample projects",
+        Page::Gallery => "Antenna templates",
+        Page::TagDesign => "Design an RFID tag",
+        Page::Draw => "Flat parts",
+        Page::Variables => "Variables",
+        Page::Parts => "Parts and ports",
+        Page::Reconfig => "Reconfigurable",
+        Page::Materials => "Materials",
+        Page::Setup => "Solver setup and run",
+        Page::SParams => "S-parameters",
+        Page::Smith => "Smith chart",
+        Page::FarField => "Far field",
+        Page::Fields => "Fields and currents",
+        Page::Array => "Array synthesis",
+        Page::Phased => "Phased array",
+        Page::DirectionFinding => "Direction finding",
+        Page::SignalChain => "Signal chain",
+        Page::Radar => "Radar",
+        Page::Matching => "Matching network",
+        Page::Mimo => "MIMO and coupling",
+        Page::Link => "Link budget",
+        Page::Rcs => "Radar cross section",
+        Page::Gate => "RFID gate test",
+        Page::Sweep => "Parameter sweep",
+        Page::Optimize => "Optimizer",
+        Page::Tuning => "Tuning",
+        Page::Converge => "Mesh convergence",
+        Page::Yield => "Tolerance and yield",
+        Page::Export => "Save and export",
+    }
 }

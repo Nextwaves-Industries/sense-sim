@@ -9,7 +9,7 @@ use anyhow::Result;
 use crossbeam_channel::Sender;
 
 use super::Event;
-use super::llm::{Message, Provider, ToolDef};
+use super::llm::{Live, Message, Provider, ToolDef};
 
 /// When to stop and ask. Zero means no limit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,15 +84,27 @@ pub(super) struct Metered {
     pub ev: Sender<Event>,
 }
 
-impl Provider for Metered {
-    fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message> {
-        let reply = self.inner.complete(system, messages, tools);
+impl Metered {
+    fn write_down(&self, reply: &Result<Message>) {
         // A failed call can still be charged, and still counts towards a runaway.
         self.budget.calls.fetch_add(1, Ordering::Relaxed);
-        if let Ok(Message { usage: Some(u), .. }) = &reply {
+        if let Ok(Message { usage: Some(u), .. }) = reply {
             self.budget.tokens.fetch_add(u.billable(), Ordering::Relaxed);
             let _ = self.ev.send(Event::Usage { model: self.inner.model(), usage: *u });
         }
+    }
+}
+
+impl Provider for Metered {
+    fn complete(&self, system: &str, messages: &[Message], tools: &[ToolDef]) -> Result<Message> {
+        let reply = self.inner.complete(system, messages, tools);
+        self.write_down(&reply);
+        reply
+    }
+
+    fn complete_live(&self, system: &str, messages: &[Message], tools: &[ToolDef], live: &mut dyn FnMut(Live) -> bool) -> Result<Message> {
+        let reply = self.inner.complete_live(system, messages, tools, live);
+        self.write_down(&reply);
         reply
     }
 

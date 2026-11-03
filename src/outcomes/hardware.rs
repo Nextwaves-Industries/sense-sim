@@ -207,7 +207,7 @@ pub fn uwb_bias_job(i: &Value) -> Result<impl FnOnce() -> Result<JobResult> + Se
         } else {
             uwb_bias::analyse_mom(&geom, 0, n, step, opts, edges)?
         };
-        value["solver"] = json!(if dielectric { "FDTD (openEMS)" } else { "Method of moments" });
+        value["solver"] = json!(if dielectric { crate::rtls::fdtd::runner_for_openems().name() } else { "Method of moments" });
         let m = map.metrics(region);
         value["bias"] = metrics_json(&m);
         value["removed_by_delay_calibration_cm"] = json!(r3(map.mean_delay_m * 100.0));
@@ -484,7 +484,7 @@ pub fn integrate_job(i: &Value) -> Result<impl FnOnce() -> Result<JobResult> + S
         if let Some(var) = &retune {
             fixes.push(integrate::retune(&with, var, (f_lo + f_hi) / 2.0, f_lo, f_hi, 0, 6, solve)?);
         }
-        let solver = if fdtd { "FDTD (openEMS), for both sides" } else { "Method of moments, for both sides" };
+        let solver = if fdtd { format!("{}, for both sides", crate::rtls::fdtd::runner_for_openems().name()) } else { "Method of moments, for both sides".to_string() };
         let evidence = Evidence::Simulated;
         let value = json!({ "detuning": d, "fixes": fixes, "summary": d.summary, "solver": solver, "evidence": evidence_note(evidence) });
         let limit = max_loss.unwrap_or(1.0);

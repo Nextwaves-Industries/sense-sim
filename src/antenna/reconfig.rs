@@ -52,7 +52,7 @@ impl ReconfigRun {
 fn prepared(project: &Project) -> Project {
     let mut p = project.clone();
     let samples = match p.geometry().map(|g| p.solver_for(&g)) {
-        Ok(SolverKind::Fdtd) => reconfig::FAR_SAMPLES_FDTD,
+        Ok(SolverKind::Fdtd | SolverKind::Fit) => reconfig::FAR_SAMPLES_FDTD,
         _ => reconfig::FAR_SAMPLES_MOM,
     };
     p.setup.far_freqs = p.reconfig.far_plan(&p.setup, samples);
@@ -187,7 +187,7 @@ fn shown_state(project: &Project, run: &ReconfigRun) -> anyhow::Result<Option<Si
     let Some(state) = rc.active_state() else { return Ok(None) };
     let solved = run.solved(rc)?;
     let mut r = solved.result(rc, state)?;
-    if project.solver_for(&run.geometry) != SolverKind::Fdtd {
+    if !project.solver_for(&run.geometry).is_time_domain() {
         let report = solved.state_report(rc, state)?;
         r.currents = run::state_currents(project, &run.geometry, &solved, &report.settings, report.f_op).ok();
     }
@@ -517,7 +517,7 @@ pub fn tool(world: &mut World, name: &str, i: &Value) -> Option<ToolOutput> {
             let (solver, n) = (st.project.solver_for(&g), g.ports.len());
             st.ui.page = super::ui::Page::Reconfig;
             st.run_reconfig();
-            text(json!({ "started": true, "solver": solver.label(), "ports": n, "runs": if solver == SolverKind::Fdtd { n } else { 1 } }))
+            text(json!({ "started": true, "solver": solver.label(), "ports": n, "runs": if solver.is_time_domain() { n } else { 1 } }))
         }
         "antenna_reconfig_results" => {
             let Some(run) = st.reconfig_run() else { return Some(text(json!({ "job": job, "reconfig": Value::Null }))) };
