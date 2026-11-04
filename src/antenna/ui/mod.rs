@@ -159,6 +159,8 @@ pub struct StudioUi {
     pub dock: dock::DockUi,
     /// The Add variable dialog, while it's up.
     pub add_var: Option<params::AddVar>,
+    /// Names typed into fields that no variable has, waiting for the dialog to ask about each.
+    pub new_names: std::collections::VecDeque<expr_field::NewName>,
     /// What that dialog named, for the field that asked: `(salt, name)`.
     pub named: Option<(String, String)>,
     /// A body was hidden or shown, so the canvas's list needs doing again.
@@ -302,6 +304,7 @@ impl Default for StudioUi {
             tree: Default::default(),
             dock: Default::default(),
             add_var: None,
+            new_names: Default::default(),
             named: None,
             hidden_changed: false,
             left_w: 320.0,
@@ -1241,6 +1244,7 @@ pub fn studio_ui(
 
     place::strip(&ctx, st, view);
     note_strip(&ctx, st, view);
+    params::ask_new_names(&ctx, st);
     params::add_var_dialog(&ctx, st);
     dock::follow_jobs(st);
     if std::mem::take(&mut st.ui.hidden_changed) {

@@ -438,8 +438,8 @@ pub struct CatalogEntry {
 }
 
 fn user_catalog_path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("SenseSim").join("plant").join("catalog.json")
+    let base = crate::app_paths::config_base_or_current();
+    base.join("SenseSim").join("plant").join("catalog.json")
 }
 
 /// Entries of a catalog file; keys starting with `_` are comments, and a

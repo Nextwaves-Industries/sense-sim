@@ -38,7 +38,7 @@ pub struct SimState {
 
 impl Default for SimState {
     fn default() -> Self {
-        let root = std::env::var_os("LOCALAPPDATA").map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from).join("SenseSim").join("sim");
+        let root = crate::app_paths::data_base().join("SenseSim").join("sim");
         Self {
             panel_open: false,
             dialog: None,

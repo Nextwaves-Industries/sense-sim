@@ -24,7 +24,7 @@ const MAX_PARTS: usize = 5000;
 const UNLIT_GAIN: f32 = 1.0;
 
 fn data_dir() -> PathBuf {
-    PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("SenseSim")
+    crate::app_paths::data_base().join("SenseSim")
 }
 
 pub fn custom_dir() -> PathBuf {

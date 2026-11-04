@@ -8,7 +8,7 @@ use antenna_core::project::SolverKind;
 use antenna_core::report::param_text;
 use bevy_egui::egui::{self, Key, Response, RichText, vec2};
 
-use super::expr_field::{VarTable, expr_line};
+use super::expr_field::{NewName, VarTable, expr_line, new_name_waiting, put_back, take_new_names, without_asking};
 use super::model3d::{self, Unit};
 use super::project_tree::Pick;
 use super::{ghz_field, verdict, weak};
@@ -26,6 +26,39 @@ pub struct AddVar {
     pub note: String,
     pub error: Option<String>,
     pub focused: bool,
+    /// A name typed into a field, being asked about: the name stays as typed, and the field keeps
+    /// what it says if this goes ahead and gets back what it said if not.
+    pub asked: Option<NewName>,
+}
+
+/// Opens the dialog for the next name typed into a field that no variable has.
+pub fn ask_new_names(ctx: &egui::Context, st: &mut Studio) {
+    st.ui.new_names.extend(take_new_names(ctx));
+    if st.ui.add_var.is_some() {
+        return;
+    }
+    let hints = st.project.var_hints();
+    while let Some(n) = st.ui.new_names.pop_front() {
+        // Typed into two fields, say, and answered in the first.
+        if hints.iter().any(|h| h.name == n.name) {
+            continue;
+        }
+        st.ui.add_var = Some(AddVar { salt: String::new(), unit: n.unit, name: n.name.clone(), expr: value_from(&n, st), note: String::new(), error: None, focused: false, asked: Some(n) });
+        return;
+    }
+}
+
+/// What the field held, if that makes a value: typing `a1` over `4.5mm` usually means that's what a1 is.
+/// In `a1+10mm` it says nothing about a1, and neither does a 0, which is what an empty field starts as.
+fn value_from(n: &NewName, st: &Studio) -> String {
+    let was = n.was.trim();
+    let vars = st.project.vars().unwrap_or_default();
+    if n.alone && antenna_core::expr::eval(was, &vars).is_ok_and(|v| v != 0.0) { was.to_string() } else { String::new() }
+}
+
+/// A dialog is open or about to be, over a name a field has just asked about.
+pub fn asking(ctx: &egui::Context, st: &Studio) -> bool {
+    new_name_waiting(ctx) || !st.ui.new_names.is_empty() || st.ui.add_var.as_ref().is_some_and(|d| d.asked.is_some())
 }
 
 /// The first of a1, a2, … that's free.
@@ -38,7 +71,7 @@ pub fn free_var_name(st: &Studio) -> String {
 pub fn field_menu(resp: &Response, st: &mut Studio, salt: &str, label: &str, text: &str, unit: &'static str) {
     resp.context_menu(|ui| {
         if ui.button(theme::label(icon::PLUS, "Add variable…")).on_hover_text("Name what's in this field. The field then says the name, and changing the variable changes it.").clicked() {
-            st.ui.add_var = Some(AddVar { salt: salt.to_string(), unit, name: free_var_name(st), expr: if text.trim().is_empty() { "0".to_string() } else { text.trim().to_string() }, note: label.to_string(), error: None, focused: false });
+            st.ui.add_var = Some(AddVar { salt: salt.to_string(), unit, name: free_var_name(st), expr: if text.trim().is_empty() { "0".to_string() } else { text.trim().to_string() }, note: label.to_string(), error: None, focused: false, asked: None });
             ui.close();
         }
         let hints = st.project.var_hints();
@@ -71,43 +104,78 @@ pub fn add_var_dialog(ctx: &egui::Context, st: &mut Studio) {
     let vars = st.project.vars().unwrap_or_default();
     let (mut ok, mut cancel) = (false, false);
     let table = VarTable::of(&st.project);
-    let modal = egui::Modal::new(egui::Id::new("studio_add_variable")).show(ctx, |ui| {
-        ui.set_width(430.0);
-        ui.label(RichText::new("Add variable").font(theme::bold(15.0)));
-        ui.add_space(6.0);
-        egui::Grid::new("add_variable_grid").num_columns(3).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
-            ui.label(RichText::new("Name").color(theme::WEAK));
-            ui.label(RichText::new("Expression").color(theme::WEAK));
-            ui.label(RichText::new("Value").color(theme::WEAK));
-            ui.end_row();
-            let name = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(110.0).min_size(vec2(110.0, 0.0)));
-            if !d.focused {
-                name.request_focus();
-                d.focused = true;
+    let asked = d.asked.is_some();
+    const WIDTH: f32 = 440.0;
+    let modal = egui::Modal::new(egui::Id::new("studio_add_variable")).backdrop_color(theme::BACKDROP).frame(theme::modal_frame()).show(ctx, |ui| {
+        ui.set_width(WIDTH);
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        cancel |= theme::modal_title(ui, WIDTH, if asked { "New variable" } else { "Add variable" }, true, "Cancel (Esc)");
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
+            ui.set_width(WIDTH - 32.0);
+            ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
+            if asked {
+                ui.add(egui::Label::new(format!("{} isn't a variable yet. Give it a value and the field will use it.", d.name)).wrap());
+                ui.add_space(2.0);
             }
-            let field = expr_line(ui, "add_variable_expr", &mut d.expr, &table, 170.0);
-            let value = antenna_core::expr::eval(&with_unit(&d.expr, d.unit), &vars).map_or_else(|_| "-".to_string(), |v| param_text(&d.name, v));
-            ui.add_sized(vec2(90.0, 22.0), egui::Label::new(RichText::new(value).color(theme::WEAK)).truncate());
-            ui.end_row();
-            ok |= (name.lost_focus() || field.lost_focus()) && ui.input(|i| i.key_pressed(Key::Enter));
+            without_asking(ctx, || {
+                egui::Grid::new("add_variable_grid").num_columns(2).spacing(vec2(12.0, 8.0)).show(ui, |ui| {
+                    ui.label(RichText::new("Name").color(theme::WEAK));
+                    let name = if asked { ui.label(RichText::new(&d.name).font(theme::bold(14.0))) } else { ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(300.0).min_size(vec2(300.0, 0.0))) };
+                    ui.end_row();
+                    ui.label(RichText::new("Value").color(theme::WEAK));
+                    let field = expr_line(ui, "add_variable_expr", &mut d.expr, &table, 300.0).on_hover_text("A number or an expression over other variables, like 4.5mm or L/2");
+                    ui.end_row();
+                    ui.label("");
+                    let value = antenna_core::expr::eval(&with_unit(&d.expr, d.unit), &vars).map_or_else(|_| "Type a number or an expression".to_string(), |v| format!("= {}", param_text(&d.name, v)));
+                    ui.label(RichText::new(value).small().color(theme::WEAK));
+                    ui.end_row();
+                    if !d.focused {
+                        if asked { field.request_focus() } else { name.request_focus() };
+                        d.focused = true;
+                    }
+                    ok |= (name.lost_focus() || field.lost_focus()) && ui.input(|i| i.key_pressed(Key::Enter));
+                });
+            });
+            if let Some(e) = &d.error {
+                verdict(ui, false, e);
+            }
         });
-        if let Some(e) = &d.error {
-            verdict(ui, false, e);
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ok |= ui.add(egui::Button::new("OK").min_size(vec2(90.0, 26.0))).clicked();
-            cancel |= ui.add(egui::Button::new("Cancel").min_size(vec2(90.0, 26.0))).clicked();
+        let (rect, _) = ui.allocate_exact_size(vec2(WIDTH, 0.0), egui::Sense::hover());
+        ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(1.0, theme::STROKE));
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+            ui.set_width(WIDTH - 32.0);
+            ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ok |= theme::primary_button(ui, if asked { "Create" } else { "OK" }).clicked();
+                cancel |= ui.button("Cancel").clicked();
+            });
         });
     });
     cancel |= modal.should_close();
     if cancel {
+        // Turned down: the field says what it said, and its other new names go with this one.
+        if let Some(n) = d.asked {
+            put_back(ctx, n.field, n.was);
+            st.ui.new_names.retain(|other| other.field != n.field);
+        }
         return;
     }
-    if ok {
+    if ok && asked && d.expr.trim().is_empty() {
+        d.error = Some(format!("{} needs a value, like 4.5mm.", d.name));
+    } else if ok {
         let expr = with_unit(&d.expr, d.unit);
         let before = st.project.clone();
         match antenna_core::sketch::add_variable(&mut st.project, &d.name, &expr, &d.note) {
+            Ok(()) if asked => {
+                // Typing it had already marked an undo step if it's in the project, which then doesn't
+                // work out on its own. One undo takes back the name and the variable together.
+                if before.scatterer().is_ok() {
+                    let now = std::mem::replace(&mut st.project, before);
+                    super::draw::remember(st);
+                    st.project = now;
+                }
+                return;
+            }
             Ok(()) => {
                 let now = std::mem::replace(&mut st.project, before);
                 super::draw::remember(st);
@@ -600,5 +668,56 @@ mod tests {
         assert_eq!(with_unit("1", ""), "1", "so does a direction");
         assert_eq!(with_unit("L/2", "mm"), "L/2", "a formula says for itself");
         assert_eq!(with_unit("17mm", "mm"), "17mm");
+    }
+}
+
+#[cfg(test)]
+mod new_name_tests {
+    use super::*;
+    use antenna_core::project::Project;
+
+    fn studio() -> Studio {
+        let mut st = Studio::default();
+        st.project = Project::from_template("custom", Some("1GHz")).unwrap();
+        st
+    }
+
+    fn name(name: &str, was: &str, alone: bool) -> NewName {
+        NewName { name: name.into(), unit: "mm", was: was.into(), alone, field: egui::Id::new("field") }
+    }
+
+    #[test]
+    fn the_dialog_opens_with_what_the_name_was_typed_over() {
+        let st = studio();
+        assert_eq!(value_from(&name("a1", "4.5mm", true), &st), "4.5mm");
+        assert_eq!(value_from(&name("a1", "4.5mm", false), &st), "", "a1+10mm says nothing about a1 alone");
+        assert_eq!(value_from(&name("a1", "0", true), &st), "", "what an empty field starts as");
+        assert_eq!(value_from(&name("a1", "b+1", true), &st), "", "doesn't work out either");
+    }
+
+    #[test]
+    fn names_are_asked_about_one_at_a_time_and_only_if_still_missing() {
+        let ctx = egui::Context::default();
+        let mut st = studio();
+        st.ui.new_names.extend([name("a1", "", false), name("f0", "", false), name("a2", "", false)]);
+        ask_new_names(&ctx, &mut st);
+        assert_eq!(st.ui.add_var.as_ref().map(|d| d.name.as_str()), Some("a1"));
+        assert!(asking(&ctx, &st));
+        ask_new_names(&ctx, &mut st);
+        assert_eq!(st.ui.add_var.as_ref().map(|d| d.name.as_str()), Some("a1"), "the open one stays");
+        st.ui.add_var = None;
+        ask_new_names(&ctx, &mut st);
+        assert_eq!(st.ui.add_var.as_ref().map(|d| d.name.as_str()), Some("a2"), "f0 exists, so it's skipped");
+        st.ui.add_var = None;
+        ask_new_names(&ctx, &mut st);
+        assert!(st.ui.add_var.is_none());
+        assert!(!asking(&ctx, &st));
+    }
+
+    #[test]
+    fn a_plain_number_means_what_it_meant_in_the_field() {
+        assert_eq!(with_unit("4.5", "mm"), "4.5mm");
+        assert_eq!(with_unit("4.5", ""), "4.5");
+        assert_eq!(with_unit("L/2", "mm"), "L/2");
     }
 }

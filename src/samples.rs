@@ -405,8 +405,8 @@ fn write_scene(s: &Sample, dir: &str, library: &Library) -> anyhow::Result<(Path
         doc["plant"] = serde_json::json!({ "links": a.links, "controls": controls, "running": true });
     }
 
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let dir = PathBuf::from(base).join("SenseSim").join(dir);
+    let base = crate::app_paths::data_base();
+    let dir = base.join("SenseSim").join(dir);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", slug(s.title)));
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;

@@ -76,8 +76,8 @@ impl Kind {
 /// copies are named `<kind>_N`.
 pub fn usd_for(kind: Kind, size: Vec3) -> Result<PathBuf> {
     let size = size.max(Vec3::splat(0.01));
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let dir = PathBuf::from(base)
+    let base = crate::app_paths::data_base();
+    let dir = base
         .join("SenseSim")
         .join("structures")
         .join(kind.name())
@@ -99,7 +99,7 @@ const CEILING_BOUNCE: f32 = 0.5;
 /// under `structures/<kind>/` so the piece still counts as that kind.
 pub fn usd_with_material(kind: Kind, size: Vec3, mat: &Mat) -> Result<PathBuf> {
     let size = size.max(Vec3::splat(0.01));
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    let base = crate::app_paths::data_base();
     let tag = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();

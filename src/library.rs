@@ -72,13 +72,13 @@ pub struct Library {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let base = std::env::var("APPDATA").ok()?;
-    Some(Path::new(&base).join("SenseSim").join("config.json"))
+    let base = crate::app_paths::config_base()?;
+    Some(base.join("SenseSim").join("config.json"))
 }
 
 fn cache_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    Path::new(&base).join("SenseSim").join("thumbs")
+    let base = crate::app_paths::data_base();
+    base.join("SenseSim").join("thumbs")
 }
 
 /// Picks the dataset folder: explicit argument, last used, `D:/simready-assets`,
@@ -95,10 +95,10 @@ pub fn default_root(arg: Option<String>) -> String {
     {
         return r.to_string();
     }
-    if Path::new("D:/simready-assets").is_dir() {
+    if cfg!(windows) && Path::new("D:/simready-assets").is_dir() {
         return "D:/simready-assets".into();
     }
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+    let home = crate::app_paths::home().unwrap_or_else(|| ".".into());
     let p = Path::new(&home).join("SenseSim").join("simready-assets");
     let _ = std::fs::create_dir_all(&p);
     p.to_string_lossy().replace('\\', "/")

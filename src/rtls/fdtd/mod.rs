@@ -35,8 +35,8 @@ pub const OPENEMS_VERSION: &str = "v0.37.0";
 pub const OPENEMS_URL: &str = "https://github.com/thliebig/openEMS-Project/releases/download/v0.37.0/openEMS_x64_v0.37.0_msvc.zip";
 
 pub fn base_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("SenseSim").join("openems-fdtd")
+    let base = crate::app_paths::data_base();
+    base.join("SenseSim").join("openems-fdtd")
 }
 
 pub fn exe() -> Option<PathBuf> {

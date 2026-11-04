@@ -236,7 +236,7 @@ pub fn expand_root(v: &Value, vars: &Vars) -> Result<Value> {
 // Saved tools
 
 fn dir() -> PathBuf {
-    PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("SenseSim").join("agent_tools")
+    crate::app_paths::data_base().join("SenseSim").join("agent_tools")
 }
 
 fn builtin() -> Vec<Value> {

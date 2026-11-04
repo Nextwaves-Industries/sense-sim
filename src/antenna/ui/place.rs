@@ -10,7 +10,7 @@ use antenna_core::modeler::sketch::{P2, mm_text};
 use antenna_core::modeler::{Flat, Kind, Output, PathRef, PlaneRef, Prim, length};
 use bevy_egui::egui::{self, Align2, Key, Pos2, Rect, RichText, Stroke, pos2};
 
-use super::expr_field::{VarTable, length_line};
+use super::expr_field::{VarTable, length_line, missing_names};
 use super::model3d::{self, Picking, Pointer};
 use super::view3d::Projector;
 use crate::antenna::Studio;
@@ -453,7 +453,8 @@ pub fn strip(ctx: &egui::Context, st: &mut Studio, view: Rect) {
                     if r.changed() {
                         p.typed[k] = true;
                     }
-                    ok |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    // With a new name in it, the dialog comes first: OK is for once that's answered.
+                    ok |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && missing_names(&p.fields[k], &table, None).is_empty();
                 }
                 ui.add_space(6.0);
                 ok |= ui.button("OK").on_hover_text("Take these numbers, as typed. A variable's name stays tied to it. A click on the canvas does the same.").clicked();

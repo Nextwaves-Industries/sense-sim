@@ -45,6 +45,68 @@ impl VarTable {
     }
 }
 
+/// A name typed into a field that no variable has yet, for the Studio to ask about. A field can't do
+/// that itself: it only has its own text, and the variable goes in the project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewName {
+    pub name: String,
+    /// What a plain number means in that field: `mm`, `deg`, or nothing.
+    pub unit: &'static str,
+    /// What the field said before it was typed in.
+    pub was: String,
+    /// The name is all the field says: it was typed over what was there, which is then likely its value.
+    pub alone: bool,
+    pub field: egui::Id,
+}
+
+fn new_names_id() -> egui::Id {
+    egui::Id::new("expr_field_new_names")
+}
+
+fn no_asking_id() -> egui::Id {
+    egui::Id::new("expr_field_no_asking")
+}
+
+fn put_back_id(field: egui::Id) -> egui::Id {
+    field.with("put_back")
+}
+
+/// The names this expression uses that no variable has. An expression that doesn't parse yet has
+/// none to speak of, and neither does a variable's own name in its own row.
+pub fn missing_names(text: &str, table: &VarTable, own: Option<&str>) -> Vec<String> {
+    let Ok(names) = expr::names(text) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        if Some(n.as_str()) != own && !table.has(&n) && !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// What fields have asked about since this was last called.
+pub fn take_new_names(ctx: &egui::Context) -> Vec<NewName> {
+    ctx.data_mut(|d| d.remove_temp::<Vec<NewName>>(new_names_id())).unwrap_or_default()
+}
+
+/// A field has asked about a name this frame, and nobody has picked that up yet.
+pub fn new_name_waiting(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<Vec<NewName>>(new_names_id())).is_some_and(|q| !q.is_empty())
+}
+
+/// The field goes back to what it said: the name it was asked about was turned down.
+pub fn put_back(ctx: &egui::Context, field: egui::Id, was: String) {
+    ctx.data_mut(|d| d.insert_temp(put_back_id(field), was));
+}
+
+/// Fields drawn inside `f` don't ask: it's the dialog that's asking, and it says what's wrong itself.
+pub fn without_asking<R>(ctx: &egui::Context, f: impl FnOnce() -> R) -> R {
+    ctx.data_mut(|d| d.insert_temp(no_asking_id(), true));
+    let out = f();
+    ctx.data_mut(|d| d.remove_temp::<bool>(no_asking_id()));
+    out
+}
+
 /// The list's state between frames.
 #[derive(Clone, Copy, Default)]
 struct List {
@@ -319,6 +381,10 @@ pub fn expr_field(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String,
     let focused = ctx.memory(|m| m.has_focus(id));
     let mut accepted = false;
     let mut reveal = false;
+    if let Some(was) = ctx.data_mut(|d| d.remove_temp::<String>(put_back_id(id))) {
+        *text = was;
+        accepted = true;
+    }
 
     // Before the field sees them: these keys belong to the list while it's open.
     if focused {
@@ -389,6 +455,39 @@ pub fn expr_field(ui: &mut egui::Ui, salt: impl Hash + Debug, text: &mut String,
         response = response.union(over);
         if changed {
             response.mark_changed();
+        }
+    }
+    if response.gained_focus() {
+        ctx.data_mut(|d| d.insert_temp(id.with("was"), text.clone()));
+    }
+    // Leaving the field is when a name stops being a word still being typed. A press on the list takes
+    // the focus too, on its way to finishing the word, and Esc is for leaving things as they are.
+    // `lost_focus` stays true for two frames, and the key that did it is only there in the first, so
+    // it's decided once, in the first, and not again until the field has had the focus back.
+    let left = id.with("left");
+    let decided = ctx.data(|d| d.get_temp::<bool>(left)).unwrap_or(false);
+    if response.has_focus() && decided {
+        ctx.data_mut(|d| d.remove_temp::<bool>(left));
+    }
+    let leaving = response.lost_focus() && !decided;
+    if leaving {
+        ctx.data_mut(|d| d.insert_temp(left, true));
+    }
+    if leaving && !list.hovered && !ctx.input(|i| i.key_pressed(Key::Escape)) && ctx.data(|d| d.get_temp::<bool>(no_asking_id())).is_none() {
+        let missing = missing_names(text, table, own);
+        if !missing.is_empty() {
+            let was: String = ctx.data(|d| d.get_temp(id.with("was"))).unwrap_or_default();
+            let unit = match unit {
+                Some("mm") => "mm",
+                Some("deg") => "deg",
+                _ => "",
+            };
+            let typed = text.trim().to_string();
+            ctx.data_mut(|d| {
+                let queue = d.get_temp_mut_or_default::<Vec<NewName>>(new_names_id());
+                queue.extend(missing.into_iter().map(|name| NewName { alone: name == typed, name, unit, was: was.clone(), field: id }));
+            });
+            ctx.request_repaint();
         }
     }
     if !response.has_focus() && !list.hovered {
@@ -691,6 +790,141 @@ mod tests {
         b.click();
         b.wheel(-1.0);
         assert_eq!(b.text, "70.5mm");
+    }
+
+    fn away(b: &mut Bench) {
+        let at = egui::pos2(300.0, 250.0);
+        b.frame(vec![Event::PointerMoved(at)]);
+        b.button(at, true);
+        b.button(at, false);
+        b.frame(vec![]);
+    }
+
+    #[test]
+    fn a_name_nobody_has_is_asked_about_on_leaving_the_field() {
+        let mut b = Bench::new("70mm");
+        b.click();
+        b.text = "a1+10mm".into();
+        b.frame(vec![]);
+        assert!(take_new_names(&b.ctx).is_empty(), "not while it's being typed");
+        away(&mut b);
+        let asked = take_new_names(&b.ctx);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!((asked[0].name.as_str(), asked[0].unit, asked[0].was.as_str()), ("a1", "mm", "70mm"));
+        assert_eq!(b.text, "a1+10mm", "and the field keeps what was typed");
+        assert!(take_new_names(&b.ctx).is_empty(), "once");
+        // Back in and out again is a new decision.
+        b.click();
+        b.frame(vec![]);
+        away(&mut b);
+        assert_eq!(take_new_names(&b.ctx).len(), 1);
+    }
+
+    #[test]
+    fn enter_asks_too_and_each_new_name_is_asked_about_once() {
+        let mut b = Bench::new("1mm");
+        b.click();
+        b.text = "w1*w1+w2".into();
+        b.frame(vec![]);
+        let enter = |pressed| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        b.frame(vec![enter(true), enter(false)]);
+        b.frame(vec![]);
+        let names: Vec<String> = take_new_names(&b.ctx).into_iter().map(|n| n.name).collect();
+        assert_eq!(names, ["w1", "w2"]);
+    }
+
+    #[test]
+    fn esc_asks_nothing() {
+        let mut b = Bench::new("1mm");
+        b.click();
+        b.text = "a1".into();
+        b.frame(vec![]);
+        let esc = |pressed| Event::Key { key: Key::Escape, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        b.frame(vec![esc(true), esc(false)]);
+        b.frame(vec![]);
+        assert!(!b.focused);
+        assert!(take_new_names(&b.ctx).is_empty());
+    }
+
+    #[test]
+    fn what_can_already_be_worked_out_is_not_asked_about() {
+        let mut p = Project::from_template("custom", Some("1GHz")).unwrap();
+        p.params.push(antenna_core::project::Param::new("L", "70mm", ""));
+        let table = VarTable::of(&p);
+        for fine in ["L", "L/2+1mm", "c0/f0", "2*pi", "sqrt(L)", "er", "5mm", "", "a1+", "(a1"] {
+            assert!(missing_names(fine, &table, None).is_empty(), "{fine}");
+        }
+        assert_eq!(missing_names("a1+L", &table, None), ["a1"]);
+        assert_eq!(missing_names("a1+a2+a1", &table, None), ["a1", "a2"]);
+        assert!(missing_names("x+1", &table, Some("x")).is_empty(), "its own row says what's wrong with that");
+    }
+
+    #[test]
+    fn picking_from_the_list_is_not_leaving_the_field() {
+        let mut b = Bench::new("");
+        // The list writes in the app's own fonts.
+        crate::theme::apply_fonts(&b.ctx);
+        b.frame(vec![]);
+        b.click();
+        // Typed so the list opens: only `f0` starts this way.
+        b.frame(vec![Event::Text("f".into())]);
+        b.frame(vec![]);
+        assert_eq!(b.text, "f");
+        let item = b.rect.left_bottom() + vec2(30.0, 20.0);
+        b.frame(vec![Event::PointerMoved(item)]);
+        b.frame(vec![]);
+        b.button(item, true);
+        b.button(item, false);
+        b.frame(vec![]);
+        assert_eq!(b.text, "f0");
+        assert!(take_new_names(&b.ctx).is_empty());
+    }
+
+    #[test]
+    fn turning_a_name_down_puts_back_what_was_there() {
+        let mut b = Bench::new("70mm");
+        b.click();
+        b.text = "a1".into();
+        b.frame(vec![]);
+        away(&mut b);
+        let asked = take_new_names(&b.ctx);
+        b.changed = false;
+        put_back(&b.ctx, asked[0].field, asked[0].was.clone());
+        b.frame(vec![]);
+        assert_eq!(b.text, "70mm");
+        assert!(b.changed, "whatever goes by the field's changes hears about it");
+        assert!(take_new_names(&b.ctx).is_empty());
+    }
+
+    #[test]
+    fn a_field_inside_the_dialog_does_not_ask() {
+        let project = Project::from_template("custom", Some("1GHz")).unwrap();
+        let table = VarTable::of(&project);
+        let ctx = egui::Context::default();
+        let mut text = "1mm".to_string();
+        let mut frame = |events: Vec<Event>, t: f64, text: &mut String| {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), time: Some(t), events, ..Default::default() };
+            let mut rect = Rect::NOTHING;
+            let mut out = ctx.run_ui(input, |ui| {
+                let c = ui.ctx().clone();
+                without_asking(&c, || rect = length_line(ui, "in dialog", text, &table, 120.0).rect);
+            });
+            out.textures_delta.clear();
+            rect
+        };
+        frame(vec![], 0.0, &mut text);
+        let at = frame(vec![], 0.05, &mut text).center();
+        for (k, pressed) in [true, false].into_iter().enumerate() {
+            frame(vec![Event::PointerMoved(at), Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }], 0.1 + k as f64 * 0.05, &mut text);
+        }
+        frame(vec![], 0.2, &mut text);
+        text = "a1".into();
+        let off = egui::pos2(300.0, 250.0);
+        for (k, pressed) in [true, false].into_iter().enumerate() {
+            frame(vec![Event::PointerMoved(off), Event::PointerButton { pos: off, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }], 0.25 + k as f64 * 0.05, &mut text);
+        }
+        frame(vec![], 0.4, &mut text);
+        assert!(take_new_names(&ctx).is_empty());
     }
 
     #[test]

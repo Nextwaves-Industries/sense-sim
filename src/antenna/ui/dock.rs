@@ -224,7 +224,7 @@ fn variables(ui: &mut egui::Ui, st: &mut Studio) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         if theme::icon_button(ui, icon::PLUS, "Add a variable").clicked() {
-            st.ui.add_var = Some(super::params::AddVar { salt: String::new(), unit: "", name: super::params::free_var_name(st), expr: "0".to_string(), note: "Your own variable".to_string(), error: None, focused: false });
+            st.ui.add_var = Some(super::params::AddVar { salt: String::new(), unit: "", name: super::params::free_var_name(st), expr: "0".to_string(), note: "Your own variable".to_string(), error: None, focused: false, asked: None });
         }
         ui.label(RichText::new("Used by:").size(12.0).color(theme::WEAK));
         let shown = st.ui.dock.used_by.clone().unwrap_or_else(|| "All".to_string());

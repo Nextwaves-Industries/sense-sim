@@ -470,6 +470,17 @@ pub fn segmented_fill<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: 
 
 /// Settings row: label and description on the left, control on the right.
 pub fn setting_row(ui: &mut Ui, title: &str, desc: &str, control: impl FnOnce(&mut Ui)) {
+    // On a group's card, rows have a line between them and room around it.
+    let group = group_rows_id();
+    let rows_before = ui.data(|d| d.get_temp::<u32>(group));
+    if let Some(n) = rows_before {
+        if n > 0 {
+            let y = ui.cursor().top();
+            ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, STROKE));
+        }
+        ui.data_mut(|d| d.insert_temp(group, n + 1));
+        ui.add_space(8.0);
+    }
     ui.horizontal(|ui| {
         let w = (ui.available_width() * 0.5).max(160.0);
         ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
@@ -482,6 +493,29 @@ pub fn setting_row(ui: &mut Ui, title: &str, desc: &str, control: impl FnOnce(&m
         });
         ui.with_layout(Layout::right_to_left(Align::Center), control);
     });
+    ui.add_space(8.0);
+}
+
+fn group_rows_id() -> egui::Id {
+    egui::Id::new("setting_group_rows")
+}
+
+/// A titled group of settings: its name, then its rows on a card of their own.
+pub fn setting_group(ui: &mut Ui, title: &str, rows: impl FnOnce(&mut Ui)) {
+    caption(ui, title);
+    ui.add_space(6.0);
+    egui::Frame::new().fill(PANEL).stroke(Stroke::new(1.0, STROKE)).corner_radius(6).inner_margin(Margin::symmetric(14, 2)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.data_mut(|d| d.insert_temp(group_rows_id(), 0u32));
+        rows(ui);
+        ui.data_mut(|d| d.remove_temp::<u32>(group_rows_id()));
+    });
+    ui.add_space(18.0);
+}
+
+/// A line of words inside a group, below the row it's about.
+pub fn setting_note(ui: &mut Ui, text: &str, color: Color32) {
+    ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
     ui.add_space(8.0);
 }
 
@@ -627,8 +661,9 @@ pub fn nav_item(ui: &mut Ui, glyph: &str, text: &str, selected: bool, width: f32
     let p = ui.painter();
     if selected {
         p.rect_filled(rect, 0.0, ACCENT_SOFT);
+        p.rect_filled(Rect::from_min_size(rect.min, vec2(3.0, rect.height())), 0.0, ACCENT);
     } else if r.hovered() {
-        p.rect_filled(rect, 0.0, RAISED);
+        p.rect_filled(rect, 0.0, HOVER);
     }
     let col = if selected { ACCENT } else { TEXT };
     let mut x = rect.left() + 14.0;

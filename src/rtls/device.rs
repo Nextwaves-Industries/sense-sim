@@ -275,8 +275,8 @@ impl Profiles {
         {
             v.push(d.join("devices"));
         }
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        v.push(PathBuf::from(base).join("SenseSim").join("devices"));
+        let base = crate::app_paths::config_base_or_current();
+        v.push(base.join("SenseSim").join("devices"));
         v
     }
 

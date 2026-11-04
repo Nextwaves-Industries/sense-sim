@@ -6242,7 +6242,7 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 
 [[package]]
 name = "sense_sim"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "antenna_core",
  "anyhow",
@@ -6263,9 +6263,12 @@ dependencies = [
  "rayon",
  "resvg",
  "rfd",
+ "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sim-core",
+ "tempfile",
  "tiny_http",
  "tokenizers",
  "twin_proto",

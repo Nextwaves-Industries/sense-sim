@@ -158,8 +158,8 @@ impl Spec {
     /// Writes the USD once and returns its path.
     pub fn usd(self) -> Result<PathBuf> {
         let spec = self.normalized();
-        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-        let dir = PathBuf::from(base).join("SenseSim").join("plant").join(spec.kind()).join(spec.params());
+        let base = crate::app_paths::data_base();
+        let dir = base.join("SenseSim").join("plant").join(spec.kind()).join(spec.params());
         let path = dir.join(format!("{}.usda", spec.kind()));
         // Rewritten when the geometry code changed since the file was made.
         let current = std::fs::read_to_string(&path).is_ok_and(|t| t.lines().nth(1).is_some_and(|l| l.trim() == PART_REV));

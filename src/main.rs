@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod app_paths;
 #[cfg(feature = "antenna-studio")]
 mod antenna;
 mod bvh;
@@ -34,6 +35,7 @@ mod twin;
 mod theme;
 mod ui;
 mod undo;
+mod updater;
 mod usd_load;
 mod wall_tool;
 
@@ -257,6 +259,9 @@ fn main() {
         ),
     )
     .add_systems(EguiPrimaryContextPass, (ui::ui_system, ui::loading::loading_placeholders.after(ui::ui_system)))
+    .add_systems(Startup, updater::check_on_launch)
+    .init_resource::<updater::Updater>()
+    .add_systems(EguiPrimaryContextPass, updater::prompt.after(ui::ui_system))
     // Last in the pass, once every text field has drawn: IME on while one has focus.
     .add_systems(EguiPrimaryContextPass, ime::sync_ime.after(ui::ui_system).after(rtls::ui::rtls_ui));
     #[cfg(feature = "antenna-studio")]

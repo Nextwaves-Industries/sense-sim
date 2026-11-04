@@ -90,8 +90,8 @@ impl Default for GpuPrefs {
 
 impl GpuPrefs {
     pub fn path() -> PathBuf {
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(base).join("SenseSim").join("gpu.json")
+        let base = crate::app_paths::config_base_or_current();
+        base.join("SenseSim").join("gpu.json")
     }
 
     fn load() -> Self {

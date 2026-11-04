@@ -98,8 +98,8 @@ impl Default for RunOptions {
 }
 
 pub fn runs_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("SenseSim").join("antenna").join("runs")
+    let base = crate::app_paths::data_base();
+    base.join("SenseSim").join("antenna").join("runs")
 }
 
 static NEXT_RUN: AtomicU64 = AtomicU64::new(0);

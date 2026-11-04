@@ -509,13 +509,14 @@ pub fn ui_system(
     window: Single<&Window, With<PrimaryWindow>>,
     diagnostics: Res<DiagnosticsStore>,
     mut walls: ResMut<crate::wall_tool::WallTool>,
-    (mut agent, mut catalog, bridge, mut gpu, render_stats, mut tabs): (
+    (mut agent, mut catalog, bridge, mut gpu, render_stats, mut tabs, mut updater): (
         ResMut<crate::agent::Agent>,
         ResMut<crate::agent::catalog::Catalog>,
         Res<crate::agent::tools::ToolBridge>,
         ResMut<crate::gpu::Gpu>,
         Res<crate::lod::RenderStats>,
         ResMut<Tabs>,
+        ResMut<crate::updater::Updater>,
     ),
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
@@ -938,7 +939,7 @@ pub fn ui_system(
     // ---------------- Settings dialog
     if state.settings_open {
         let mut tab = state.settings_tab;
-        let open = settings::show(&ctx, &mut tab, &mut library, &mut settings, &mut cache, &mut agent, &mut catalog, &mut gpu);
+        let open = settings::show(&ctx, &mut tab, &mut library, &mut settings, &mut cache, &mut agent, &mut catalog, &mut gpu, &mut updater);
         state.settings_tab = tab;
         state.settings_open = open;
     }

@@ -203,8 +203,9 @@ pub struct RecorderCfg {
 
 impl Default for RecorderCfg {
     fn default() -> Self {
-        let base = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-        Self { enabled: false, path: format!("{}/SenseSim/rtls-recording.jsonl", base.replace('\\', "/")), filter: EventFilter::all() }
+        let base = crate::app_paths::home().unwrap_or_else(|| ".".into());
+        let path = base.join("SenseSim/rtls-recording.jsonl");
+        Self { enabled: false, path: path.to_string_lossy().replace('\\', "/"), filter: EventFilter::all() }
     }
 }
 

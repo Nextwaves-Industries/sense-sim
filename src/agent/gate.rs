@@ -192,8 +192,8 @@ fn read_path<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
 
 /// Where this app's own working files go.
 pub fn workspace_root() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    Path::new(&base).join("SenseSim").join("agent")
+    let base = crate::app_paths::data_base();
+    base.join("SenseSim").join("agent")
 }
 
 /// Whether `path` is inside `root`, spelling aside. A path this can't be sure about isn't inside.

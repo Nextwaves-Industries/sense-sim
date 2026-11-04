@@ -1,6 +1,8 @@
 ; Sense Sim installer (Inno Setup 6). Build: ISCC installer\SenseSim.iss
 #define AppName "Sense Sim"
-#define AppVersion "1.12.0"
+#ifndef AppVersion
+  #define AppVersion "1.13.0"
+#endif
 #define AppExe "SenseSim.exe"
 
 [Setup]

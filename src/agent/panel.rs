@@ -734,137 +734,175 @@ fn round_button(ui: &mut egui::Ui, ic: &str, fill: Color32) -> egui::Response {
 
 /// The "AI assistant" page of the app's Settings window.
 pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, catalog: &mut Catalog) {
+    // Every picker on this page is this wide, so they line up.
+    const WIDE: f32 = 280.0;
     let mut changed = false;
+    let mut refresh = false;
 
-    theme::caption(ui, "Model");
-    let mut active = agent.config.active;
-    theme::setting_row(ui, "Provider", "Cloud API or a local OpenAI-compatible server", |ui| {
-        egui::ComboBox::from_id_salt("provider").selected_text(active.label()).width(200.0).show_ui(ui, |ui| {
-            for k in ProviderKind::ALL {
-                ui.selectable_value(&mut active, k, k.label());
-            }
-        });
-    });
-    if active != agent.config.active {
-        agent.config.active = active;
-        agent.test_status = None;
-        changed = true;
-        if !agent.models.contains_key(&active) {
-            agent.refresh_models();
-        }
-    }
-    let kind = agent.config.active;
-    {
-        let models = agent.models.get(&kind).cloned().unwrap_or_default();
-        let mut refresh = false;
-        let mut model = agent.config.provider().effective_model();
-        let status = agent.models_status.clone();
-        theme::setting_row(ui, "Model", &status, |ui| {
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("model").selected_text(clip(&model, 32)).width(220.0).height(360.0).show_ui(ui, |ui| {
-                    if models.is_empty() {
-                        ui.label(RichText::new("Click refresh to load the list").color(theme::WEAK));
-                    }
-                    for m in &models {
-                        ui.selectable_value(&mut model, m.clone(), m);
-                    }
-                });
-                if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, "Load the provider's model list").clicked() {
-                    refresh = true;
+    theme::setting_group(ui, "Connection", |ui| {
+        let mut active = agent.config.active;
+        theme::setting_row(ui, "Provider", "A cloud API, or a local server that speaks the OpenAI protocol", |ui| {
+            egui::ComboBox::from_id_salt("provider").selected_text(active.label()).width(WIDE).show_ui(ui, |ui| {
+                for k in ProviderKind::ALL {
+                    ui.selectable_value(&mut active, k, k.label());
                 }
             });
         });
-        if model != agent.config.provider().effective_model() {
-            agent.config.provider_mut().model = model;
+        if active != agent.config.active {
+            agent.config.active = active;
+            agent.test_status = None;
             changed = true;
+            if !agent.models.contains_key(&active) {
+                agent.refresh_models();
+            }
         }
+        {
+            let p = agent.config.provider_mut();
+            // A local server has no address anyone can assume, so it's asked for here, not under Advanced.
+            if !p.kind.needs_key() {
+                theme::setting_row(ui, "Endpoint", "Base URL of the server", |ui| {
+                    changed |= ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(WIDE).min_size(vec2(WIDE, 30.0)).vertical_align(Align::Center)).lost_focus();
+                });
+            }
+            // A custom endpoint may be a cloud vendor that isn't listed, so it can take a key too.
+            if p.kind.needs_key() || p.kind == ProviderKind::Custom {
+                let from_env = p.key_from_env();
+                let hint = if p.kind.needs_key() { p.kind.env_var() } else { "Only if the server needs one" };
+                let about = if from_env {
+                    "Read from the environment".to_string()
+                } else if p.api_key.is_empty() && p.kind.needs_key() {
+                    format!("Paste it here, or set {}", p.kind.env_var())
+                } else {
+                    "Stored in agent.json on this computer".to_string()
+                };
+                theme::setting_row(ui, "API key", &about, |ui| {
+                    if from_env {
+                        ui.label(RichText::new(p.kind.env_var()).color(theme::SUCCESS));
+                    } else {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.api_key).password(true).hint_text(hint).desired_width(WIDE).min_size(vec2(WIDE, 30.0)).vertical_align(Align::Center)).lost_focus();
+                    }
+                });
+            }
+        }
+        let mut test = false;
+        theme::setting_row(ui, "Check it works", "Sends one small request with this key and model", |ui| {
+            test = ui.button("Test connection").clicked();
+        });
+        if test {
+            agent.test_connection();
+        }
+        match &agent.test_status {
+            Some(Ok(t)) => theme::setting_note(ui, t, theme::SUCCESS),
+            Some(Err(e)) => theme::setting_note(ui, e, theme::DANGER),
+            None => {}
+        }
+    });
+
+    theme::setting_group(ui, "Model", |ui| {
+        let kind = agent.config.active;
+        let models = agent.models.get(&kind).cloned().unwrap_or_default();
+        let status = agent.models_status.clone();
         let p = agent.config.provider_mut();
-        theme::setting_row(ui, "Custom model id", "Use any id the provider accepts", |ui| {
-            changed |= ui.add(egui::TextEdit::singleline(&mut p.model).hint_text(p.kind.default_model()).desired_width(240.0)).lost_focus();
+        let about = if status.is_empty() { "Type any id the provider accepts, or pick one from its list".to_string() } else { status };
+        theme::setting_row(ui, "Model", &about, |ui| {
+            // Right to left: the buttons first, so together they take the width every other control does.
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, "Load the provider's model list").clicked() {
+                refresh = true;
+            }
+            ui.menu_button(icon::CARET_DOWN, |ui| {
+                ui.set_min_width(260.0);
+                if models.is_empty() {
+                    ui.label(RichText::new("Nothing loaded yet: use the refresh button").color(theme::WEAK));
+                }
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for m in &models {
+                        if ui.selectable_label(p.effective_model() == *m, m).clicked() {
+                            p.model = m.clone();
+                            changed = true;
+                            ui.close();
+                        }
+                    }
+                });
+            })
+            .response
+            .on_hover_text("Choose from the provider's list");
+            changed |= ui.add(egui::TextEdit::singleline(&mut p.model).hint_text(p.kind.default_model()).desired_width(WIDE - 72.0).min_size(vec2(WIDE - 72.0, 30.0)).vertical_align(Align::Center)).lost_focus();
         });
         if may_train_on_input(&p.effective_model()) {
-            ui.add(egui::Label::new(RichText::new("Contributor tier: the vendor may train its models on what you send, including photos and scene data.").color(theme::WARNING)).wrap());
+            theme::setting_note(ui, "Contributor tier: the vendor may train its models on what you send, including photos and scene data.", theme::WARNING);
         }
-        if refresh {
-            agent.refresh_models();
-        }
+        let cfg = &mut agent.config;
+        theme::setting_row(ui, "Effort", "How hard the model thinks. Anthropic and Muse only", |ui| {
+            egui::ComboBox::from_id_salt("effort").selected_text(cfg.effort.clone()).width(WIDE).show_ui(ui, |ui| {
+                for e in ["low", "medium", "high", "xhigh", "max"] {
+                    changed |= ui.selectable_value(&mut cfg.effort, e.to_string(), e).changed();
+                }
+            });
+        });
         if !agent.usage.is_empty() {
             let by_model = agent.usage_by_model();
             theme::setting_row(ui, "Used in this chat", "Tokens by model", |ui| {
                 ui.label(RichText::new(by_model).small().color(theme::WEAK));
             });
         }
+    });
+    if refresh {
+        agent.refresh_models();
     }
-    {
-        let p = agent.config.provider_mut();
-        theme::setting_row(ui, "Endpoint", "Base URL of the API", |ui| {
-            changed |= ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(240.0)).lost_focus();
+
+    theme::setting_group(ui, "Limits for one request", |ui| {
+        let cfg = &mut agent.config;
+        theme::setting_row(ui, "Steps", "Model calls before it stops", |ui| {
+            changed |= ui.add(egui::DragValue::new(&mut cfg.max_steps).range(5..=300)).lost_focus();
         });
-        // A custom endpoint may be a cloud vendor that isn't listed, so it can take a key too.
-        if p.kind.needs_key() || p.kind == ProviderKind::Custom {
-            let from_env = p.key_from_env();
-            let hint = if p.kind.needs_key() { p.kind.env_var() } else { "Only if the server needs one" };
-            theme::setting_row(ui, "API key", if from_env { "Read from the environment" } else { "Stored in agent.json" }, |ui| {
-                if from_env {
-                    ui.label(RichText::new(p.kind.env_var()).color(theme::SUCCESS));
-                } else {
-                    changed |= ui
-                        .add(egui::TextEdit::singleline(&mut p.api_key).password(true).hint_text(hint).desired_width(240.0))
-                        .lost_focus();
+        theme::setting_row(ui, "Tokens", "Charged tokens before it stops and asks. 0 for no limit", |ui| {
+            let grouped = |v: f64, _: std::ops::RangeInclusive<usize>| {
+                let digits = (v as u64).to_string();
+                let mut out = String::new();
+                for (i, c) in digits.chars().enumerate() {
+                    if i > 0 && (digits.len() - i) % 3 == 0 {
+                        out.push(',');
+                    }
+                    out.push(c);
                 }
-            });
-        }
-        if p.kind == ProviderKind::Anthropic {
-            theme::setting_row(ui, "Refusal fallback", "Let the API retry a declined request on another model", |ui| {
-                changed |= theme::toggle_switch(ui, &mut p.anthropic_fallbacks).changed();
-            });
-        }
-    }
+                out
+            };
+            let drag = egui::DragValue::new(&mut cfg.budget_tokens).speed(10_000.0).range(0..=100_000_000).custom_formatter(grouped).custom_parser(|t| t.replace(',', "").trim().parse().ok());
+            changed |= ui.add(drag).lost_focus();
+        });
+    });
+
     agent.measure_storage();
     let (agent_storage, confirm_clear) = (agent.storage, agent.confirm_clear);
     let (mut clear_pressed, mut clear_confirmed, mut clear_cancelled) = (false, false, false);
-    {
+    theme::setting_group(ui, "Permissions and privacy", |ui| {
         let cfg = &mut agent.config;
-        theme::setting_row(ui, "Effort", "How hard the model thinks (Anthropic, Muse)", |ui| {
-            egui::ComboBox::from_id_salt("effort").selected_text(cfg.effort.clone()).show_ui(ui, |ui| {
-                for e in ["low", "medium", "high", "xhigh", "max"] {
-                    changed |= ui.selectable_value(&mut cfg.effort, e.to_string(), e).changed();
-                }
-            });
-        });
-        theme::setting_row(ui, "Max steps", "Model calls per request before it stops", |ui| {
-            changed |= ui.add(egui::DragValue::new(&mut cfg.max_steps).range(5..=300)).lost_focus();
-        });
-        theme::setting_row(ui, "Token budget", "Per request, charged tokens before it stops and asks. 0 for no limit", |ui| {
-            changed |= ui.add(egui::DragValue::new(&mut cfg.budget_tokens).speed(10_000.0).range(0..=100_000_000)).lost_focus();
-        });
-        theme::setting_row(ui, "Saved chats", "Chats and the assistant's working files, on this computer", |ui| {
-            match agent_storage {
-                Some((bytes, chats)) if !confirm_clear => {
-                    ui.label(RichText::new(format!("{chats} chats, {:.1} MB", bytes as f64 / 1e6)).color(theme::WEAK));
-                    clear_pressed = ui.button("Clear").clicked();
-                }
-                Some((_, chats)) => {
-                    ui.label(RichText::new(format!("Delete {chats} chats and their files?")).color(theme::WARNING));
-                    clear_confirmed = ui.button("Delete").clicked();
-                    clear_cancelled = ui.button("Keep").clicked();
-                }
-                None => {
-                    ui.label(RichText::new("measuring…").color(theme::WEAK));
-                }
-            }
-        });
-        theme::setting_row(ui, "Share what's on screen", "Workspace, open card, selection and recent actions go with each message", |ui| {
-            changed |= theme::toggle_switch(ui, &mut cfg.share_screen).changed();
-        });
         theme::setting_row(ui, "Approvals", "What the assistant may do without asking", |ui| {
-            egui::ComboBox::from_id_salt("approval").selected_text(cfg.approval.label()).width(280.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("approval").selected_text(cfg.approval.label()).width(WIDE).show_ui(ui, |ui| {
                 for m in super::gate::Mode::ALL {
                     changed |= ui.selectable_value(&mut cfg.approval, m, m.label()).changed();
                 }
             });
         });
-    }
+        theme::setting_row(ui, "Share what's on screen", "Workspace, open card, selection and recent actions go with each message", |ui| {
+            changed |= theme::toggle_switch(ui, &mut cfg.share_screen).changed();
+        });
+        theme::setting_row(ui, "Saved chats", "Chats and the assistant's working files, on this computer", |ui| match agent_storage {
+            Some((bytes, chats)) if !confirm_clear => {
+                clear_pressed = ui.button("Clear").clicked();
+                ui.label(RichText::new(format!("{chats} chats, {:.1} MB", bytes as f64 / 1e6)).color(theme::WEAK));
+            }
+            Some((_, chats)) => {
+                clear_cancelled = ui.button("Keep").clicked();
+                clear_confirmed = ui.button("Delete").clicked();
+                ui.label(RichText::new(format!("Delete {chats} chats and their files?")).color(theme::WARNING));
+            }
+            None => {
+                ui.label(RichText::new("measuring…").color(theme::WEAK));
+            }
+        });
+    });
     if clear_pressed {
         agent.confirm_clear = true;
     }
@@ -874,72 +912,30 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
     if clear_confirmed {
         agent.clear_saved_chats();
     }
-    ui.horizontal(|ui| {
-        if theme::primary_button(ui, "Test connection").clicked() {
-            agent.test_connection();
-        }
-        match &agent.test_status {
-            Some(Ok(t)) => {
-                ui.add(egui::Label::new(RichText::new(t).color(theme::SUCCESS)).wrap());
-            }
-            Some(Err(e)) => {
-                ui.add(egui::Label::new(RichText::new(e).color(theme::DANGER)).wrap());
-            }
-            None => {}
-        }
-    });
 
-    theme::divider(ui);
-    theme::caption(ui, "Photo measurement");
-    {
-        let cfg = &mut agent.config;
-        theme::setting_row(ui, "Photo field of view", "Used when the photo has no EXIF focal length", |ui| {
-            changed |= ui.add(egui::Slider::new(&mut cfg.photo_hfov_deg, 30.0..=120.0).suffix("°")).drag_stopped();
-        });
-    }
-    if let Some((label, done, total)) = super::vision::runtime::progress().snapshot() {
-        let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
-        ui.add(egui::ProgressBar::new(frac).text(format!("{label}  {:.0} / {:.0} MB", done as f64 / 1e6, total as f64 / 1e6)));
-    }
-
-    theme::divider(ui);
-    theme::caption(ui, "Assets");
-    let known = library.entries.iter().filter(|e| e.usd.as_ref().is_some_and(|u| catalog.get(u).is_some())).count();
-    let local = library.entries.iter().filter(|e| e.usd.is_some()).count();
-    theme::setting_row(ui, "Asset sizes", &format!("{known} of {local} local assets measured"), |ui| {
-        if catalog.indexing > 0 {
-            ui.spinner();
-            ui.label(format!("{} left", catalog.indexing));
-        } else if known < local && ui.button("Measure all").clicked() {
-            catalog.index_all(library);
-        }
-    });
-
-    theme::divider(ui);
-    theme::caption(ui, "Knowledge base");
-    {
+    theme::setting_group(ui, "Knowledge base", |ui| {
         let ix = super::knowledge::index();
         let summary: Vec<String> = ix.domains().into_iter().map(|(d, docs, _)| format!("{d} {docs}")).collect();
-        ui.add(egui::Label::new(RichText::new(format!("{} documents, {} passages: {}", ix.docs.len(), ix.chunk_count(), summary.join(", "))).color(theme::WEAK)).wrap());
         let cfg = &mut agent.config;
         theme::setting_row(ui, "Attach automatically", "Add clearly relevant passages to your messages", |ui| {
             changed |= theme::toggle_switch(ui, &mut cfg.knowledge_auto).changed();
         });
-        let skipped = super::knowledge::skipped();
-        if !skipped.is_empty() {
-            let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
-            ui.add(egui::Label::new(RichText::new(format!("Skipped {} of your files", skipped.len())).color(theme::WARNING)).wrap()).on_hover_text(lines.join("\n"));
-        }
-        ui.horizontal(|ui| {
+        theme::setting_row(ui, "Documents", &format!("{} documents, {} passages: {}", ix.docs.len(), ix.chunk_count(), summary.join(", ")), |ui| {
+            if ui.button(theme::label(icon::ARROWS_CLOCKWISE, "Reload")).clicked() {
+                super::knowledge::reload();
+            }
             let dir = super::knowledge::user_dir();
-            if ui.button(theme::label(icon::ARROW_SQUARE_OUT, "Add your documents")).on_hover_text(format!("{}\n.md or .txt, one sub-folder per topic", dir.display())).clicked() {
+            if ui.button(theme::label(icon::ARROW_SQUARE_OUT, "Add yours")).on_hover_text(format!("{}\n.md or .txt, one sub-folder per topic", dir.display())).clicked() {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = std::process::Command::new("explorer").arg(&dir).spawn();
             }
-            if ui.button(theme::label(icon::ARROWS_CLOCKWISE, "Reload documents")).clicked() {
-                super::knowledge::reload();
-            }
         });
+        let skipped = super::knowledge::skipped();
+        if !skipped.is_empty() {
+            let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
+            ui.add(egui::Label::new(RichText::new(format!("Skipped {} of your files", skipped.len())).small().color(theme::WARNING)).wrap()).on_hover_text(lines.join("\n"));
+            ui.add_space(8.0);
+        }
         let id = ui.make_persistent_id("knowledge_try");
         let mut query = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
         if ui.add(egui::TextEdit::singleline(&mut query).hint_text("Try a search, e.g. concrete wall attenuation").desired_width(f32::INFINITY)).changed() {
@@ -949,30 +945,70 @@ pub fn settings_ui(ui: &mut egui::Ui, agent: &mut Agent, library: &mut Library, 
             let (d, c) = ix.chunk(&h);
             ui.add(egui::Label::new(RichText::new(format!("{} ({}, {:.0}% of the query)", c.heading, d.domain, h.coverage * 100.0)).small()).wrap()).on_hover_text(&c.text);
         }
-    }
+        ui.add_space(10.0);
+    });
 
-    theme::divider(ui);
-    theme::caption(ui, "MCP");
-    ui.label(RichText::new(&agent.mcp_server_status).color(theme::WEAK));
-    let status = agent.mcp.status.lock().unwrap().clone();
-    if status.is_empty() {
-        ui.label(RichText::new("No external MCP servers. Add \"mcp_servers\" to agent.json.").color(theme::WEAK));
-    }
-    for (name, s) in status {
-        ui.label(format!("{name}: {s}"));
-    }
-    ui.horizontal(|ui| {
-        if ui.button(theme::label(icon::ARROW_SQUARE_OUT, "Open agent.json")).on_hover_text(AgentConfig::path().display().to_string()).clicked() {
-            let p = AgentConfig::path();
-            if !p.exists() {
-                let _ = agent.config.save();
+    theme::setting_group(ui, "Photos and assets", |ui| {
+        let cfg = &mut agent.config;
+        theme::setting_row(ui, "Photo field of view", "Used when a photo has no EXIF focal length", |ui| {
+            changed |= ui.add(egui::Slider::new(&mut cfg.photo_hfov_deg, 30.0..=120.0).suffix("°")).drag_stopped();
+        });
+        if let Some((label, done, total)) = super::vision::runtime::progress().snapshot() {
+            let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+            ui.add(egui::ProgressBar::new(frac).text(format!("{label}  {:.0} / {:.0} MB", done as f64 / 1e6, total as f64 / 1e6)));
+            ui.add_space(8.0);
+        }
+        let known = library.entries.iter().filter(|e| e.usd.as_ref().is_some_and(|u| catalog.get(u).is_some())).count();
+        let local = library.entries.iter().filter(|e| e.usd.is_some()).count();
+        theme::setting_row(ui, "Asset sizes", &format!("{known} of {local} local assets measured"), |ui| {
+            if catalog.indexing > 0 {
+                ui.label(format!("{} left", catalog.indexing));
+                ui.spinner();
+            } else if known < local && ui.button("Measure all").clicked() {
+                catalog.index_all(library);
             }
-            let _ = std::process::Command::new("explorer").arg(&p).spawn();
-        }
-        if ui.button(theme::label(icon::ARROWS_CLOCKWISE, "Reload & reconnect")).clicked() {
-            agent.config = AgentConfig::load();
-            agent.mcp.connect_all(&agent.config.mcp_servers);
-        }
+        });
+    });
+
+    // What's rarely touched, and would only get in the way of the rest.
+    egui::CollapsingHeader::new(RichText::new("ADVANCED").font(theme::bold(11.5)).color(theme::WEAK)).id_salt("assistant_advanced").show_unindented(ui, |ui| {
+        ui.add_space(4.0);
+        theme::setting_group(ui, "Provider", |ui| {
+            let p = agent.config.provider_mut();
+            if p.kind.needs_key() {
+                theme::setting_row(ui, "Endpoint", "Base URL of the API", |ui| {
+                    changed |= ui.add(egui::TextEdit::singleline(&mut p.base_url).desired_width(WIDE).min_size(vec2(WIDE, 30.0)).vertical_align(Align::Center)).lost_focus();
+                });
+            }
+            if p.kind == ProviderKind::Anthropic {
+                theme::setting_row(ui, "Refusal fallback", "Let the API retry a declined request on another model", |ui| {
+                    changed |= theme::toggle_switch(ui, &mut p.anthropic_fallbacks).changed();
+                });
+            }
+        });
+        theme::setting_group(ui, "MCP", |ui| {
+            let mut about = agent.mcp_server_status.clone();
+            let status = agent.mcp.status.lock().unwrap().clone();
+            if status.is_empty() {
+                about.push_str(". No external servers: add \"mcp_servers\" to agent.json.");
+            }
+            for (name, s) in status {
+                about.push_str(&format!("\n{name}: {s}"));
+            }
+            theme::setting_row(ui, "Servers", &about, |ui| {
+                if ui.button(theme::label(icon::ARROWS_CLOCKWISE, "Reconnect")).on_hover_text("Reads agent.json again and reconnects").clicked() {
+                    agent.config = AgentConfig::load();
+                    agent.mcp.connect_all(&agent.config.mcp_servers);
+                }
+                if ui.button(theme::label(icon::ARROW_SQUARE_OUT, "agent.json")).on_hover_text(AgentConfig::path().display().to_string()).clicked() {
+                    let p = AgentConfig::path();
+                    if !p.exists() {
+                        let _ = agent.config.save();
+                    }
+                    let _ = std::process::Command::new("explorer").arg(&p).spawn();
+                }
+            });
+        });
     });
 
     if changed {

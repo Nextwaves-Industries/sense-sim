@@ -1,7 +1,7 @@
 //! Assistant settings (`agent.json`): LLM providers, depth server, MCP.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -247,8 +247,8 @@ impl AgentConfig {
                 return p;
             }
         }
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        Path::new(&base).join("SenseSim").join("agent.json")
+        let base = crate::app_paths::config_base_or_current();
+        base.join("SenseSim").join("agent.json")
     }
 
     pub fn load() -> Self {

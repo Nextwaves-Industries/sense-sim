@@ -51,8 +51,8 @@ pub fn def() -> ToolDef {
 }
 
 fn root() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    Path::new(&base).join("SenseSim").join("python")
+    let base = crate::app_paths::data_base();
+    base.join("SenseSim").join("python")
 }
 
 fn python_exe(root: &Path) -> PathBuf {

@@ -101,8 +101,8 @@ pub struct PracticeWalks {
 
 impl PracticeWalks {
     fn path() -> std::path::PathBuf {
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(base).join("SenseSim").join("practice_walks.json")
+        let base = crate::app_paths::config_base_or_current();
+        base.join("SenseSim").join("practice_walks.json")
     }
 
     pub fn load() -> Self {

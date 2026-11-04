@@ -40,8 +40,8 @@ pub struct AntennaLibrary(pub Vec<FdtdAntenna>);
 
 impl AntennaLibrary {
     pub fn dir() -> PathBuf {
-        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(base).join("SenseSim").join("antennas")
+        let base = crate::app_paths::data_base();
+        base.join("SenseSim").join("antennas")
     }
 
     pub fn load() -> Self {

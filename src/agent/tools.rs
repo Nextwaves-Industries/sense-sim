@@ -838,8 +838,8 @@ pub fn thumbnail_png(usd: Option<&Path>, folder: &str) -> Option<Vec<u8>> {
         candidates.push(dir.join(".thumbs/256x256").join(format!("{file}.png")));
         candidates.push(dir.join(".thumbs").join(format!("{stem}_thumbnail.png")));
     }
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    candidates.push(Path::new(&base).join("SenseSim").join("thumbs").join(format!("{folder}.png")));
+    let base = crate::app_paths::data_base();
+    candidates.push(base.join("SenseSim").join("thumbs").join(format!("{folder}.png")));
     let path = candidates.into_iter().find(|p| p.exists())?;
     let img = image::open(path).ok()?.thumbnail(256, 256);
     encode_png(&img)

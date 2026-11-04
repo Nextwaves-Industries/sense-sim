@@ -125,6 +125,8 @@ impl Selection {
 /// A dimension being typed, right on the canvas.
 #[derive(Clone, Debug)]
 pub struct DimEdit {
+    /// Left with a name no variable has: it takes effect once the dialog has dealt with that.
+    pub waiting: bool,
     pub index: usize,
     pub text: String,
     pub at: Pos2,
@@ -1062,7 +1064,7 @@ fn make_dimension(st: &mut Studio, a: SkPick, b: Option<SkPick>, label_at: Pos2)
     let text = new.value().unwrap_or("").to_string();
     with_sketch(st, |s, _| s.constraints.push(new));
     let count = st.project.model.sketch(id).map_or(0, |s| s.constraints.len());
-    st.ui.m3.dim_edit = Some(DimEdit { index: count - 1, text, at: label_at, fresh: true });
+    st.ui.m3.dim_edit = Some(DimEdit { waiting: false, index: count - 1, text, at: label_at, fresh: true });
     st.ui.m3.picks.clear();
 }
 
@@ -2330,7 +2332,7 @@ fn sketch_canvas(ui: &mut egui::Ui, st: &mut Studio, id: u32, painter: &egui::Pa
         && !alt
     {
         let text = s.constraints.get(index).and_then(|c| c.value()).unwrap_or("").to_string();
-        st.ui.m3.dim_edit = Some(DimEdit { index, text, at, fresh: true });
+        st.ui.m3.dim_edit = Some(DimEdit { waiting: false, index, text, at, fresh: true });
     } else if drawing && !alt {
         if let Some(p) = pick {
             sketch_input(st, &s, &solved, resp, p, tool, pointer, id, vars, pj, &frame);
@@ -2470,7 +2472,10 @@ fn sketch_canvas(ui: &mut egui::Ui, st: &mut Studio, id: u32, painter: &egui::Pa
         });
         if cancel {
             // Left as it was.
-        } else if done {
+        } else if (done || edit.waiting) && super::params::asking(ui.ctx(), st) {
+            edit.waiting = true;
+            st.ui.m3.dim_edit = Some(edit);
+        } else if done || edit.waiting {
             let (index, text) = (edit.index, edit.text.clone());
             let degrees = matches!(s.constraints.get(index), Some(Constraint::Angle { .. }));
             let written = normalised(&text, degrees);

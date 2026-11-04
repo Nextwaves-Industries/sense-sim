@@ -23,8 +23,8 @@ pub struct Catalog {
 }
 
 fn index_path() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    Path::new(&base).join("SenseSim").join("asset_dims.json")
+    let base = crate::app_paths::data_base();
+    base.join("SenseSim").join("asset_dims.json")
 }
 
 impl Default for Catalog {

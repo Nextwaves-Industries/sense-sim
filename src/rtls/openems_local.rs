@@ -53,8 +53,8 @@ impl Default for LocalEms {
 }
 
 pub fn base_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("SenseSim").join("openems")
+    let base = crate::app_paths::data_base();
+    base.join("SenseSim").join("openems")
 }
 
 impl LocalEms {

@@ -104,8 +104,8 @@ pub struct RtlsConfig {
 
 impl RtlsConfig {
     pub fn path() -> PathBuf {
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(base).join("SenseSim").join("rtls.json")
+        let base = crate::app_paths::config_base_or_current();
+        base.join("SenseSim").join("rtls.json")
     }
 
     pub fn load() -> Self {
