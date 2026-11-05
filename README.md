@@ -2,7 +2,7 @@
 
 **Design antennas with AI.** Describe what you need, then edit the antenna, run a full-wave simulation, and inspect the results in one desktop app.
 
-Open source by [Nextwaves](https://nextwaves.com/en) · [Download for Windows or macOS](https://github.com/Nextwaves-Industries/sense-sim/releases) · [MIT License](LICENSE)
+Open source by [Nextwaves](https://nextwaves.com/en) · [Download for Windows](https://github.com/Nextwaves-Industries/sense-sim/releases) · [MIT License](LICENSE)
 
 Sense Sim is participating in the [Meta Global AI Developer Hackathon](https://dev.meta.ai/events/global-hackathon).
 
